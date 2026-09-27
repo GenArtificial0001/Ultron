@@ -1,0 +1,20 @@
+# SOLO DESARROLLO -- no se sincroniza a prod. Uso: pytest --cov
+[run]
+source = app
+branch = True
+omit =
+    */__pycache__/*
+
+[report]
+# Piso anti-regresion (medido 2026-09-24 con 0.17.8: 62.4%, sin e2e). Subirlo al mejorar; nunca bajarlo.
+fail_under = 62
+show_missing = True
+skip_empty = True
+precision = 1
+exclude_also =
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    raise NotImplementedError
+
+[html]
+directory = ../.coverage-html

@@ -1,0 +1,38 @@
+# Credenciales y datos locales: NUNCA se versionan (spec vision-generico REQ-007)
+.env
+.env.enc
+backend/.env
+backend/.env.enc
+keys/
+backend/keys/
+*.pem
+*.p12
+*.pfx
+*.har
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+backend/logs/
+backend/data/
+backend/workspace/*
+!backend/workspace/.gitkeep
+backend/browser/*
+!backend/browser/.gitkeep
+
+# Entornos, caches y builds
+.venv/
+backend/.venv/
+backend/.venv-build/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.exe
+*.spec
+
+# Carpeta de DATOS de sesion de un proyecto (NO el codigo backend/app/session/)
+/session/

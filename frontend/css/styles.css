@@ -1,0 +1,3760 @@
+/* =========================================================================
+   VISION — GT Performance AI
+   Sistema de diseño con acento rojo intenso sobre fondos negros,
+   acabado cromado en líneas finas, un solo acento intenso reservado para
+   estado/acción. Ver skill "desing-ultra-premium" (tokens §2, KPI §4,
+   checklist §10) para el criterio detrás de estas decisiones.
+   ========================================================================= */
+
+:root {
+  /* Identidad del tema rojo — un acento (rojo intenso) + variante hover + fondo suave */
+  --accent: #D5001C;          /* rojo intenso */
+  --accent-2: #FF1F3D;        /* hover / brillo */
+  --accent-soft: #3A0A10;     /* fondo de selección sobre superficies oscuras */
+  --chrome: #8A93A0;          /* acabado cromado de líneas/bordes finos */
+  /* Color de RELLENO SOLIDO para botones grandes con texto/icono blanco
+     encima (hoy solo .voice-record-btn-circle) -- se agrega este token
+     separado de --accent en el tema "Oscuro Azul" (pedido explicito
+     del usuario, 2026-09-08), donde --accent en si pasa a ser un azul MAS
+     CLARO que #0000FF (para tener buen contraste como texto/borde sobre
+     fondo oscuro), pero el usuario especificamente pidio un azul MAS
+     OSCURO (#1c396d) para el relleno solido de este boton puntual, con
+     letras blancas encima (11.32:1 de contraste, verificado). En los
+     otros 2 temas (rojo y azul claro) --accent-solid no se
+     redefine -- el `var(--accent-solid, var(--accent))` de
+     .voice-record-btn-circle cae al fallback (--accent normal), sin
+     cambiar nada del comportamiento ya existente en esos temas. */
+
+  --canvas: #0B0C0E;          /* negro — fondo general */
+  --surface: #16181C;         /* tarjetas, mensajes, superficies de trabajo */
+  --surface-2: #1E2126;       /* encabezados, superficies secundarias */
+  --surface-3: #24272D;       /* hover de fila / superficie elevada */
+  --ink: #F2F3F5;             /* texto principal — nunca blanco puro */
+  --ink-soft: #9AA3AE;        /* texto secundario */
+  --ink-faint: #666D78;       /* texto terciario / placeholders */
+  --line: #2A2E35;            /* bordes finos */
+  --line-strong: #383D46;     /* bordes marcados, inputs */
+
+  /* Semántica de estado — semáforo real, nunca decorativo. NUNCA cambian
+     entre temas (pedido explícito del usuario): rojo/ámbar/verde siguen
+     significando error/atención/éxito sin importar el tema visual activo. */
+  --signal-red: #FF4D5E;
+  --signal-amber: #E8A93B;
+  --signal-green: #3DDC84;
+  --signal-red-bg: #3A1418;
+  --signal-amber-bg: #3A2C0F;
+  --signal-green-bg: #123A26;
+
+  /* Tokens dependientes de tema que antes eran colores sueltos hardcoded
+     (spec tema-claro-azul): permiten que TODO el sistema conmute entre
+     modo oscuro (rojo intenso, valores de arriba) y modo claro (azul) sin
+     tener que tocar cada regla puntual -- ver bloque [data-theme="light"]
+     mas abajo, que sobreescribe estos mismos nombres. */
+  --sidebar-grad-1: #0E0F12;
+  --sidebar-grad-2: #08090A;
+  --scrim-bg: rgba(0, 0, 0, .6);          /* overlay movil -- oscuro en ambos temas, funciona sobre cualquier fondo */
+  --modal-overlay-bg: rgba(4, 4, 5, .72); /* fondo detras de dashboard/settings/explorer */
+  --pending-image-remove-bg: rgba(0, 0, 0, .65);
+
+  /* .msg.assistant: estilo "terminal" con glow del acento -- en modo claro
+     el glow desaparece (un glow de texto no se lee bien sobre fondo claro)
+     y el fondo/texto pasan a la paleta clara en vez de negro casi puro. */
+  --assistant-bg: #0A0B0D;
+  --assistant-glow-bg: rgba(213, 0, 28, .07);
+  --assistant-ink: #F2C9CE;
+  --assistant-glow-shadow: rgba(213, 0, 28, .22);
+
+  /* Code inline (`` `codigo` ``): fondo/borde tintados con el acento. El
+     bloque de codigo multi-linea (.md-codeblock) NO usa estos tokens --
+     se mantiene con fondo oscuro fijo en ambos temas (look "terminal",
+     decision de diseno: un bloque de codigo oscuro sobre pagina clara es
+     un patron comun y sin problema de contraste, ya que su texto siempre
+     es claro sobre ese mismo fondo oscuro). */
+  --code-inline-bg: rgba(213, 0, 28, .12);
+  --code-inline-border: rgba(213, 0, 28, .25);
+  --code-inline-ink: #FFD7DB;
+
+  /* Segundo extremo del gradiente de .msg.user (el otro extremo es
+     --accent-soft) -- antes era un rojo-negro fijo (#240509), que en modo
+     claro chocaria contra --accent-soft (azul palido) formando un
+     gradiente incoherente. En oscuro sigue siendo ese mismo rojo-negro. */
+  --msg-user-grad-2: #240509;
+  /* Tinte muy sutil del acento (antes rgba(213,0,28,.05) fijo, siempre
+     rojo) -- usado en fondos tenues como .md-quote. */
+  --accent-glow-05: rgba(213, 0, 28, .05);
+  /* Subrayado semitransparente de links dentro de .msg.assistant (antes
+     rgba(255,31,61,.4) fijo, atado a --accent-2 oscuro). */
+  --accent-2-underline: rgba(255, 31, 61, .4);
+  /* Glow del acento para pulsos de botones "escuchando/grabando" (antes
+     rgba(213,0,28,.4/.5) fijo, siempre rojo -- ver .voice-mic-btn/
+     .voice-record-btn) -- pedido explicito del usuario: al cambiar a
+     tema Claro Azul, este pulso debe ser azul, no rojo. */
+  --accent-glow-pulse: rgba(213, 0, 28, .45);
+  /* Panel de "hilo de procesamiento" del Modo reunion (ver .processing-feed
+     mas abajo) -- borde/glow tintados del acento, pedido explicito del
+     usuario: rojo en oscuro, azul azul en claro (ver
+     redefinicion en [data-theme="light"]). */
+  --processing-feed-border: rgba(213, 0, 28, .45);
+  --processing-feed-glow: rgba(213, 0, 28, .5);
+  --processing-feed-glow-soft: rgba(213, 0, 28, .35);
+  --processing-feed-idle: rgba(213, 0, 28, .55);
+
+  --radius-sm: 8px; --radius: 12px; --radius-lg: 16px;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.3), 0 4px 14px rgba(0,0,0,.28);
+  --shadow-md: 0 10px 26px rgba(0,0,0,.4);
+  --shadow-lg: 0 22px 60px rgba(0,0,0,.55);
+
+  --font-display: "Segoe UI", "Manrope", system-ui, sans-serif;
+  --font-mono: "Cascadia Code", "IBM Plex Mono", Consolas, monospace;
+
+  --sidebar-w: 300px;
+  --sidebar-w-collapsed: 0px;
+}
+
+/* =========================================================================
+   Tema claro "azul" (spec tema-claro-azul, pedido explicito del
+   usuario): acento azul #0000FF reemplazando a rojo intenso, fondos blancos
+   reemplazando a negro, texto oscuro/negro reemplazando al texto
+   claro -- selector via `document.documentElement.dataset.theme` (ver
+   applyTheme() en app.js), persistido en localStorage.
+   NO cambian: --signal-*  (semaforo rojo/ambar/verde, semantica de estado
+   real) y por lo tanto el chip de modo Plan/Activo (.mode-chip) y el
+   boton Enviar/Detener en su estado "active", que se pintan con
+   --signal-red/-green/-amber, no con --accent -- quedan intactos tal
+   como se pidio explicitamente ("el boton modo activo y Plan queda
+   exactamente igual").
+   ========================================================================= */
+[data-theme="light"] {
+  --accent: #0000FF;           /* azul (pedido explicito del usuario) */
+  --accent-2: #3D3DFF;         /* hover / brillo -- mas claro que el acento base, mismo criterio que accent-2 en oscuro (mas brillante que el acento) */
+  --accent-soft: #E3E3FF;      /* fondo de seleccion sobre superficies CLARAS -- azul muy palido, el texto oscuro sigue contrastando encima */
+  --chrome: #6B7480;           /* acabado cromado, un poco mas oscuro que en modo oscuro para que se note sobre fondo claro */
+
+  --canvas: #FFFFFF;           /* blanco puro: fondo general */
+  --surface: #F4F6FA;          /* tarjetas, mensajes, superficies de trabajo */
+  --surface-2: #E9EDF3;        /* encabezados, superficies secundarias */
+  --surface-3: #DDE3EC;        /* hover de fila / superficie elevada */
+  --ink: #0B0E14;              /* texto principal -- nunca negro puro, mismo criterio que "nunca blanco puro" del tema oscuro */
+  --ink-soft: #454C58;         /* texto secundario */
+  --ink-faint: #757E8C;        /* texto terciario / placeholders */
+  --line: #D7DCE4;             /* bordes finos */
+  --line-strong: #BCC4D0;      /* bordes marcados, inputs */
+
+  --sidebar-grad-1: #FFFFFF;
+  --sidebar-grad-2: #F0F3F8;
+  --scrim-bg: rgba(0, 0, 0, .45);
+  --modal-overlay-bg: rgba(20, 24, 32, .5);
+  --pending-image-remove-bg: rgba(0, 0, 0, .55);
+
+  /* .msg.assistant: sin glow de texto (no se lee sobre fondo claro),
+     fondo apenas diferenciado del canvas, texto oscuro con buen contraste
+     en vez del rosado pensado para fondo casi negro. */
+  --assistant-bg: #F7F9FC;
+  --assistant-glow-bg: rgba(0, 0, 255, .04);
+  --assistant-ink: #10131A;
+  --assistant-glow-shadow: rgba(0, 0, 0, 0);
+
+  --code-inline-bg: rgba(0, 0, 255, .08);
+  --code-inline-border: rgba(0, 0, 255, .28);
+  --code-inline-ink: #0000CC;
+
+  /* Segundo extremo del gradiente de .msg.user en tema claro -- un azul
+     muy palido, apenas mas saturado que --accent-soft, para que el
+     gradiente siga leyendose como un degrade sutil en vez de un salto. */
+  --msg-user-grad-2: #D6D6FF;
+  --accent-glow-05: rgba(0, 0, 255, .05);
+  --accent-2-underline: rgba(61, 61, 255, .45);
+  --accent-glow-pulse: rgba(0, 0, 255, .45);
+  --processing-feed-border: rgba(0, 0, 255, .45);
+  --processing-feed-glow: rgba(0, 0, 255, .5);
+  --processing-feed-glow-soft: rgba(0, 0, 255, .35);
+  --processing-feed-idle: rgba(0, 0, 255, .55);
+
+  --shadow-sm: 0 1px 2px rgba(20,24,32,.08), 0 4px 14px rgba(20,24,32,.06);
+  --shadow-md: 0 10px 26px rgba(20,24,32,.12);
+  --shadow-lg: 0 22px 60px rgba(20,24,32,.18);
+}
+
+/* =========================================================================
+   Tema "Oscuro — Azul" (pedido explicito del usuario, 2026-09-08):
+   MISMOS fondos oscuros (negro) que el tema oscuro original de
+   :root -- unica diferencia real es el acento, que pasa de rojo intenso a un
+   azul de familia azul.
+
+   Contraste verificado con evidencia real (formula WCAG 2.x), no a ojo:
+   el azul PURO #0000FF sobre --surface (#16181C) da apenas 2.07:1 de
+   contraste -- por debajo del minimo de 3.0:1 para elementos de UI
+   (bordes/hover/iconos), se veria apagado/dificil de distinguir sobre
+   fondo oscuro (a diferencia del tema claro, donde #0000FF SI funciona
+   bien: 7.94:1). Por eso --accent en ESTE tema usa un azul mas
+   brillante (#4477dd, 4.17:1 sobre --surface) para todo lo que sea texto/
+   borde -- el 0000FF/azul mas oscuro pedido explicitamente por el
+   usuario se preserva en el token separado --accent-solid (ver :root)
+   para RELLENOS SOLIDOS con texto blanco encima (unico caso real hoy:
+   .voice-record-btn-circle), donde blanco-sobre-#1c396d da 11.32:1 --
+   excelente contraste ahi, sin relacion con el problema de --accent como
+   texto/borde.
+
+   El resto de los valores dependientes del acento (glow, fondo de code
+   inline, segundo extremo del gradiente de .msg.user, etc.) se
+   recalculan con el MISMO criterio de luminosidad/opacidad que sus
+   equivalentes rojos de :root, solo cambiando el matiz a este azul mas
+   brillante -- no son una reinvencion, es una traduccion directa de hue.
+   NO cambian (igual que en el tema claro): --signal-* (semaforo real de
+   estado) y por lo tanto .mode-chip / el boton Enviar-Detener activo.
+   ========================================================================= */
+[data-theme="dark-blue"] {
+  --accent: #4477DD;           /* azul brillante -- 4.17:1 sobre --surface, buen contraste para texto/bordes */
+  --accent-2: #6699FF;         /* hover / brillo -- aun mas claro que --accent, mismo criterio que accent-2 en los otros 2 temas */
+  --accent-solid: #1C396D;     /* azul oscuro pedido explicitamente por el usuario -- SOLO para rellenos solidos con texto/icono BLANCO encima (11.32:1 de contraste ahi) */
+  --accent-soft: #16223F;      /* equivalente azul-oscuro de --accent-soft rojo (#3A0A10) -- mismo criterio: fondo de seleccion oscuro y saturado, tonalidad ligada a --accent-solid */
+  --chrome: #8A93A0;           /* igual que :root -- el cromado no es parte del acento */
+
+  /* Fondos/tinta: identicos a :root (negro) -- este tema NO toca
+     la base oscura, solo el acento. */
+
+  --assistant-bg: #0A0B0D;
+  --assistant-glow-bg: rgba(68, 119, 221, .08);
+  --assistant-ink: #C9D6F2;    /* equivalente azul del rosado --assistant-ink original (#F2C9CE) -- mismo brillo/saturacion, matiz azul */
+  --assistant-glow-shadow: rgba(68, 119, 221, .24);
+
+  --code-inline-bg: rgba(68, 119, 221, .14);
+  --code-inline-border: rgba(68, 119, 221, .3);
+  --code-inline-ink: #C7D9FF;  /* equivalente azul de --code-inline-ink rojo (#FFD7DB), ajustado para contraste sobre --code-inline-bg */
+
+  --msg-user-grad-2: #0B1A33;  /* equivalente azul-negro de --msg-user-grad-2 rojo-negro (#240509), ligado a --accent-solid */
+  --accent-glow-05: rgba(68, 119, 221, .06);
+  --accent-2-underline: rgba(102, 153, 255, .45);
+  --accent-glow-pulse: rgba(68, 119, 221, .5);
+  --processing-feed-border: rgba(68, 119, 221, .5);
+  --processing-feed-glow: rgba(68, 119, 221, .55);
+  --processing-feed-glow-soft: rgba(68, 119, 221, .4);
+  --processing-feed-idle: rgba(68, 119, 221, .55);
+}
+
+/* =========================================================================
+   Scrollbar roja: rojo sobre negro en TODOS los contenedores con
+   scroll de la app (sidebar, mensajes, dropdowns, listas, tablas...), no
+   solo en uno puntual -- se aplica de forma global via `*` en vez de
+   repetir la regla en cada selector con overflow.
+   - Firefox/navegadores modernos: `scrollbar-color`/`scrollbar-width`.
+   - Chrome/Edge/Safari (WebKit): pseudo-elementos `::-webkit-scrollbar-*`.
+   ========================================================================= */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--accent) var(--surface-2);
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: var(--surface-2);
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--accent);
+  border-radius: 999px;
+  border: 2px solid var(--surface-2);
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-2);
+}
+*::-webkit-scrollbar-corner {
+  background: var(--surface-2);
+}
+
+* { box-sizing: border-box; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-display);
+  background: var(--canvas);
+  color: var(--ink);
+  height: 100vh;
+  overflow: hidden;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 1fr var(--sidebar-w);
+  height: 100vh;
+  transition: grid-template-columns 180ms ease;
+}
+
+/* Sidebar a la derecha: el orden visual se controla con `order`, sin
+   reordenar el DOM (mantiene la estructura de tabindex/lectura natural). */
+.sidebar { order: 2; }
+.chat-main { order: 1; }
+
+/* -------------------- Sidebar -------------------- */
+.sidebar {
+  position: relative;
+  background: linear-gradient(180deg, var(--sidebar-grad-1) 0%, var(--sidebar-grad-2) 100%);
+  border-left: 1px solid var(--line);
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  overflow-y: auto;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 100px;
+  position: relative;
+}
+
+/* Logo de Vision: el óvalo tiene ratio 2.67:1, por eso el alto (48/2.67 ≈ 18px)
+   no se declara a mano -- lo resuelve `height: auto` sobre el <img> para no
+   deformarlo. El drop-shadow pasa de rojo rojo intenso a azul (#003478),
+   que es el color real del asset. */
+.brand-mark {
+  width: 36px;
+  filter: drop-shadow(0 0 6px rgba(0, 52, 120, .75));
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+.brand-mark img { width: 100%; height: auto; display: block; }
+
+.brand-text { display: flex; flex-direction: column; line-height: 1.05; }
+
+.brand h1 {
+  font-size: 19px;
+  margin: 0;
+  letter-spacing: 0.12em;
+  font-weight: 800;
+}
+
+.brand-tagline {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.brand-subtitle {
+  font-size: 12px;
+  color: var(--ink-soft);
+  margin: -12px 0 0 0;
+}
+
+.sidebar-close {
+  display: none;
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  color: var(--ink-soft);
+  border-radius: 6px;
+  width: 28px;
+  height: 28px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.panel h2 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-faint);
+  margin: 0 0 8px 0;
+  font-family: var(--font-mono);
+}
+
+.todo-list, .tool-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.todo-list li, .tool-log li {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 13px;
+  animation: slide-in 220ms ease;
+}
+
+@keyframes slide-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.todo-empty, .tool-empty {
+  color: var(--ink-faint);
+  font-style: italic;
+  background: transparent !important;
+  border: none !important;
+  padding: 4px 2px !important;
+}
+
+.todo-status {
+  display: inline-block;
+  font-size: 9px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-right: 6px;
+}
+.todo-status.pending      { background: var(--surface-3); color: var(--ink-soft); }
+.todo-status.in_progress  { background: var(--signal-amber-bg); color: var(--signal-amber); }
+.todo-status.completed    { background: var(--signal-green-bg); color: var(--signal-green); }
+.todo-status.cancelled    { background: var(--signal-red-bg); color: var(--signal-red); }
+
+.todo-list li[data-status="in_progress"] { border-left-color: var(--signal-amber); }
+
+/* Pedido explicito del usuario 2026-09-16: el acordeon "Agentes" del
+   sidebar (#acc-agents / #session-agents-list) debia verse con el MISMO
+   lenguaje visual que el acordeon "Tareas" de arriba -- tarjeta con borde
+   izquierdo de color + pill de estado (.todo-status, mismos 4 colores).
+   Escapado por ID (no por .session-list, que tambien usa el selector de
+   sesiones de arriba) para no afectar esa otra lista. */
+#session-agents-list.session-list { gap: 6px; }
+#session-agents-list li {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  cursor: pointer;
+}
+#session-agents-list li:hover { background: var(--surface-3); }
+#session-agents-list li[data-status="in_progress"] { border-left-color: var(--signal-amber); }
+#session-agents-list li[data-status="paused"]      { border-left-color: var(--signal-red); }
+#session-agents-list li[data-status="completed"]   { border-left-color: var(--signal-green); }
+#session-agents-list .session-agent-row { display: flex; align-items: center; gap: 4px; }
+#session-agents-list .session-agent-row .session-name { flex: 1; white-space: normal; }
+#session-agents-list .session-agent-desc { font-size: 11px; color: var(--ink-faint); }
+#session-agents-list .session-agent-actions { display: flex; gap: 2px; align-self: flex-end; }
+
+/* Sistema de sub-tareas (2 niveles, pedido explicito del usuario) --
+   arbol colapsable: `.todo-parent-wrapper` agrupa la tarea principal +
+   su `.todo-sublist` indentada, mismo patron visual (▶/▼) que la TUI de
+   OpenCode (investigada antes de implementar esto). */
+.todo-parent-wrapper {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.todo-toggle {
+  background: none;
+  border: none;
+  color: var(--ink-soft);
+  font-size: 10px;
+  cursor: pointer;
+  padding: 0 4px 0 0;
+  line-height: 1;
+  font-family: var(--font-mono);
+}
+.todo-toggle:hover { color: var(--accent); }
+.todo-sublist {
+  list-style: none;
+  margin: 0 0 0 22px; /* indentacion visual clara padre -> hijo */
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-left: 2px solid var(--line);
+  padding-left: 10px;
+}
+.todo-sublist.hidden { display: none; }
+.todo-sublist li {
+  font-size: 12px; /* levemente mas chico que la tarea principal -- jerarquia visual */
+}
+.todo-list li[data-status="completed"]   { border-left-color: var(--signal-green); }
+.todo-list li[data-status="cancelled"]   { border-left-color: var(--signal-red); }
+
+.tool-log li {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  border-left-color: var(--accent);
+}
+.tool-log li .tool-name { color: var(--ink); font-weight: 700; }
+
+.sidebar-footer {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.stripe-badge { display: inline-flex; gap: 3px; flex-shrink: 0; }
+.stripe { width: 5px; height: 20px; border-radius: 2px; }
+.stripe-1 { background: var(--accent); }
+.stripe-2 { background: var(--chrome); opacity: .5; }
+
+.footer-label {
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  letter-spacing: .02em;
+}
+
+/* -------------------- Cache meter (localStorage, sutil) -------------------- */
+.cache-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 4px;
+}
+.cache-meter-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.cache-meter-label {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.cache-meter-pct {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+.cache-meter-track {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.cache-meter-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--chrome);
+  transition: width 240ms ease, background 240ms ease;
+}
+.cache-meter.warn .cache-meter-fill  { background: var(--signal-amber); }
+.cache-meter.warn .cache-meter-pct   { color: var(--signal-amber); }
+.cache-meter.critical .cache-meter-fill { background: var(--signal-red); }
+.cache-meter.critical .cache-meter-pct  { color: var(--signal-red); }
+
+.cache-clear-btn {
+  align-self: flex-start;
+  background: transparent;
+  border: none;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .03em;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.cache-clear-btn:hover { color: var(--accent); }
+
+/* -------------------------------------------------------------------------
+   Footer institucional (spec perfil-usuario-y-footer): atribucion de
+   autoria, ubicado como el bloque MAS ABAJO del sidebar (confirmado por
+   el usuario: "abajo a la izquierda"). El avatar circular placeholder se
+   quito (pedido explicito del usuario) -- queda solo el credito con link.
+   ------------------------------------------------------------------------- */
+.dev-footer {
+  margin-top: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.dev-credit {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  line-height: 1.4;
+  color: var(--ink-faint);
+  text-decoration: none;
+  letter-spacing: .01em;
+}
+.dev-credit:hover { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+
+/* Version de backend en ejecucion (ver comentario junto a #dev-version en
+   index.html): texto discreto, mismo tono que .dev-credit pero SIN link
+   -- es solo informativo, ancho completo para no forzar el layout del
+   avatar+credito de arriba. */
+.dev-version {
+  flex-basis: 100%;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--ink-faint);
+  opacity: .7;
+}
+
+/* -------------------- Scrim (mobile) -------------------- */
+.scrim {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: var(--scrim-bg);
+  z-index: 20;
+}
+.scrim.active { display: block; }
+
+/* -------------------- Chat main -------------------- */
+.chat-main {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-width: 0;
+}
+
+/* -------------------- Banner de persistencia (REQ-006) --------------------
+   Spec persistencia-sqlite-sesiones. Visible SOLO mientras no hay carpeta
+   de proyecto elegida -- ambar (misma semantica que el resto del sistema:
+   "atencion", nunca rojo porque no es un error, es informativo). */
+.persistence-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 24px;
+  background: var(--signal-amber-bg);
+  color: var(--signal-amber);
+  font-size: 13px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.persistence-banner.hidden { display: none; }
+.persistence-banner-icon { flex-shrink: 0; }
+.persistence-banner a { color: var(--signal-amber); text-decoration: underline; font-weight: 600; }
+.persistence-banner a:hover { color: var(--accent-2); }
+
+/* -------------------- Banner de loop pausado (REQ-009) --------------------
+   Spec modo-plan-loop. A diferencia del banner de persistencia (informativo,
+   ambar), este pide ACCION humana YA -- se usa el acento rojo del sistema,
+   con un boton propio para cortar el loop sin tener que buscar el STOP. */
+.loop-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 24px;
+  background: var(--accent-soft);
+  color: var(--accent-2);
+  font-size: 13px;
+  border-bottom: 1px solid var(--accent);
+  flex-shrink: 0;
+  animation: loop-banner-pulse 1.6s ease-in-out infinite;
+}
+.loop-banner.hidden { display: none; animation: none; }
+.loop-banner-icon { flex-shrink: 0; }
+.loop-banner-stop {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid var(--accent-2);
+  color: var(--accent-2);
+  border-radius: var(--radius-sm);
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.loop-banner-stop:hover { background: var(--accent-2); color: var(--canvas); }
+@keyframes loop-banner-pulse {
+  0%, 100% { background: var(--accent-soft); }
+  50% { background: var(--signal-amber-bg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .loop-banner { animation: none; }
+}
+
+/* -------------------- Command bar (encabezado de comando) --------------------
+   Fondo azul solido pedido explicitamente por el usuario (2026-09-08),
+   SOLO en los 2 temas azul (Claro y Oscuro) -- en el tema rojo (dark, sin
+   atributo [data-theme]) el command-bar sigue con el fondo neutro
+   --surface de siempre, sin cambios.
+
+   Como este fondo es un azul SATURADO (no un --surface neutro), los
+   textos/iconos/bordes internos que hoy heredan --ink/--ink-soft/--line
+   (pensados para fondos neutros) necesitarian volverse casi ilegibles
+   sin ajuste (ej. --ink oscuro del tema claro da 2.25:1 sobre #0000FF).
+   En vez de tocar cada regla hija una por una, se RE-ESCOPAN esos mismos
+   nombres de variable (--ink, --ink-soft, --ink-faint, --line,
+   --line-strong, --surface-2) DENTRO de .command-bar para cada tema azul
+   Blue -- todos los hijos que ya usan var(--ink) etc. heredan
+   automaticamente los valores correctos de contraste sin cambiar ningun
+   selector hijo. --accent/--accent-2 NO se tocan aca (headers ya usan
+   colores claros ajustados, y accent/accent-2 solo aparecen en la barra
+   de progreso adaptativa que ya no vive en el command-bar). */
+.command-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+[data-theme="light"] .command-bar {
+  background: #0000FF;
+  border-bottom-color: #0000CC;
+  --ink: #FFFFFF;            /* 8.59:1 sobre #0000FF */
+  --ink-soft: #E3E6F0;       /* 6.89:1 */
+  --ink-faint: #B8C2DC;      /* 4.82:1 */
+  --line: rgba(255, 255, 255, .25);
+  --line-strong: rgba(255, 255, 255, .45);
+  --surface-2: rgba(255, 255, 255, .12); /* chips (MODELO, sesion) -- fondo translucido blanco sobre el azul solido */
+}
+[data-theme="dark-blue"] .command-bar {
+  background: #4477DD;
+  border-bottom-color: #2E5BB8;
+  --ink: #FFFFFF;            /* 4.26:1 sobre #4477DD */
+  --ink-soft: #E3E6F0;       /* 3.42:1 */
+  --ink-faint: #DDE3F5;      /* 3.32:1 -- mas claro que en el tema Claro: #4477DD es mas oscuro que #0000FF, un gris "faint" clasico no llegaba a 3:1 aca */
+  --line: rgba(255, 255, 255, .3);
+  --line-strong: rgba(255, 255, 255, .5);
+  --surface-2: rgba(255, 255, 255, .14);
+}
+
+.menu-btn {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.menu-btn span { display: block; width: 16px; height: 2px; background: var(--ink-soft); margin: 0 auto; border-radius: 2px; }
+
+.command-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-family: var(--font-mono);
+}
+
+.status-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--ink-faint);
+  box-shadow: 0 0 0 3px transparent;
+  transition: background 160ms ease, box-shadow 160ms ease;
+}
+
+.command-status[data-state="connecting"] .status-dot {
+  background: var(--signal-amber);
+  box-shadow: 0 0 0 3px var(--signal-amber-bg);
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+.command-status[data-state="online"] .status-dot {
+  background: var(--signal-green);
+  box-shadow: 0 0 0 3px var(--signal-green-bg);
+}
+.command-status[data-state="error"] .status-dot {
+  background: var(--signal-red);
+  box-shadow: 0 0 0 3px var(--signal-red-bg);
+}
+.command-status[data-state="busy"] .status-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  animation: pulse-dot 0.9s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .45; }
+}
+
+.status-text { color: var(--ink-soft); }
+.command-status[data-state="online"] .status-text { color: var(--ink); }
+
+/* -------------------- Barra de progreso adaptativa --------------------
+   Spec barra-progreso-adaptativa (REQ-003/004/005). REUBICADA (pedido
+   explicito del usuario): ya no vive en la command-bar -- ahora se monta
+   dinamicamente (ver getOrCreateProgressBar en app.js) DENTRO de
+   .turn-response-slot, pegada debajo de la respuesta del turno en curso.
+   Linea fina cromada con relleno rojo intenso -- el acento intenso ya esta
+   reservado para estado/accion en este sistema, y "hay una operacion en
+   curso" es exactamente eso. Ancho fluido (no min/max fijo del header):
+   se estira como cualquier otro bloque dentro del mensaje.
+   ---------------------------------------------------------------------- */
+.command-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  max-width: 320px;
+  padding: 8px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.command-progress.hidden { display: none; }
+
+.progress-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+/* El label puede ser largo ("Cargando skill investigacion-interna…"):
+   se trunca en vez de empujar el resto de la command-bar. */
+.progress-label {
+  color: var(--ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.progress-pct {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums; /* el % no "baila" al cambiar de digito */
+  flex-shrink: 0;
+}
+
+.progress-track {
+  position: relative;
+  height: 3px;
+  background: var(--surface-3);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  border-radius: 2px;
+  /* La transicion cubre los 100ms del tick del JS: el ancho se interpola
+     de forma continua en vez de avanzar a saltitos discretos. */
+  transition: width 100ms linear;
+}
+
+/* REQ-004: sin historial no se muestra %, solo una animacion que indica
+   actividad. Barrido continuo, no un relleno que simule avance. */
+.command-progress[data-state="indeterminate"] .progress-fill {
+  width: 35%;
+  animation: progress-sweep 1.15s ease-in-out infinite;
+}
+
+@keyframes progress-sweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(386%); } /* 100/35 + margen: sale del track */
+}
+
+/* REQ-003: se paso del presupuesto estimado. Ambar = "atencion, tarda mas
+   de lo previsto", coherente con la semantica de semaforo del sistema
+   (nunca rojo: no es un error, solo esta tardando). */
+.command-progress[data-state="overrun"] .progress-fill {
+  width: 100%;
+  background: linear-gradient(90deg, var(--signal-amber), var(--accent));
+  animation: progress-pulse 1.3s ease-in-out infinite;
+}
+.command-progress[data-state="overrun"] .progress-label { color: var(--signal-amber); }
+
+@keyframes progress-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .5; }
+}
+
+.command-progress[data-state="done"] .progress-fill {
+  background: var(--signal-green);
+}
+
+/* Con animaciones reducidas, la regla global de arriba ya neutraliza el
+   barrido/pulso; se deja una senal estatica visible para que el modo
+   indeterminado no quede como una barra muerta al 35%. */
+@media (prefers-reduced-motion: reduce) {
+  .command-progress[data-state="indeterminate"] .progress-fill {
+    width: 100%;
+    opacity: .55;
+  }
+}
+
+.command-meta {
+  margin-left: auto;
+  display: flex;
+  gap: 10px;
+}
+
+.meta-chip {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.1;
+  padding: 4px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+/* Selector de modelo: el chip MODELO es clickeable y despliega la lista
+   de modelos LLM disponibles en el proveedor de IA (roster en vivo via /api/models). */
+.model-picker { position: relative; }
+
+.meta-chip-btn {
+  font-family: inherit;
+  cursor: pointer;
+  position: relative;
+  padding-right: 22px;
+}
+.meta-chip-btn:hover { border-color: var(--accent); }
+.meta-chip-btn .meta-caret {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 9px;
+  color: var(--ink-faint);
+}
+
+/* spec proyecto-por-sesion REQ-006: chip #meta-session de 3 lineas, sin
+   caret (abre un MODAL, no un dropdown/edicion inline) -- se anula el
+   padding extra que .meta-chip-btn reserva para el caret del selector de
+   modelo. */
+.session-chip {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  align-items: flex-start;
+  padding: 4px 10px;
+  max-width: 220px;
+}
+.session-chip-name {
+  font-family: var(--font-display);
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.session-chip-id {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.session-chip-path {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* -------------------- Modal de edicion de sesion -------------------- */
+/* Solo nombre + Session ID de solo lectura -- el campo de carpeta por
+   sesion se quito (toda sesion usa siempre la carpeta global, ver
+   app/persistence/service.py). */
+.session-edit-modal { max-width: 480px; }
+#session-edit-id { color: var(--ink-faint); background: var(--surface-3); cursor: default; }
+.session-edit-path-row { display: flex; gap: 8px; }
+.session-edit-path-row input { flex: 1; min-width: 0; }
+
+.model-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  min-width: 260px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  padding: 6px;
+}
+.model-dropdown.hidden { display: none; }
+/* Bug real reportado (tema claro azul): este dropdown vive en el
+   DOM dentro de .command-bar (.command-bar > .command-meta > .model-picker
+   > #model-dropdown), pero visualmente es un panel FLOTANTE que escapa del
+   fondo azul solido de la barra (position:absolute, cae sobre el canvas/
+   mensajes de abajo). Al ser descendiente, hereda por cascada el rescoping
+   de --surface-2/--ink/--ink-faint/--line-strong que .command-bar define
+   SOLO para que los chips (MODELO, sesion) se lean bien sobre el azul
+   solido (ver comentario en la regla .command-bar mas arriba) -- eso
+   dejaba el dropdown con fondo blanco translucido al 12% sobre un canvas
+   ya blanco, y texto blanco encima: practicamente invisible. Se restauran
+   los valores normales de superficie/texto de cada tema azul para
+   este panel puntual, igual que cualquier otro dropdown/modal de la app
+   que no vive dentro de la barra. */
+[data-theme="light"] .model-dropdown {
+  --surface-2: #E9EDF3;
+  --ink: #0B0E14;
+  --ink-faint: #757E8C;
+  --line-strong: #BCC4D0;
+}
+[data-theme="dark-blue"] .model-dropdown {
+  --surface-2: #1E2126;
+  --ink: #F2F3F5;
+  --ink-faint: #666D78;
+  --line-strong: #383D46;
+}
+
+.model-option {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  cursor: pointer;
+  color: var(--ink);
+}
+.model-option:hover { background: var(--surface-3); }
+.model-option.active { background: var(--accent-soft); border-left: 2px solid var(--accent); }
+.model-option .model-id {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.model-option .model-meta {
+  font-size: 10px;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+}
+.model-dropdown-empty {
+  padding: 10px;
+  font-size: 12px;
+  color: var(--ink-faint);
+  font-style: italic;
+}
+.meta-key {
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  letter-spacing: .08em;
+  color: var(--ink-faint);
+}
+.meta-val {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink);
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  #meta-session { display: none; } /* sesion cede el paso primero en movil */
+}
+
+/* -------------------- Chip de modo Plan/Activo (REQ-005) --------------------
+    Spec modo-plan-loop. Vive abajo a la izquierda del compositor de chat
+    (dentro de .chat-form, pedido explicito del usuario -- antes vivia en
+    el command-bar de arriba). Mismo esqueleto visual que .meta-chip-btn
+    (MODELO), pero con color condicional via data-mode: ambar en Plan
+    (semantica de "atencion" ya usada en persistence-banner/
+    todo-status.in_progress), color normal en Activo. `flex-shrink:0` para
+    que nunca ceda espacio al textarea. `align-items:center` centra
+    #mode-chip-val (y MODO) horizontalmente dentro de la columna (pedido
+    explicito del usuario, reemplaza el align-self:center que centraba el
+    chip completo verticalmente contra .chat-form). */
+.mode-chip {
+  align-items: center;
+  flex-shrink: 0;
+  /* .meta-chip-btn reserva padding-right:22px para el caret del selector
+     de modelo -- mode-chip no tiene caret, asi que ese padding asimetrico
+     empujaba "MODO"/"ACTIVO" hacia la izquierda. Se lo anula y se centra
+     el texto explicitamente. */
+  padding-right: 10px;
+  text-align: center;
+}
+.mode-chip[data-mode="plan"] {
+  background: var(--signal-amber-bg);
+  border-color: var(--signal-amber);
+}
+.mode-chip[data-mode="plan"] .meta-val { color: var(--signal-amber); }
+.mode-chip[data-mode="plan"]:hover { border-color: var(--signal-amber); }
+.mode-chip[data-mode="active"] {
+  background: var(--signal-green-bg);
+  border-color: var(--signal-green);
+}
+.mode-chip[data-mode="active"] .meta-val { color: var(--signal-green); }
+.mode-chip[data-mode="active"]:hover { border-color: var(--signal-green); }
+
+/* -------------------------------------------------------------------------
+   REQ-001 (spec narracion-agente-efimera, "Interaccion por voz"): 2 botones
+   DIRECTOS junto al chip de modo -- microfono (Modo chat por voz, REQ-002)
+   y Record (Modo reunion, REQ-003). Sin modal intermedio (ver comentario en
+   index.html: la 1ra revision de la spec tenia un solo boton con modal,
+   el usuario lo confirmo como tedioso y pidio reemplazarlo).
+   ------------------------------------------------------------------------- */
+/* Pedido explicito del usuario: estos botones deben tener la MISMA altura
+   que los demas elementos de la fila del compositor (#attach-image-btn,
+   #mode-chip, #send-btn -- todos miden 60px de alto en el layout real,
+   confirmado con Playwright: heredan `align-self:stretch` del flex de
+   #chat-form via textarea rows="2", NO un valor fijo). El <button> en si
+   ahora es un contenedor TRANSPARENTE sin height fijo (se estira igual
+   que sus hermanos); el circulo visual vive en el <span class=
+   "...-circle"> interno, centrado con margin:auto -- separar boton/circulo
+   evita que el circulo se deforme a ovalo al estirarse la fila.
+   Tamano del circulo subido de 34px a 48px (pedido explicito del usuario,
+   2026-09-08: "deben ser mas grandes que la altura de adjuntar imagen y
+   modo actual") -- deja 6px de aire arriba/abajo dentro de los 60px de la
+   fila, notablemente mas grande que el boton de adjuntar (que ocupa solo
+   ~33% de esos 60px). Icono interno escalado proporcionalmente. */
+.voice-mic-btn {
+  display: flex; align-items: center; justify-content: center;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+}
+.voice-mic-btn-circle {
+  width: 48px; height: 48px;
+  border-radius: 50%;
+  border: 1.5px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--ink-soft);
+  display: flex; align-items: center; justify-content: center;
+  transition: border-color .15s, color .15s, transform .15s;
+}
+.voice-mic-btn-circle svg { width: 22px; height: 22px; }
+.voice-mic-btn:hover .voice-mic-btn-circle { border-color: var(--accent); color: var(--accent); transform: scale(1.05); }
+/* Estado "escuchando" (Modo chat por voz activo) -- mismo criterio de
+   pulso que .status-dot/.rec-dot del resto del sistema. */
+.voice-mic-btn[data-listening="true"] .voice-mic-btn-circle {
+  border-color: var(--accent);
+  color: var(--accent);
+  animation: voice-mic-pulse 1.2s ease-in-out infinite;
+}
+/* Bug real corregido (spec tema-claro-azul, pedido explicito del usuario:
+   "cuando cambiemos a Claro Azul tiene que reemplazar el rojo por el
+   azul") -- estos keyframes usaban rgba(213,0,28,...) FIJO en vez de
+   var(--accent), asi que el pulso se quedaba rojo aunque el resto de la
+   UI ya hubiera pasado a azul en tema claro. Se reemplaza por
+   --accent-glow-pulse (ver :root/[data-theme="light"] en styles.css),
+   mismo criterio que --accent-glow-05 (tinte sutil del acento, ya
+   existente para .md-quote). */
+@keyframes voice-mic-pulse { 0%,100%{ box-shadow: 0 0 0 0 var(--accent-glow-pulse); } 50%{ box-shadow: 0 0 0 5px transparent; } }
+
+/* Boton "Record" -- mismo criterio de altura que .voice-mic-btn de arriba:
+   el <button> se estira a 60px (igual que sus hermanos de fila), el
+   circulo SOLIDO real (con el acento del tema activo: rojo intenso en oscuro,
+   azul en claro/oscuro-azul) vive en .voice-record-btn-circle interno
+   -- referencia visual explicita del usuario a un boton de grabacion (no
+   un icono de microfono generico).
+   Tamano subido de 34px a 48px (mismo pedido/criterio que .voice-mic-btn-
+   circle de arriba) -- el punto/cuadrado interno escala proporcionalmente
+   (12/34 -> 17/48, misma proporcion ~35% del circulo). */
+.voice-record-btn {
+  display: flex; align-items: center; justify-content: center;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+}
+.voice-record-btn-circle {
+  width: 48px; height: 48px;
+  border-radius: 50%;
+  border: 1.5px solid var(--accent-solid, var(--accent));
+  background: var(--accent-solid, var(--accent));
+  display: flex; align-items: center; justify-content: center;
+  transition: transform .15s, box-shadow .15s;
+}
+.voice-record-btn:hover .voice-record-btn-circle { transform: scale(1.08); box-shadow: 0 0 0 5px var(--accent-glow-pulse); }
+.voice-record-btn-dot { width: 17px; height: 17px; border-radius: 50%; background: #fff; }
+/* Estado "grabando" (Modo reunion activo) -- el punto interno pasa a
+   cuadrado (icono universal de "stop"), y el circulo pulsa. */
+.voice-record-btn[data-recording="true"] .voice-record-btn-circle { animation: voice-record-pulse 1.4s ease-in-out infinite; }
+.voice-record-btn[data-recording="true"] .voice-record-btn-dot { border-radius: 4px; }
+@keyframes voice-record-pulse { 0%,100%{ box-shadow: 0 0 0 0 var(--accent-glow-pulse); } 50%{ box-shadow: 0 0 0 7px transparent; } }
+
+/* -------------------------------------------------------------------------
+   REQ-002 (spec asistente-contextual-voz): widget FLOTANTE chico del "ojo"
+   (Three.js+anime.js, ver voice-eye.js), reemplaza el overlay de pantalla
+   completa original de narracion-agente-efimera. Arrastrable por
+   drag-and-drop (ver dragElement() en app.js) -- NUNCA tapa el chat ni
+   bloquea clicks fuera de su propia area, a diferencia del overlay
+   anterior (position:fixed; inset:0). Paleta identica al resto del
+   sistema (negro + rojo); el fondo sigue siendo oscuro en
+   ambos temas, coherente con el prototipo validado por el usuario.
+   ------------------------------------------------------------------------- */
+.voice-eye-widget {
+  position: fixed;
+  width: 160px;
+  height: 184px; /* 160px de canvas + 24px del handle de arrastre */
+  right: 28px;
+  bottom: 96px; /* default: cerca del compositor, sin taparlo */
+  z-index: 45; /* por encima del chat, por debajo de settings/dashboard (50+) */
+  background: #07080A;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+/* Bug ya conocido en este proyecto (ver AGENTS.md/comentarios historicos):
+   ".hidden" no es una clase generica global -- cada componente define su
+   propia regla. */
+.voice-eye-widget.hidden { display: none; }
+.voice-eye-drag-handle {
+  height: 24px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: grab;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line-strong);
+}
+.voice-eye-drag-handle:active { cursor: grabbing; }
+.voice-eye-container { position: relative; flex: 1; }
+.voice-eye-container canvas { position: absolute; inset: 0; display: block; width: 100% !important; height: 100% !important; }
+.voice-eye-rec-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent);
+  animation: voice-mic-pulse 1.4s ease-in-out infinite;
+}
+
+/* -------------------------------------------------------------------------
+   Spec panel-flotante-control-rapido (2026-09-12): boton circular
+   flotante de accesos rapidos. Posicion FIJA (a diferencia de
+   .voice-eye-widget, que es arrastrable) -- pedido explicito del
+   usuario, esquina inferior izquierda, arriba del compositor.
+   ------------------------------------------------------------------------- */
+.quick-panel-widget {
+  position: fixed;
+  left: 24px;
+  bottom: 96px; /* misma altura de referencia que .voice-eye-widget, arriba del compositor */
+  z-index: 45; /* mismo nivel que .voice-eye-widget: por encima del chat, debajo de settings/dashboard (50+) */
+}
+.quick-panel-btn {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--shadow-lg);
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.quick-panel-btn:hover { background: var(--surface-3, var(--surface-2)); }
+.quick-panel-btn:active { transform: scale(0.94); }
+.quick-panel-btn svg { width: 22px; height: 22px; }
+.quick-panel-btn[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); }
+
+.quick-panel-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 10px); /* se abre HACIA ARRIBA del boton, nunca tapa el compositor de abajo */
+  width: 240px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  padding: 6px;
+  overflow: hidden;
+}
+.quick-panel-menu.hidden { display: none; }
+
+.quick-panel-view { display: flex; flex-direction: column; gap: 2px; }
+.quick-panel-view.hidden { display: none; }
+
+.quick-panel-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  border-radius: calc(var(--radius) - 4px);
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+.quick-panel-item:hover { background: var(--surface-3, rgba(128,128,128,0.12)); }
+.quick-panel-item-icon { display: flex; width: 18px; height: 18px; flex-shrink: 0; color: var(--ink-faint); }
+.quick-panel-item-icon svg { width: 100%; height: 100%; }
+.quick-panel-item-label { flex: 1; }
+.quick-panel-item-chevron { color: var(--ink-faint); font-size: 15px; }
+
+/* REQ-003: toggle mini dentro de la fila de "Auto-envío" -- espejo
+   visual del mismo estado que el switch real de Configuracion > Audio,
+   nunca un estado propio/independiente. */
+.quick-panel-toggle {
+  width: 30px;
+  height: 17px;
+  border-radius: 999px;
+  background: var(--line-strong);
+  position: relative;
+  flex-shrink: 0;
+  transition: background 0.15s ease;
+}
+.quick-panel-toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--surface);
+  transition: transform 0.15s ease;
+}
+.quick-panel-toggle[data-checked="true"] { background: var(--accent); }
+.quick-panel-toggle[data-checked="true"] .quick-panel-toggle-knob { transform: translateX(13px); }
+
+/* REQ-005: submenu in-place de skills locales -- reemplaza la vista
+   principal en el MISMO menu, nunca un modal aparte (pedido explicito
+   del usuario). */
+.quick-panel-back {
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  font-size: 12px;
+  text-align: left;
+  padding: 6px 8px;
+  cursor: pointer;
+  margin-bottom: 2px;
+}
+.quick-panel-back:hover { color: var(--ink); }
+.quick-panel-skills-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.quick-panel-skill-item {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: calc(var(--radius) - 4px);
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.quick-panel-skill-item:hover { background: var(--surface-3, rgba(128,128,128,0.12)); }
+.quick-panel-skills-empty {
+  padding: 14px 10px;
+  color: var(--ink-faint);
+  font-size: 12px;
+  text-align: center;
+}
+.quick-panel-skills-section + .quick-panel-skills-section { border-top: 1px solid var(--line-strong); margin-top: 6px; padding-top: 6px; }
+.quick-panel-skills-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  padding: 4px 8px 2px;
+}
+
+/* REQ-004: panel del lienzo embebido (vista previa en vivo generada por
+   Vision) -- reusa el backend ya existente de browser_workspace.py.
+   Tamano mas grande que el menu chico, propio, independiente. */
+.quick-browser-panel {
+  position: fixed;
+  left: 24px;
+  bottom: 156px; /* arriba del boton circular + menu, sin superponerse */
+  z-index: 44;
+  width: min(480px, calc(100vw - 48px));
+  height: min(360px, calc(100vh - 220px));
+  background: #07080A;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.quick-browser-panel.hidden { display: none; }
+.quick-browser-header {
+  height: 30px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line-strong);
+}
+.quick-browser-title { font-size: 11px; color: var(--ink-faint); }
+.quick-browser-url {
+  font-size: 11px;
+  color: var(--accent);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: ui-monospace, Consolas, monospace;
+}
+.quick-browser-url:hover { background: rgba(128,128,128,0.15); }
+.quick-browser-url.copied { outline: 1px solid var(--signal-green); color: var(--signal-green); }
+.quick-browser-window-cntrls { display: flex; align-items: center; gap: 2px; }
+.quick-browser-cntrl-btn {
+  border: none;
+  background: transparent;
+  color: var(--ink-faint);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.quick-browser-cntrl-btn svg { width: 11px; height: 11px; }
+.quick-browser-cntrl-btn:hover { background: rgba(128,128,128,0.18); color: var(--ink); }
+/* Cerrar: color de peligro sutil (mismo criterio de tinte rojo para
+   acciones destructivas/detener que el resto del sistema). */
+.quick-browser-cntrl-btn-close:hover { color: var(--accent-danger, #e5484d); }
+.quick-browser-iframe { flex: 1; border: none; width: 100%; background: #fff; }
+
+/* REQ-004 (evolucion 2026-09-12): estados de ventana del panel navegador.
+   Maximizado: ocupa casi toda la pantalla (margen chico), por encima de
+   todo (z-index 52, mismo nivel que un modal dashboard 50+/config). El
+   icono Maximizar se cambia a Restaurar desde JS (data-action). */
+.quick-browser-panel.maximized {
+  width: calc(100vw - 40px);
+  height: calc(100vh - 40px);
+  left: 20px;
+  bottom: 20px;
+  z-index: 52;
+}
+.quick-browser-panel.maximized .quick-browser-iframe { height: 100%; }
+/* Minimizado: colapsa a solo la barra de titulo (altura fija del header),
+   ocultando el iframe -- sin perder el estado de la sesion. */
+.quick-browser-panel.minimized { height: 30px; }
+.quick-browser-panel.minimized .quick-browser-iframe { display: none; }
+
+/* Confirmacion de salida (REQ-003 de narracion-agente-efimera, ya no
+   dentro de un overlay de pantalla completa -- REQ-002 de
+   asistente-contextual-voz): Escape o volver a tocar Record abren esto,
+   centrado sobre la vista normal del chat -- "Si" dispara el resumen
+   (REQ-006), "No" vuelve al modo reunion sin cortar nada. */
+.voice-eye-exit-confirm {
+  position: fixed;
+  top: 30px; left: 50%;
+  transform: translateX(-50%);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  box-shadow: var(--shadow-lg);
+  z-index: 55; /* por encima del widget flotante (45) */
+}
+/* Mismo bug que .voice-eye-overlay.hidden (ver comentario ahi arriba) --
+   sin esta regla, el modal de confirmacion (aunque tenga la clase
+   "hidden") seguia siendo un elemento posicionado real que podia recibir
+   foco/afectar el layout dentro del overlay, aunque su `display` por
+   defecto (flex) no bloqueaba clicks del resto de la pantalla como el
+   overlay principal (position:absolute, no fixed) -- se agrega igual por
+   consistencia y para que "hidden" funcione de verdad en TODOS los
+   elementos de esta feature, no solo en el que rompio el test. */
+.voice-eye-exit-confirm.hidden { display: none; }
+.voice-eye-exit-confirm span { font-size: 13px; color: var(--ink); }
+.voice-eye-exit-confirm button {
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--ink);
+  border-radius: var(--radius-sm);
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+}
+.voice-eye-exit-confirm button:hover { border-color: var(--accent); }
+.voice-eye-exit-confirm button.voice-eye-exit-yes { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* Boton "Descartar y salir" -- accion destructiva (borra la grabacion sin
+   generar resumen), color de señal roja para diferenciarlo claramente de
+   "Guardar y salir" (acento normal) y "Cancelar" (neutro). */
+.voice-eye-exit-confirm button.voice-eye-exit-discard {
+  background: var(--signal-red-bg);
+  border-color: var(--signal-red);
+  color: var(--signal-red);
+}
+.voice-eye-exit-confirm button.voice-eye-exit-discard:hover { background: var(--signal-red); color: #fff; }
+
+/* -------------------------------------------------------------------------
+   REQ-001/002/003/004 (spec pantalla-bienvenida-ojo): splash screen que se
+   ve EN CADA carga de pagina, ANTES del chat. Estructura visual portada de
+   _mockup_jarvis_animation.html (titulo animado letra por letra + linea
+   decorativa), con el subtitulo de marca agregado (pedido explicito del
+   usuario). Fondo negro casi puro FIJO en ambos temas (igual criterio que
+   .voice-eye-overlay: esta pantalla especifica siempre es oscura, el ojo
+   ya trae su propia paleta interna consciente del tema via --accent).
+   ------------------------------------------------------------------------- */
+.splash-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 100; /* por encima de TODO lo demas (voice-eye-overlay usa 60) */
+  background: #07080A;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  cursor: pointer;
+  transition: opacity .35s ease-out; /* REQ-003: mitad final del fade -- la otra mitad (zoom) la anima JS via transform */
+}
+.splash-screen.splash-fading { opacity: 0; }
+.splash-screen.hidden { display: none; }
+
+.splash-eye-container { position: absolute; inset: 0; }
+.splash-eye-container canvas { position: absolute; inset: 0; display: block; width: 100% !important; height: 100% !important; }
+
+/* Correccion explicita del usuario: "VISION" tiene que estar ARRIBA de la
+   pantalla y la leyenda de marca ABAJO -- NO agrupados juntos y pegados
+   abajo (asi estaba en la 1ra version, un solo bloque .splash-content
+   centrado con margin-top:auto). Ahora son 2 bloques independientes,
+   cada uno posicionado absoluto en su extremo, con el ojo (fondo
+   completo, #splash-eye-container) ocupando el centro entre ambos. */
+.splash-title-wrap {
+  position: absolute;
+  top: 64px;
+  left: 0; right: 0;
+  z-index: 2;
+  text-align: center;
+  pointer-events: none; /* el click real lo captura .splash-screen entero, no el texto */
+}
+.splash-title {
+  font-family: var(--font-display);
+  font-size: 42px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  /* Bug real reportado (tema claro azul): el fondo de esta pantalla
+     es FIJO casi negro en TODOS los temas (ver comentario de .splash-screen
+     arriba), pero el color de la letra usaba var(--ink) -- que en el tema
+     claro es casi negro (#0B0E14) para leerse sobre fondo BLANCO. Contra el
+     fondo casi negro fijo de esta pantalla, el relleno se volvía invisible y
+     solo quedaba visible el glow azul del text-shadow de abajo, leyéndose
+     como "las letras son azules" sin contraste. Color FIJO (no depende del
+     tema), mismo valor "nunca blanco puro" que usa --ink en el tema oscuro.
+  */
+  color: #F2F3F5;
+  margin: 0;
+  /* Glow con el acento del TEMA activo (--accent/--accent-2-underline ya
+     existentes) -- antes en el prototipo original era rgba(213,0,28,...)
+     fijo, mismo bug de tema que ya se corrigio en voice-eye.js. */
+  text-shadow: 0 0 10px var(--accent-glow-pulse), 0 0 32px var(--accent-2-underline);
+}
+.splash-title .splash-letter { display: inline-block; opacity: 0; }
+.splash-title-underline {
+  width: 0%;
+  height: 2px;
+  margin: 10px auto 0;
+  background: linear-gradient(90deg, transparent, var(--accent-2), transparent);
+}
+.splash-subtitle {
+  position: absolute;
+  bottom: 56px;
+  left: 0; right: 0;
+  z-index: 2;
+  text-align: center;
+  pointer-events: none;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: .1em;
+  /* Mismo bug/fix que .splash-title de arriba: fondo fijo casi negro en
+     todos los temas, asi que el color tambien tiene que ser fijo. */
+  color: #9AA3AE;
+  text-transform: uppercase;
+}
+
+/* -------------------- Messages -------------------- */
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 14% 12px 14%;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  position: relative;
+}
+
+@media (max-width: 1100px) {
+  .messages { padding: 24px 5% 12px 5%; }
+}
+
+.messages-watermark {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  /* Tenue (.08): sigue siendo fondo y no compite con el texto. */
+  opacity: .08;
+}
+.messages-watermark img { width: 240px; height: auto; display: block; }
+.messages:has(.msg) .messages-watermark { display: none; }
+
+/* Cada mensaje de usuario + su respuesta/tool-calls viven agrupados en un
+   .turn-container (hijo directo de #messages, mismo gap que el resto).
+   .turn-response-slot es donde se insertan la fila de tool-calls y la
+   respuesta del asistente de ESE turno especifico -- lo que garantiza que
+   quedan pegadas debajo de su propia pregunta, sin importar el orden en
+   que otros turnos encolados terminen de procesarse. */
+.turn-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+.turn-response-slot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+.turn-response-slot:empty { display: none; }
+
+.msg {
+  max-width: 100%;
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  line-height: 1.55;
+  font-size: 14.5px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  position: relative;
+  z-index: 1;
+  box-shadow: var(--shadow-sm);
+}
+
+.msg.user {
+  align-self: flex-end;
+  background: linear-gradient(135deg, var(--accent-soft), var(--msg-user-grad-2));
+  border: 1px solid var(--accent);
+}
+
+/* REQ-001/002 (spec timestamps-mensajes): hora debajo del texto del
+   mensaje, siempre visible (a diferencia de .msg-copy-controls, que solo
+   aparece al hover) -- mismo tamano/color que .session-date del sidebar
+   para mantener consistencia visual entre "metadatos chicos" del sistema. */
+.msg-time {
+  display: block;
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-faint);
+}
+.msg.user .msg-time { text-align: right; }
+.msg.assistant .msg-time { text-align: left; }
+
+/* -------------------------------------------------------------------------
+   REQ-004/005/007/008/009: mensajes de usuario editables/eliminables, con
+   badge de estado en cola. Cada mensaje de usuario se envuelve en
+   .user-turn-wrap (contenedor de layout) para poder mostrar los controles
+   (editar/eliminar/reordenar) sin romper el burbuja .msg.user existente.
+   ------------------------------------------------------------------------- */
+.user-turn-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.user-turn-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: .03em;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--signal-amber-bg);
+  color: var(--signal-amber);
+  border: 1px solid var(--signal-amber);
+}
+.user-turn-badge .queue-pos { font-weight: 700; }
+
+.user-turn-controls {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.user-turn-wrap:hover .user-turn-controls,
+.user-turn-wrap:focus-within .user-turn-controls { opacity: 1; }
+
+.user-turn-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-size: 12px;
+}
+.user-turn-btn:hover { border-color: var(--accent); color: var(--accent); }
+.user-turn-btn.danger:hover { border-color: var(--signal-red); color: var(--signal-red); }
+.user-turn-btn.queue-move:hover { border-color: var(--signal-amber); color: var(--signal-amber); }
+/* Pedido del usuario (2026-09): el copiar del turno de usuario vive en
+   .user-turn-controls (no dentro de la burbuja) -- feedback del copy. */
+.user-turn-btn.copied { border-color: var(--signal-green); color: var(--signal-green); }
+
+.msg.user.editing {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.user-edit-textarea {
+  width: 100%;
+  min-width: 260px;
+  background: var(--surface-2);
+  color: var(--ink);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 14.5px;
+  font-family: inherit;
+  resize: vertical;
+}
+.user-edit-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  justify-content: flex-end;
+}
+
+.msg.user.turn-cancelled {
+  opacity: .45;
+  text-decoration: line-through;
+  border-style: dashed;
+}
+
+/* Aviso de sesion huerfana (REQ-006) */
+.msg.system-orphan {
+  align-self: center;
+  max-width: 90%;
+  background: var(--signal-amber-bg);
+  border: 1px solid var(--signal-amber);
+  color: var(--signal-amber);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+/* Aviso de cola larga (REQ-008/009 secundario) */
+.queue-warning {
+  align-self: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--signal-amber);
+  background: var(--signal-amber-bg);
+  border: 1px solid var(--signal-amber);
+  border-radius: 999px;
+  padding: 3px 12px;
+  margin: 2px 0;
+}
+
+/* Respuesta del asistente: estilo terminal/consola con la paleta del
+   sistema (negro + rojo intenso en modo oscuro; blanco + azul en modo
+   claro, sin glow de texto -- ver tokens --assistant-* en :root/
+   [data-theme="light"]), fuente mono, cursor de bloque parpadeante
+   mientras llega texto en vivo. */
+.msg.assistant {
+  align-self: flex-start;
+  background: radial-gradient(ellipse 140% 100% at 0% 0%, var(--assistant-glow-bg), transparent 55%), var(--assistant-bg);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--accent);
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--assistant-ink);
+  text-shadow: 0 0 6px var(--assistant-glow-shadow);
+  letter-spacing: .01em;
+  /* El contenido ahora es HTML renderizado desde Markdown (bloques <p>,
+     <h1-6>, <ul>/<ol>, <table>, <pre>...) -- pre-wrap del .msg base
+     agregaria espacios en blanco visibles entre esos bloques, asi que se
+     vuelve a 'normal' aca y cada bloque maneja su propio margen. */
+  white-space: normal;
+}
+
+.msg.assistant.streaming::after {
+  content: "▌";
+  color: var(--accent);
+  animation: caret-blink 0.9s step-end infinite;
+  margin-left: 1px;
+  text-shadow: 0 0 8px var(--accent);
+}
+
+/* Investigacion de rendimiento 2026-09 ("Vision tarda mucho, se siente sin
+   respuesta"): indicador OPTIMISTA que aparece en el MISMO click de
+   "Enviar", antes de que llegue nada del backend (estilo "boton de play de
+   Spotify" pedido por el usuario -- reaccion instantanea de la UI, no
+   atada a la latencia real). Se reemplaza apenas llega evidencia real de
+   actividad (primer evento del turno, ver hideOptimisticThinking() en
+   app.js). */
+.msg-thinking-dots {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  padding: 2px 0;
+}
+.msg-thinking-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: .35;
+  animation: msg-thinking-bounce 1.1s ease-in-out infinite;
+}
+.msg-thinking-dots span:nth-child(2) { animation-delay: .15s; }
+.msg-thinking-dots span:nth-child(3) { animation-delay: .3s; }
+@keyframes msg-thinking-bounce {
+  0%, 60%, 100% { opacity: .35; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+
+/* Investigacion de rendimiento 2026-09: tip que aparece si la espera se
+   extiende (ver THINKING_TIP_DELAY_MS en app.js) -- caso real medido:
+   13:44 min pidiendo el razonamiento explicado vs 10s pidiendo el
+   resultado directo para el mismo calculo. Discreto (no es un error ni una
+   alarma), debajo de los puntitos. */
+.msg-thinking-tip {
+  font-size: 12px;
+  color: var(--ink-faint);
+  font-style: italic;
+}
+@keyframes caret-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+/* ---- Markdown dentro de .msg.assistant (ver js/markdown.js) ----
+   Se mantiene la estetica terminal (fuente mono, glow rojo intenso) pero con
+   jerarquia real: headers marcados, bloques de codigo con fondo propio,
+   tablas legibles, etc. -- ver skill desing-ultra-premium (nunca ocultar
+   informacion para "verse mas denso"). */
+.msg.assistant p { margin: 0 0 10px 0; }
+.msg.assistant p:last-child { margin-bottom: 0; }
+
+.msg.assistant .md-h {
+  margin: 14px 0 8px 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--ink);
+  text-shadow: none;
+  letter-spacing: 0;
+  line-height: 1.3;
+}
+.msg.assistant .md-h:first-child { margin-top: 0; }
+.msg.assistant h1.md-h { font-size: 1.25rem; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+.msg.assistant h2.md-h { font-size: 1.1rem; }
+.msg.assistant h3.md-h { font-size: 1rem; color: var(--accent); }
+.msg.assistant h4.md-h,
+.msg.assistant h5.md-h,
+.msg.assistant h6.md-h { font-size: 0.92rem; color: var(--ink-soft); }
+
+/* strong: antes "#fff" fijo (asumia SIEMPRE fondo oscuro) -- ahora usa
+   --assistant-ink, que ya es el color de mayor contraste sobre
+   --assistant-bg en CUALQUIER tema (blanco casi puro en oscuro, negro
+   casi puro en claro), en vez de re-declarar el mismo criterio a mano. */
+.msg.assistant strong { color: var(--assistant-ink); font-weight: 700; }
+.msg.assistant em { font-style: italic; color: var(--ink); }
+.msg.assistant del { color: var(--ink-faint); }
+
+.msg.assistant code {
+  background: var(--code-inline-bg);
+  border: 1px solid var(--code-inline-border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  color: var(--code-inline-ink);
+  text-shadow: none;
+}
+
+/* .md-codeblock (bloque multi-linea): fondo oscuro FIJO en ambos temas
+   (decision de diseno, ver comentario del token --code-inline-* en
+   :root) -- por eso su texto (.md-codeblock code, mas abajo) tambien
+   queda fijo en tonos claros, nunca --ink/--assistant-ink que cambiarian
+   con el tema y romperian el contraste sobre este fondo oscuro. */
+.msg.assistant .md-codeblock {
+  position: relative; /* ancla .code-copy-btn (REQ-003, spec copiar-mensajes) */
+  margin: 10px 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: #050506;
+  overflow: hidden;
+}
+.msg.assistant .md-code-lang {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--accent);
+  /* Fondo FIJO (no var(--surface-2), que se aclara en tema claro) --
+     convive dentro de .md-codeblock, que tiene fondo oscuro fijo por
+     decision de diseno (ver comentario arriba); una franja clara encima
+     de un bloque oscuro se veria rota visualmente. */
+  background: #0F1013;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--line-strong);
+}
+.msg.assistant .md-codeblock pre {
+  margin: 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+}
+.msg.assistant .md-codeblock code {
+  background: none;
+  border: none;
+  padding: 0;
+  /* Fijo, no --ink/--assistant-ink (mismo criterio: este bloque siempre
+     tiene fondo oscuro, su texto siempre debe ser claro). */
+  color: #E8E8EA;
+  font-size: 0.9em;
+  line-height: 1.5;
+  white-space: pre;
+}
+
+/* -------------------- Copiar mensajes (spec copiar-mensajes) --------------------
+   REQ-001/002: controles de copiar por mensaje, ocultos salvo hover (mismo
+   criterio ya usado por .session-delete-btn/.user-turn-controls: no ocupan
+   espacio visual permanente). REQ-003: boton propio por bloque de codigo,
+   flotante en la esquina superior derecha del bloque. */
+.msg-copy-controls {
+  /* Pedido explicito del usuario (2026-09): en flujo, DEBAJO del texto de
+     la respuesta (no overlay top-right), para que nunca tape ni quede
+     "en el medio" de una pregunta. Es un contenedor BLOQUE (flex a nivel
+     bloque) que ocupa su propia linea bajo el .msg-text; alineado a la
+     izquierda en respuestas del asistente, y a la derecha en mensajes de
+     usuario (asociado a su burbuja derecha). Igual patron que
+     .user-turn-controls: se revela al hover/foco. */
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.msg.user .msg-copy-controls { justify-content: flex-end; }
+.msg.assistant .msg-copy-controls { justify-content: flex-start; }
+.msg:hover .msg-copy-controls,
+.msg:focus-within .msg-copy-controls { opacity: 1; }
+
+.msg-copy-btn {
+  background: var(--surface-3);
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 5px;
+}
+.msg-copy-btn:hover { border-color: var(--accent); color: var(--ink); }
+.msg-copy-btn.copied { border-color: var(--signal-green); color: var(--signal-green); }
+/* Mensaje de error revalidado y resuelto (revalidateErrorMessage): se marca
+   en verde para distinguir "era un error pero ya se soluciono". */
+.msg-solved { border-color: var(--signal-green); }
+.msg-solved .msg-text { color: var(--signal-green); }
+/* REQ-001 (spec eliminar-respuestas): mismo look que .session-delete-btn/
+   .user-turn-btn.danger -- rojo al hover, para diferenciar claramente del
+   resto de acciones no-destructivas del mismo contenedor. */
+.msg-copy-btn.danger:hover { border-color: var(--signal-red); color: var(--signal-red); }
+/* REQ-007 (spec reproducir-respuesta-rangos): boton 🔊 play/stop. En estado
+   "playing" (reproduciendo) se marca con el accent para que se sepa que
+   volver a tocar DETIENE -- el icono pasa de la bocinita (🔊) a play con
+   fondo (⏹) via JS, el borde accent es el refuerzo visual. */
+.msg-copy-btn.playing { border-color: var(--accent); color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.msg-copy-btn.playing:hover { color: var(--signal-red); border-color: var(--signal-red); }
+
+/* REQ-003/004/005 (spec reproducir-respuesta-rangos): indicadores de banda
+   de seleccion sobre la respuesta. `.range-start`/`.range-end` dan un tinte
+   muy sutil al texto para senalar que tiene banderas; el hint es una nota
+   flotante de estado. */
+.msg.range-start .msg-text { box-shadow: inset 2px 0 0 var(--accent); }
+.msg.range-end .msg-text { box-shadow: inset -2px 0 0 var(--accent); }
+.msg-range-hint {
+  position: absolute;
+  left: 8px;
+  bottom: 4px;
+  right: 8px;
+  font-size: 10px;
+  color: var(--accent);
+  line-height: 1.4;
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.code-copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  background: var(--surface-3);
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 5px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.md-codeblock:hover .code-copy-btn { opacity: 1; }
+.code-copy-btn:hover { border-color: var(--accent); color: var(--ink); }
+
+.msg.assistant .md-list {
+  margin: 6px 0 12px 0;
+  padding-left: 22px;
+}
+.msg.assistant .md-list li { margin: 3px 0; }
+.msg.assistant ul.md-list { list-style: none; }
+.msg.assistant ul.md-list li::before {
+  content: "▸";
+  color: var(--accent);
+  display: inline-block;
+  width: 1em;
+  margin-left: -1.2em;
+}
+.msg.assistant ol.md-list { list-style: decimal; }
+.msg.assistant ol.md-list li::marker { color: var(--accent); font-weight: 700; }
+
+.msg.assistant .md-quote {
+  margin: 8px 0;
+  padding: 6px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-glow-05);
+  color: var(--ink-soft);
+  font-style: italic;
+}
+
+.msg.assistant .md-hr {
+  border: none;
+  border-top: 1px dashed var(--line-strong);
+  margin: 14px 0;
+}
+
+.msg.assistant a {
+  color: var(--accent-2);
+  text-decoration: underline;
+  text-decoration-color: var(--accent-2-underline);
+  text-underline-offset: 2px;
+}
+.msg.assistant a:hover { text-decoration-color: var(--accent-2); }
+
+.msg.assistant .md-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 10px 0;
+  font-size: 0.92em;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.msg.assistant .md-table th {
+  background: var(--surface-2);
+  text-align: left;
+  padding: 7px 10px;
+  font-family: var(--font-display);
+  text-shadow: none;
+  color: var(--ink-soft);
+  border-bottom: 2px solid var(--line-strong);
+}
+.msg.assistant .md-table td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.msg.assistant .md-table tr:last-child td { border-bottom: none; }
+
+.msg.system-note {
+  align-self: center;
+  background: transparent;
+  color: var(--ink-faint);
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  box-shadow: none;
+}
+
+.msg.error {
+  align-self: flex-start;
+  background: var(--signal-red-bg);
+  border: 1px solid var(--signal-red);
+  /* Fijo en ambos temas -- --signal-red-bg (el fondo) tampoco cambia
+     entre temas (los colores de semaforo son intencionalmente fijos, ver
+     comentario en :root), asi que este texto no necesita adaptarse. */
+  color: #FFC7CC;
+}
+
+/* Errores entendibles (2026-09-24): el texto principal de la burbuja es para
+   cualquier persona; el codigo de soporte / HTTP / modelo / hora queda
+   plegado debajo, para pasarselo a soporte. Hereda el color fijo de
+   .msg.error (mismo criterio de semaforo en ambos temas). */
+.msg-error-technical {
+  margin-top: 6px;
+  font-size: 12px;
+  opacity: .8;
+  white-space: normal;
+}
+.msg-error-technical summary {
+  cursor: pointer;
+  user-select: none;
+}
+.msg-error-technical code {
+  display: block;
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+/* spec salto-automatico-modelos REQ-001: lista de prioridad en Configuracion.
+   El estado de cada modelo usa los colores de semaforo (en pausa = ambar,
+   ya no existe = rojo) via data-state, sin clases sueltas. */
+.fallback-list {
+  list-style: decimal inside;
+  margin: 8px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.fallback-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.fallback-name { font-family: var(--font-mono); font-weight: 600; }
+.fallback-info { flex: 1; color: var(--ink-soft); font-size: 12.5px; min-width: 160px; }
+.fallback-item[data-state="paused"] .fallback-info { color: var(--signal-amber); }
+.fallback-item[data-state="missing"] .fallback-info { color: var(--signal-red); }
+.fallback-actions { display: flex; gap: 4px; }
+.fallback-actions button:disabled { opacity: .35; cursor: default; }
+.fallback-empty { list-style: none; color: var(--ink-faint); font-size: 13px; }
+.fallback-add-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.fallback-add-row select { flex: 1; min-width: 200px; }
+
+/* Fila de badges: varias tool-calls de un mismo turno se acomodan
+   una al lado de la otra (flex-wrap) en vez de apilarse verticalmente,
+   para no ocupar espacio de pantalla innecesario. */
+.tool-call-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-self: flex-start;
+  max-width: 100%;
+}
+
+.tool-call-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 6px 11px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-soft);
+  z-index: 1;
+  max-width: 100%;
+  overflow: hidden;
+}
+.tool-call-badge .args { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.tool-call-badge.running { color: var(--signal-amber); border-color: var(--signal-amber); }
+.tool-call-badge.running span:first-child { animation: pulse-dot 1s ease-in-out infinite; }
+.tool-call-badge.done { color: var(--signal-green); border-color: var(--line-strong); }
+.tool-call-badge .name { color: var(--accent); font-weight: 700; }
+
+.tool-call-badge .dash-btn {
+  background: transparent;
+  border: 1px solid currentColor;
+  color: inherit;
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 1px 6px;
+  cursor: pointer;
+  margin-left: 2px;
+}
+.tool-call-badge .dash-btn:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+/* -------------------- Question panel -------------------- */
+.question-panel {
+  margin: 0 14% 12px 14%;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-left: 4px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  box-shadow: var(--shadow-md);
+}
+@media (max-width: 1100px) { .question-panel { margin: 0 5% 12px 5%; } }
+.question-panel.hidden { display: none; }
+.question-panel .q-text { font-size: 14px; margin-bottom: 10px; }
+.question-panel .q-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.question-panel button {
+  background: var(--accent-soft);
+  color: var(--ink);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 7px 13px;
+  cursor: pointer;
+  font-size: 13px;
+  min-height: 36px;
+  transition: background 120ms ease;
+}
+.question-panel button:hover { background: var(--accent); }
+
+/* Pedido/bug real 2026-09-16: distinguir visualmente un panel YA resuelto
+   por el loop autonomo (informativo, verde) de una pausa real esperando
+   click (interactivo, azul/accent) -- antes eran indistinguibles y el
+   usuario creia que la recomendada nunca se tomaba. */
+.question-panel.auto-answered { border-color: var(--signal-green); border-left-color: var(--signal-green); }
+.question-panel .q-auto-note {
+  font-size: 12px;
+  color: var(--signal-green);
+  font-weight: 600;
+  margin: -4px 0 10px;
+}
+.question-panel.auto-answered button { cursor: default; opacity: .55; }
+.question-panel.auto-answered button:hover { background: var(--accent-soft); }
+.question-panel.auto-answered button.q-auto-picked {
+  opacity: 1;
+  background: var(--signal-green-bg);
+  border-color: var(--signal-green);
+  color: var(--signal-green);
+  font-weight: 600;
+}
+
+/* -------------------- Input -------------------- */
+.chat-form {
+  display: flex;
+  gap: 10px;
+  padding: 16px 14%;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+  flex-shrink: 0;
+}
+
+@media (max-width: 1100px) {
+  .chat-form { padding: 16px 5%; }
+}
+
+/* spec compositor-expandible REQ-003: wrapper relative, hereda el flex:1
+   que antes tenia el textarea directo -- el boton ampliar/reducir se
+   posiciona absoluto DENTRO de este wrapper (no del textarea, que no
+   puede contener elementos hijos reales). */
+.chat-input-wrap { position: relative; flex: 1; display: flex; }
+
+.chat-form textarea {
+  flex: 1;
+  resize: none;
+  background: var(--surface-2);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 10px 34px 10px 12px; /* padding-right extra: no tapar el boton con texto largo */
+  font-size: 14px;
+  font-family: inherit;
+  overflow-y: auto;
+  /* REQ-001: la transicion de altura es lo que hace que el auto-grow (JS
+     recalcula max-height/height en cada 'input') y el toggle
+     ampliar/reducir (REQ-003) se vean como un cambio fluido, no un salto
+     brusco -- respeta prefers-reduced-motion mas abajo. */
+  transition: height 120ms ease;
+}
+.chat-form textarea::placeholder { color: var(--ink-faint); }
+.chat-form textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* REQ-003: boton ampliar/reducir, esquina superior derecha del textarea.
+   Siempre visible (a diferencia de los botones solo-hover de mensajes,
+   spec copiar-mensajes) -- el usuario debe saber que la opcion existe sin
+   tener que descubrirla al pasar el mouse. */
+.composer-expand-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  line-height: 20px;
+  text-align: center;
+  padding: 0;
+  background: var(--surface-3);
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  cursor: pointer;
+  z-index: 2;
+}
+.composer-expand-btn:hover { border-color: var(--accent); color: var(--ink); }
+.composer-expand-btn.expanded { color: var(--accent); border-color: var(--accent); }
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-form textarea { transition: none; }
+}
+
+/* -------------------- Contexto multi-modal (spec contexto-multimodal) --------------------
+   REQ-001: boton de adjuntar, mismo alto que el textarea/stop-btn/send-btn. */
+.attach-image-btn {
+  flex-shrink: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink-soft);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 10px 12px;
+}
+.attach-image-btn:hover { border-color: var(--accent); color: var(--ink); }
+
+/* REQ-002: aviso de bloqueo -- mismo criterio semantico de ambar
+   ("atencion", no error) ya usado en el resto del sistema. */
+.image-blocked-notice {
+  margin: 0 14% -6px 14%;
+  padding: 8px 12px;
+  background: var(--signal-amber-bg);
+  color: var(--signal-amber);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+}
+.image-blocked-notice.hidden { display: none; }
+@media (max-width: 1100px) { .image-blocked-notice { margin: 0 5% -6px 5%; } }
+
+/* REQ-005: fila de miniaturas PENDIENTES de enviar, arriba del compositor. */
+.pending-images-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 14% -4px 14%;
+  padding: 8px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.pending-images-row.hidden { display: none; }
+@media (max-width: 1100px) { .pending-images-row { margin: 0 5% -4px 5%; } }
+
+.pending-image-thumb {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+}
+.pending-image-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pending-image-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 16px;
+  height: 16px;
+  line-height: 14px;
+  text-align: center;
+  padding: 0;
+  /* Fijo en ambos temas -- siempre esta SOBRE una miniatura de foto, no
+     sobre el canvas del tema, asi que negro semitransparente + blanco
+     sigue contrastando bien sin importar el tema activo. */
+  background: var(--pending-image-remove-bg);
+  color: #fff;
+  border: none;
+  border-radius: 50%;
+  font-size: 10px;
+  cursor: pointer;
+}
+.pending-image-remove:hover { background: var(--signal-red); }
+
+/* REQ-007: miniaturas dentro de una burbuja YA ENVIADA -- mas grandes que
+   las pendientes (son el contenido final, no un borrador editable). */
+.msg-images-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.msg-image-thumb {
+  max-width: 180px;
+  max-height: 180px;
+  border-radius: 6px;
+  cursor: zoom-in;
+  display: block;
+}
+
+/* .msg-text: aisla el texto real de un mensaje del resto de contenido que
+   convive en la misma burbuja (controles de copiar, timestamp, imagenes)
+   -- ver comentario "BUG PREEXISTENTE corregido" en appendMessage/
+   startEditingUserMessage (app.js). display:contents para no alterar el
+   layout visual respecto a como se veia antes de introducir este span. */
+.msg-text { display: contents; }
+/* Durante edicion (.msg.user.editing) el span SI necesita ser un
+   contenedor de bloque real -- ahi vive el <textarea> de edicion, que
+   necesita layout propio en vez de "contents". */
+.msg.user.editing .msg-text { display: block; }
+
+/* Boton unico Enviar/Detener (pedido explicito del usuario -- reemplaza
+   los 2 botones independientes que habia antes: "Enviar" siempre visible
+   + "Detener" aparte solo mientras corria un turno). 3 estados via
+   data-state, mismo criterio que #conn-status/#mode-chip:
+     - "idle"     -> "Enviar" (rojo intenso, icono avion de papel).
+     - "active"   -> "Detener" (rojo semaforo, icono mano STOP) -- hay un
+                     turno REALMENTE corriendo (ver REQ-001 mas abajo en
+                     handleEvent) y se puede parar.
+     - "stopping" -> deshabilitado, con spinner (esperando cierre limpio
+                     de la tool en curso).
+   Los 2 <svg> (avion/mano) y el label conviven siempre en el DOM; el
+   estado activo decide cual mostrar via display, no se crean/destruyen
+   nodos en cada cambio. */
+.send-or-stop-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 96px;
+  min-height: 44px;
+  padding: 0 20px;
+  background: var(--accent);
+  color: #fff;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: .02em;
+  cursor: pointer;
+  flex-shrink: 0;
+  position: relative;
+  transition: background 120ms ease, border-color 120ms ease, transform 80ms ease;
+}
+.send-or-stop-btn:hover:not(:disabled) { background: var(--accent-2); }
+.send-or-stop-btn:active:not(:disabled) { transform: scale(.97); }
+
+.send-or-stop-btn .ic-send,
+.send-or-stop-btn .ic-stop-hand { width: 18px; height: 18px; }
+/* idle: solo el avion + "Enviar" */
+.send-or-stop-btn .ic-stop-hand,
+.send-or-stop-btn .stop-spinner { display: none; }
+
+.send-or-stop-btn[data-state="active"] {
+  background: var(--surface-2);
+  border-color: var(--signal-red);
+  color: var(--signal-red);
+}
+.send-or-stop-btn[data-state="active"]:hover:not(:disabled) { background: var(--signal-red-bg); }
+.send-or-stop-btn[data-state="active"] .ic-send { display: none; }
+.send-or-stop-btn[data-state="active"] .ic-stop-hand { display: block; }
+
+.send-or-stop-btn[data-state="stopping"] {
+  background: var(--surface-2);
+  border-color: var(--signal-amber);
+  color: var(--signal-amber);
+  cursor: not-allowed;
+}
+.send-or-stop-btn[data-state="stopping"] .ic-send { display: none; }
+.send-or-stop-btn[data-state="stopping"] .ic-stop-hand { display: block; opacity: .35; }
+.send-or-stop-btn[data-state="stopping"] .stop-spinner {
+  display: block;
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  border-top-color: var(--signal-amber);
+  border-right-color: var(--signal-amber);
+  animation: stop-spin 0.8s linear infinite;
+}
+@keyframes stop-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .send-or-stop-btn[data-state="stopping"] .stop-spinner { animation: none; }
+}
+
+/* -------------------- Responsive: sidebar como drawer en movil (derecha) -------------------- */
+@media (max-width: 900px) {
+  .app-shell { grid-template-columns: 1fr; }
+  .sidebar {
+    position: fixed;
+    top: 0; right: 0; bottom: 0;
+    width: min(300px, 84vw);
+    z-index: 21;
+    transform: translateX(100%);
+    transition: transform 200ms ease;
+    box-shadow: var(--shadow-lg);
+  }
+  .sidebar.mobile-open { transform: translateX(0); }
+  .sidebar-close { display: inline-flex; align-items: center; justify-content: center; }
+  .menu-btn { display: flex; }
+}
+
+/* =========================================================================
+   Dashboard modal — resumen KPI + tabla, generado sobre el resultado CSV
+   que ya devolvio una tool de datos (oracle_query/bigquery_query/etc).
+   Patron KPI-grid con acento de esquina + tabla tipo ticket (ver skill
+   desing-ultra-premium §4 y §5), adaptado a la paleta oscura del sistema.
+   ========================================================================= */
+.dashboard-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--modal-overlay-bg);
+  backdrop-filter: blur(2px);
+}
+.dashboard-overlay.hidden { display: none; }
+
+.dashboard-modal {
+  width: min(920px, 100%);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.dashboard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  flex-shrink: 0;
+}
+.dashboard-eyebrow {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .1em;
+  color: var(--accent);
+  font-weight: 700;
+}
+.dashboard-header h2 {
+  margin: 2px 0 0 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.dashboard-close {
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  color: var(--ink-soft);
+  border-radius: 6px;
+  width: 30px;
+  height: 30px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.dashboard-close:hover { border-color: var(--accent); color: var(--accent); }
+
+/* REQ-006 (spec dashboard-graficos): solo el dashboard de KPIs/tabla/
+   grafico es arrastrable -- los demas modales (Configuracion, Explorador,
+   Confirmar, Comando) permanecen fijos/centrados como siempre. Selector
+   especifico via #dashboard-overlay para no afectar .dashboard-header
+   compartido por todos. */
+#dashboard-overlay .dashboard-header { cursor: grab; }
+#dashboard-overlay .dashboard-header:active { cursor: grabbing; }
+
+.dashboard-body {
+  padding: 18px 20px 20px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* REQ-003/004 (spec dashboard-graficos): contenedor del <canvas> de
+   Chart.js -- altura fija razonable para dona/barras (Chart.js necesita
+   un contenedor con dimensiones explicitas cuando maintainAspectRatio
+   esta en false, ver renderChart() en app.js). Unica vista del modal
+   #dashboard-overlay: la vista previa de KPIs+tabla generica (.kpi-grid/
+   .kpi-card/.dashboard-table-wrap) se elimino junto con el boton "Ver
+   dashboard" que era su unico disparador. */
+.dashboard-chart-wrap {
+  position: relative;
+  height: 360px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+.dashboard-chart-wrap.hidden { display: none; }
+
+/* =========================================================================
+   Panel de estado tipo OpenCode (acordeon <details> nativo, todo colapsado
+   por defecto) -- Sesion / Contexto / Conectores / Tareas / Herramientas.
+   ========================================================================= */
+.acc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.acc-section {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.acc-section summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.acc-section summary::-webkit-details-marker { display: none; }
+.acc-section summary::before {
+  content: "▸";
+  font-size: 9px;
+  color: var(--ink-faint);
+  transition: transform 140ms ease;
+  flex-shrink: 0;
+}
+.acc-section[open] summary::before { transform: rotate(90deg); }
+
+/* Iconos lineales (SVG outline, trazo fino) en rojo intenso -- reemplazan los
+   emojis originales por algo consistente con el resto del sistema
+   "rojo" (lineas rojas, sin relleno a color, sobre el mismo fondo
+   oscuro que ya usaba la sidebar). */
+.acc-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  color: var(--accent);
+  opacity: .85;
+}
+.acc-icon svg { width: 100%; height: 100%; }
+.acc-section[open] .acc-icon { opacity: 1; }
+.acc-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.acc-summary {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100px;
+}
+
+.acc-body {
+  padding: 4px 10px 10px 10px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.acc-action-btn {
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  color: var(--ink);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.acc-action-btn:hover { border-color: var(--accent); }
+.acc-action-btn.secondary { color: var(--ink-soft); }
+.acc-action-btn.danger { color: var(--signal-red); border-color: var(--signal-red); }
+.acc-action-btn.danger:hover { background: var(--signal-red-bg); }
+
+/* Modal de confirmacion generico (reemplaza confirm()/alert() nativos) --
+   reusa .dashboard-overlay/.dashboard-modal, solo agrega el contenido
+   propio del cuerpo. */
+.confirm-modal { width: min(420px, 100%); }
+.confirm-body { gap: 16px; }
+.confirm-message {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--ink-soft);
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* -- Sesiones -- */
+.session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.session-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.session-list li:hover { background: var(--surface-3); }
+.session-list li.active { background: var(--accent-soft); color: var(--ink); border-left: 2px solid var(--accent); }
+.session-list .session-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-list .session-date { font-family: var(--font-mono); font-size: 9.5px; color: var(--ink-faint); flex-shrink: 0; }
+.session-list-empty { color: var(--ink-faint); font-style: italic; font-size: 12px; padding: 4px 8px; }
+
+/* Icono de basura por sesion -- oculto salvo hover, para no ensuciar la
+   lista visualmente cuando no se lo esta usando. */
+.session-delete-btn {
+  flex-shrink: 0;
+  opacity: 0;
+  background: transparent;
+  border: none;
+  color: var(--ink-faint);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: opacity 120ms ease, color 120ms ease;
+}
+.session-list li:hover .session-delete-btn { opacity: 1; }
+.session-delete-btn:hover { color: var(--signal-red); background: transparent; }
+
+/* REQ-001 (spec gestion-sesiones): boton de renombrar, mismo patron
+   visual que .session-delete-btn (oculto salvo hover), ubicado ANTES del
+   de basura para que el orden de lectura sea "editar, despues eliminar". */
+.session-rename-btn {
+  flex-shrink: 0;
+  opacity: 0;
+  background: transparent;
+  border: none;
+  color: var(--ink-faint);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  transition: opacity 120ms ease, color 120ms ease;
+}
+.session-list li:hover .session-rename-btn { opacity: 1; }
+.session-rename-btn:hover { color: var(--accent); background: transparent; }
+
+/* Input inline de renombrar dentro de una fila del sidebar (REQ-001/003) --
+   mismo tamano/color que .session-name para que la fila no salte de alto. */
+.session-name-edit-input {
+  flex: 1;
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink);
+  background: var(--surface-3);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 2px 6px;
+  outline: none;
+  min-width: 0;
+}
+
+/* -------- Busqueda de conversaciones (spec busqueda-mensajes) -------- */
+.session-search { margin-bottom: 6px; }
+.session-search-input {
+  width: 100%;
+  font-family: var(--font-display);
+  font-size: 12.5px;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+  outline: none;
+  box-sizing: border-box;
+}
+.session-search-input:focus { border-color: var(--accent); }
+.session-search-input::placeholder { color: var(--ink-faint); }
+
+/* Resultado de busqueda: mismo alto/estructura que una fila normal de
+   sesion, mas un snippet de contexto debajo del nombre. */
+.session-search-results li {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+}
+.session-search-result-name { font-size: 12px; color: var(--ink); font-weight: 600; }
+.session-search-result-snippet {
+  font-size: 11px;
+  color: var(--ink-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-search-result-snippet mark {
+  background: var(--accent-soft);
+  color: var(--accent-2);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* Resaltado de coincidencias DENTRO de la conversacion abierta (REQ-004) --
+   `.search-match` marca cada ocurrencia encontrada en el DOM ya renderizado;
+   `.search-match-active` (ademas) es la que esta enfocada por el
+   contador/flechas ahora mismo. */
+.search-match { background: var(--accent-soft); color: var(--accent-2); border-radius: 2px; }
+.search-match-active { background: var(--accent); color: var(--canvas); }
+
+/* Barra flotante de navegacion "N de M" con flechas -- aparece pegada
+   arriba de #messages solo mientras hay coincidencias activas. */
+.search-nav-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-soft);
+  flex-shrink: 0;
+}
+.search-nav-bar.hidden { display: none; }
+.search-nav-btn {
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--ink);
+  cursor: pointer;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+.search-nav-btn:hover { border-color: var(--accent); }
+.search-nav-close { margin-left: auto; }
+
+/* -- Contexto (tokens) -- */
+.context-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.context-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--chrome);
+  transition: width 240ms ease, background 240ms ease;
+}
+.context-fill.warn { background: var(--signal-amber); }
+.context-fill.critical { background: var(--signal-red); }
+.context-detail {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+
+/* -- Conectores -- */
+.connectors-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.connectors-list li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+.connector-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--ink-faint);
+  flex-shrink: 0;
+}
+.connector-dot.online { background: var(--signal-green); box-shadow: 0 0 4px var(--signal-green); }
+.connector-dot.error { background: var(--signal-red); box-shadow: 0 0 4px var(--signal-red); }
+.connector-dot.checking { background: var(--signal-amber); animation: pulse-dot 1.2s ease-in-out infinite; }
+
+/* -- Footer info (ruta de proyecto / motor) -- */
+.sidebar-footer-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.footer-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 5px 6px;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+.footer-row:hover { border-color: var(--line); background: var(--surface); }
+.footer-icon { font-size: 12px; flex-shrink: 0; }
+.footer-text {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* =========================================================================
+   Iconos de la command-bar: configuracion (engranaje), ojo (mostrar/
+   ocultar sidebar), pantalla completa -- todos con tooltip nativo (title).
+   ========================================================================= */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  color: var(--ink-soft);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+.icon-btn:hover { border-color: var(--accent); color: var(--accent); }
+.icon-btn svg { width: 16px; height: 16px; }
+.icon-btn .hidden { display: none; }
+
+/* El engranaje va antes del status; el ojo/pantalla-completa/cerebro van
+   al final, despues de command-meta (que ya tiene margin-left:auto). */
+#settings-btn { margin-right: 4px; }
+#fullscreen-btn, #eye-btn, #brain-btn { margin-left: 8px; }
+
+/* -------------------------------------------------------------------------
+   REQ-013 (spec asistente-contextual-voz): estados visuales del icono
+   "Cerebro" -- sin overlay, el UNICO feedback de que el modo esta activo y
+   en que estado es este icono, via `data-state` (mismo patron que
+   `data-recording` de #voice-record-btn).
+   Paleta REDEFINIDA por pedido explicito del usuario tras probar la
+   version original (var(--accent), que en el tema oscuro es rojo rojo intenso
+   y en el claro azul azul): el usuario pidio colores de estado FIJOS,
+   independientes del tema/acento, porque el azul se confundia con los
+   acentos del navbar -- verde=hablando activamente (VAD detecto voz
+   ahora), amarillo=procesando (transcribiendo o esperando al LLM),
+   rojo=resto del tiempo con el modo activo (silencio esperando que hable,
+   o TTS narrando la respuesta). Se usan los mismos tokens --signal-*
+   ya definidos en :root (ver arriba en este archivo) en vez de inventar
+   colores nuevos.
+   ------------------------------------------------------------------------- */
+#brain-btn[data-state="listening"] {
+  border-color: var(--signal-green);
+  color: var(--signal-green);
+  animation: brain-pulse-green 1.1s ease-in-out infinite;
+}
+#brain-btn[data-state="processing"] {
+  border-color: var(--signal-amber);
+  color: var(--signal-amber);
+  animation: brain-blink 0.8s ease-in-out infinite;
+}
+#brain-btn[data-state="idle-active"] {
+  border-color: var(--signal-red);
+  color: var(--signal-red);
+}
+@keyframes brain-pulse-green {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(61, 220, 132, .45); }
+  50% { box-shadow: 0 0 0 5px transparent; }
+}
+@keyframes brain-blink {
+  0%, 100% { opacity: .4; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #brain-btn[data-state="listening"], #brain-btn[data-state="processing"] { animation: none; }
+}
+
+/* REQ-010/013: ondas de sonido junto al icono Cerebro -- 4 barras cuya
+   altura la controla JS en vivo (ver vadTick en app.js) segun el nivel
+   real de audio detectado, para confirmarle al usuario que el microfono
+   SI esta captando su voz mientras habla. `transition` suaviza el salto
+   entre lecturas del analizador (cada frame de requestAnimationFrame)
+   sin verse entrecortado. */
+.brain-waveform {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 16px;
+  margin-left: 6px;
+}
+.brain-waveform.hidden { display: none; }
+.brain-waveform-bar {
+  width: 2.5px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--signal-green);
+  transition: height 80ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .brain-waveform-bar { transition: none; }
+}
+
+/* Cuando el sidebar esta oculto via el boton de ojo (desktop) */
+/* Bug real reportado por el usuario: en viewports angostos (<=900px, ver
+   el media query de mas abajo) el sidebar ya es un drawer `position:fixed`
+   controlado por `.mobile-open` -- pero esta regla de "ojo" (desktop)
+   seguia aplicando `display:none` SIN estar acotada a desktop. Como
+   `display:none` gana sobre cualquier `transform`, tocar el "ojo" en
+   cualquier ancho y despues angostar la ventana dejaba el sidebar
+   bloqueado en `display:none` para siempre -- ni el drawer movil (menu-
+   btn/mobile-open) podia volver a mostrarlo. Acotada a `min-width` para
+   que solo aplique en el layout de grid de escritorio; en movil el "ojo"
+   pasa a controlar el mismo drawer que el menu hamburguesa (ver
+   eyeBtnEl en app.js y el media query de abajo). */
+@media (min-width: 901px) {
+  /* Bug real encontrado (regresion propia): el grid del `.app-shell`
+     volvio a ser de 2 columnas (`1fr var(--sidebar-w)`) cuando se movio
+     el panel de Procesamiento adentro de #voice-eye-overlay (ya no hay
+     3ra columna fija en el layout principal) -- pero esta regla habia
+     quedado con 3 valores (`200px 1fr 0px`) de una version anterior, sin
+     actualizarla en el mismo cambio. Con 3 valores en un grid de solo 2
+     columnas reales, el chat terminaba ocupando casi todo el ancho del
+     body al tocar "ocultar panel lateral" -- corregido a 2 columnas,
+     consistente con `.app-shell` de mas arriba. */
+  .app-shell.sidebar-hidden { grid-template-columns: 1fr 0px; }
+  .app-shell.sidebar-hidden .sidebar { display: none; }
+}
+
+/* =========================================================================
+   Modal de Configuracion (tabs) + Explorador generico -- reusan
+   .dashboard-overlay/.dashboard-modal/.dashboard-header/.dashboard-close
+   ya definidos arriba para el dashboard de KPIs.
+   ========================================================================= */
+.settings-modal, .explorer-modal { width: min(720px, 100%); }
+
+.settings-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 20px 0 20px;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+.settings-tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--ink-faint);
+  font-size: 12.5px;
+  padding: 8px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.settings-tab:hover { color: var(--ink-soft); }
+.settings-tab.active { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+
+.settings-body { gap: 14px; }
+.settings-pane.hidden { display: none; }
+/* Bug real reportado (pestaña Agentes, 2026-09): agentTypeEl/agentKindEl/
+   agentRuleEl en app.js hacen classList.toggle("hidden", ...) sobre los
+   sub-campos condicionales (agent-session-field, agent-command-fields,
+   agent-skill-fields, agent-file-fields, agent-alarm-fields, agent-once-
+   fields, agent-recurring-fields, agent-weekday-field, agent-n-field) pero
+   nunca existia una regla CSS que ocultara ".hidden" DENTRO de un
+   settings-pane -- quedaban todos apilados y visibles a la vez (archivo
+   duplicado, fecha+hora Y regla recurrente juntas, dia-de-semana con
+   "Diario" seleccionado, etc.). Un solo selector alcanza para las 9 IDs. */
+/* !important a proposito: ".hidden" es un utility class -- SIEMPRE debe
+   ganarle a un display:flex/block propio de un componente (ej.
+   .agent-field-col), sin importar el orden en la hoja de estilos. Bug
+   real (2026-09): sin el !important, .agent-field-row > .agent-field-col
+   (misma especificidad, declarada despues) le ganaba a esta regla y
+   agent-once-fields quedaba visible aunque tuviera class="hidden". */
+.settings-pane .hidden { display: none !important; }
+
+.settings-field { display: flex; flex-direction: column; gap: 6px; }
+.settings-section-label {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--accent);
+  border-top: 1px solid var(--line, rgba(128,128,128,0.25));
+  padding-top: 10px;
+  margin-top: 6px;
+}
+.settings-field label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.settings-field select,
+.settings-field input[type="text"],
+.settings-field input[type="password"],
+.settings-field input[type="number"],
+.settings-field textarea {
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  color: var(--ink);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.settings-field select:focus,
+.settings-field input:focus,
+.settings-field textarea:focus { outline: none; border-color: var(--accent); }
+
+/* REQ-012 (spec asistente-contextual-voz): campo de pausa de auto-envio
+   del modo Cerebro, atenuado (sin deshabilitar el input de verdad -- el
+   usuario puede seguir viendo/editando el valor guardado) cuando el
+   auto-envio esta desactivado. */
+.settings-field-disabled { opacity: .45; pointer-events: none; }
+
+.settings-path-row { display: flex; gap: 8px; }
+.settings-path-row input { flex: 1; }
+
+/* -------------------- spec carpeta-por-sesion REQ-010 --------------------
+   Campo de password con icono de ojito "mostrar solo mientras se
+   mantiene presionado" -- ver logica press-and-hold en app.js. El input
+   ocupa el espacio disponible, el boton queda pegado a la derecha dentro
+   del mismo marco visual (no un boton separado afuera). */
+.cred-password-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+}
+.cred-password-row input {
+  flex: 1;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  border-right: none;
+}
+.cred-eye-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  flex-shrink: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+.cred-eye-btn svg { width: 16px; height: 16px; }
+.cred-eye-btn:hover { color: var(--ink); border-color: var(--accent); }
+/* Estado "revelando" (mientras se mantiene presionado) -- acento rojo
+   para que sea evidente que el campo esta temporalmente en claro. */
+.cred-eye-btn.revealing { color: var(--accent); border-color: var(--accent); }
+
+.settings-current-path {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  word-break: break-all;
+}
+
+.settings-dynamic-params {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0,1fr));
+  gap: 12px;
+  padding: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+@media (max-width: 560px) { .settings-dynamic-params { grid-template-columns: 1fr; } }
+
+.param-field { display: flex; flex-direction: column; gap: 4px; }
+.param-field label { font-size: 11px; color: var(--ink-soft); display: flex; justify-content: space-between; }
+.param-field label .param-val { font-family: var(--font-mono); color: var(--accent); }
+.param-field input[type="range"] { accent-color: var(--accent); }
+.param-field select,
+.param-field input[type="number"] {
+  background: var(--surface); border: 1px solid var(--line-strong); color: var(--ink);
+  border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: inherit;
+}
+.param-field input[type="number"]:focus {
+  outline: none; border-color: var(--accent);
+}
+/* Quita el fondo blanco nativo de las flechitas incrementar/decrementar
+   (Chrome/Edge/Safari) -- sin esto quedan con su propio estilo de sistema
+   aunque el input ya tenga fondo oscuro. */
+.param-field input[type="number"]::-webkit-inner-spin-button,
+.param-field input[type="number"]::-webkit-outer-spin-button {
+  filter: invert(1) brightness(1.6);
+  opacity: 0.7;
+}
+
+.settings-hint { font-size: 11.5px; color: var(--ink-faint); line-height: 1.5; margin: 0; }
+/* Bug real reportado por el usuario 2026-09-16: _setAgentStatus() pone la
+   clase "settings-hint error" en un mensaje de validacion, pero la unica
+   regla ".error" que existia en este archivo era para ".settings-status"
+   (una clase DISTINTA) -- el texto de error nunca se pintaba de rojo, se
+   veia igual que un hint comun. */
+.settings-hint.error { color: var(--signal-red); font-weight: 600; }
+/* Resalta el campo puntual que falta completar (no solo el texto del
+   hint, que el usuario podia no notar) -- mismos tokens --signal-red /
+   --signal-red-bg que el resto de la app. Se aplica tanto a inputs/selects
+   sueltos como a contenedores (ej. el bloque de secuencia de comandos, que
+   no tiene un unico input al que echarle la culpa). */
+.field-invalid { border: 1px solid var(--signal-red) !important; border-radius: 6px; box-shadow: 0 0 0 2px var(--signal-red-bg); }
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.settings-status {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+.settings-status.ok { color: var(--signal-green); }
+.settings-status.error { color: var(--signal-red); }
+
+/* spec controles-seguridad-optimizacion-lightspeed-bigquery, pestaña
+   "Conexiones" (pedido del usuario 2026-09-21): status por color de cada
+   conector + arbol simple expandible de datasets/tablas/listas. Reusa el
+   mismo --signal-* que .connector-dot del sidebar para que el color
+   signifique lo mismo en toda la app. */
+.settings-subheading {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  margin: 18px 0 8px;
+}
+.conn-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.conn-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  padding: 4px 2px;
+}
+.conn-status-row .connector-dot { width: 9px; height: 9px; }
+.conn-status-label { font-weight: 600; color: var(--ink); min-width: 90px; }
+.conn-status-detail { color: var(--ink-faint); font-size: 11.5px; }
+
+.conn-explore-block { margin-bottom: 10px; }
+.conn-tree-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 6px 4px;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.conn-tree-toggle:hover { background: var(--surface-3); }
+.conn-tree-caret { font-size: 9px; color: var(--ink-faint); transition: transform .15s ease; }
+.conn-tree-list {
+  list-style: none;
+  margin: 2px 0 4px 20px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.conn-tree-list li {
+  font-size: 12px;
+  color: var(--ink-soft);
+  padding: 3px 6px;
+  border-radius: 4px;
+}
+.conn-tree-item-expandable { cursor: pointer; }
+.conn-tree-item-expandable:hover { background: var(--surface-3); color: var(--ink); }
+.conn-tree-sublist { margin-left: 16px; }
+.conn-tree-error { color: var(--signal-red); }
+
+/* REQ-009/010 (spec narracion-agente-efimera): pestaña Configuracion >
+   Audio -- checkbox de activar TTS y medidor de nivel de microfono. */
+.settings-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.settings-checkbox-label input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.settings-mic-meter {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  overflow: hidden;
+}
+.settings-mic-meter-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--signal-green);
+  /* Transicion corta: reacciona rapido a la voz sin verse "a los saltos". */
+  transition: width 60ms linear;
+}
+
+/* -- Explorador de carpetas (local o SharePoint) -- */
+.explorer-body { gap: 10px; }
+.explorer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.explorer-breadcrumb {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+/* Boton "+ Nueva carpeta": icono de carpeta + signo mas, tal como se pidio */
+.explorer-new-folder-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--ink-soft);
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+.explorer-new-folder-btn:hover { border-color: var(--accent); color: var(--accent); }
+.explorer-new-folder-btn .plus-icon { font-weight: 700; font-size: 14px; }
+.explorer-new-folder-btn.hidden { display: none; }
+
+/* Fila inline para escribir el nombre de la carpeta nueva (reemplaza un
+   prompt() nativo, consistente con el resto de modales propios ya usados
+   en el proyecto -- ver showConfirmModal). */
+.explorer-new-folder-row {
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+}
+.explorer-new-folder-row input {
+  flex: 1;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.explorer-new-folder-row input:focus { outline: none; border-color: var(--accent); }
+.explorer-breadcrumb .crumb {
+  cursor: pointer;
+  color: var(--accent-2);
+}
+.explorer-breadcrumb .crumb:hover { text-decoration: underline; }
+
+.explorer-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 340px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.explorer-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  border-bottom: 1px solid var(--line);
+}
+.explorer-list li:last-child { border-bottom: none; }
+.explorer-list li:hover { background: var(--surface-3); }
+.explorer-list li.selected { background: var(--accent-soft); border-left: 2px solid var(--accent); }
+.explorer-list .ex-icon { flex-shrink: 0; opacity: .8; }
+.explorer-list .ex-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.explorer-list .ex-meta { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-faint); flex-shrink: 0; }
+.explorer-list-empty { padding: 16px; text-align: center; color: var(--ink-faint); font-style: italic; font-size: 12.5px; }
+
+/* =========================================================================
+   Menu "/" de skills en el chat
+   ========================================================================= */
+.slash-menu {
+  margin: 0 14% 8px 14%;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+}
+@media (max-width: 1100px) { .slash-menu { margin: 0 5% 8px 5%; } }
+.slash-menu.hidden { display: none; }
+.slash-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--line);
+}
+.slash-item:last-child { border-bottom: none; }
+.slash-item:hover, .slash-item.active { background: var(--surface-3); }
+.slash-item .slash-name {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--accent);
+  font-weight: 700;
+}
+.slash-item .slash-desc {
+  font-size: 11px;
+  color: var(--ink-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slash-menu-empty { padding: 10px 12px; color: var(--ink-faint); font-style: italic; font-size: 12px; }
+
+/* REQ-001 (spec comandos-slash): encabezado de seccion dentro del menu
+   "/" -- separa visualmente "Comandos" (ejecutables/propios) de "Skills"
+   (comportamiento sin cambios), sin ser un .slash-item clickeable. */
+.slash-section-header {
+  padding: 6px 12px 4px 12px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  background: var(--surface-2);
+}
+
+/* -------------------- Modal de comando "/" (REQ-002) --------------------
+   Reusa .dashboard-modal/.dashboard-header/.confirm-message/.confirm-actions
+   ya existentes -- consistente con el modal de confirmacion generico. */
+.command-modal { max-width: 440px; }
+.command-modal .settings-field-input {
+  font-family: var(--font-display);
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  box-sizing: border-box;
+}
+.command-modal .settings-field-input:focus { border-color: var(--accent); outline: none; }
+
+/* -- spec programador-alarmas: pestaña Tiempo/Agenda + toast de aviso ------- */
+.settings-field-row { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.settings-field-row input { max-width: 140px; }
+.settings-field-row label {
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--ink-faint);
+}
+.pomodoro-display {
+  font-family: var(--font-mono); font-size: 40px; font-weight: 700; color: var(--accent);
+  text-align: center; line-height: 1.05; margin: 6px 0 2px;
+}
+.pomodoro-phase { text-align: center; font-size: 13px; color: var(--ink-soft); margin-bottom: 10px; }
+.pomodoro-display.running { color: var(--signal-amber, #f5c518); }
+.schedules-list { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.schedule-empty { color: var(--ink-faint); font-size: 12.5px; font-style: italic; }
+.agent-group-header {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  margin: 14px 0 4px;
+}
+.agent-group-header:first-child { margin-top: 0; }
+.agent-group-header.pending      { color: var(--ink-soft); }
+.agent-group-header.in_progress  { color: var(--signal-amber); }
+.agent-group-header.completed    { color: var(--signal-green); }
+.agent-group-header.cancelled    { color: var(--signal-red); }
+.schedule-item {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+/* REQ-005 (spec agentes-huerfanos-y-gestion-skills): agente con sesion/
+   comando/skill invalido -- mismo patron border-left rojo ya usado para
+   agentes pausados (#session-agents-list li[data-status="paused"]) y
+   tareas canceladas (.todo-list li[data-status="cancelled"]), aplicado
+   aca sobre #agents-list (la pestaña Configuracion > Agentes). */
+#agents-list .schedule-item[data-broken] { border-left: 3px solid var(--signal-red); }
+.schedule-item .schedule-main { flex: 1; min-width: 0; }
+.schedule-item .schedule-label { font-size: 13px; font-weight: 600; color: var(--ink); }
+.schedule-item .schedule-desc { font-size: 11.5px; color: var(--ink-faint); margin-top: 2px; }
+.schedule-item .schedule-sound {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+  font-family: var(--font-mono); color: var(--accent); border: 1px solid var(--line-strong);
+  padding: 2px 6px; border-radius: 10px; white-space: nowrap;
+}
+.schedule-item .schedule-sound.disabled { color: var(--ink-faint); opacity: .6; }
+.schedule-item .schedule-actions { display: flex; gap: 4px; }
+.schedule-item button { background: transparent; border: none; color: var(--ink-soft); cursor: pointer; font-size: 14px; }
+.schedule-item button:hover { color: var(--ink); }
+.schedule-item button.danger:hover { color: var(--signal-red, #d22); }
+.alarm-toast {
+  position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 10px; padding: 12px 18px; z-index: 3000;
+  background: var(--surface-2); border: 1px solid var(--accent); color: var(--ink);
+  border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.35); font-size: 13.5px;
+  animation: alarmToastIn .25s ease; max-width: 80vw;
+}
+.alarm-toast.hidden { display: none; }
+.alarm-toast-icon { font-size: 18px; }
+@keyframes alarmToastIn { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@media (prefers-reduced-motion: reduce) {
+  .alarm-toast { animation: none; }
+  .pomodoro-display { transition: none; }
+}
+
+/* spec programador-alarmas 0.12.0: fila "archivo a ejecutar" + btn explorar,
+   en horizontal (el input de la ruta necesita estirarse, no como el max-width
+   de los pomodoro-work/rest). */
+.alarm-file-row {
+  display: flex;
+  /* Bug real reportado (2026-09): con align-items:center el boton
+     (.acc-action-btn, 27px alto) quedaba mas bajo que el input/select de al
+     lado (36px, mas padding+font-size) -- "stretch" iguala ambos a la altura
+     del mas alto de la fila sin hardcodear un alto fijo. */
+  align-items: stretch;
+  gap: 8px;
+  margin-top: 6px;
+}
+.alarm-file-row input { flex: 1; min-width: 0; }
+.alarm-file-row button { white-space: nowrap; }
+/* .settings-field .acc-action-btn (mas abajo en este archivo) fija
+   align-self:flex-start para que Guardar/Cancelar no se estiren en la fila
+   de acciones -- eso mismo le ganaba al align-items:stretch de arriba
+   porque align-self en el HIJO siempre gana. Un selector mas especifico
+   (3 clases) restaura el stretch SOLO para los botones que comparten fila
+   con un input/select (Explorar.../+ Agregar), sin tocar Guardar/Cancelar. */
+.settings-field .alarm-file-row .acc-action-btn { align-self: stretch; }
+
+/* Bug real reportado (2026-09, pestaña Agentes): "Limpiar historial viejo"
+   quedaba visualmente desfazado del titulo de seccion de al lado -- el
+   titulo (.settings-section-label) trae su propio border-top/padding-top
+   de separador, que no pinta bien pegado a un boton en la MISMA fila. */
+.settings-actions > .settings-section-label { border-top: none; padding-top: 0; margin-top: 0; }
+
+/* spec agentes-programados, pasada visual 2026-09 (pedido del usuario):
+   Etiqueta/Tipo de automatizacion, y Horario/Fecha-y-hora (o Regla/Hora en
+   modo recurrente) comparten fila al 50/50 en vez de ocupar el ancho
+   completo del modal uno debajo del otro. `agent-field-col` reparte el
+   espacio en partes iguales (flex:1 1 0) y envuelve en columna en pantallas
+   angostas (mobile) via flex-wrap -- si UNA columna de la fila esta
+   oculta (.hidden real, `display:none` desde la regla de arriba), la otra
+   pasa a ocupar el 100% sola, sin dejar hueco. */
+.agent-field-row { display: flex; gap: 12px; flex-wrap: wrap; }
+.agent-field-row > .agent-field-col {
+  flex: 1 1 200px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* Sonido: unico campo "angosto" sin pareja de fila -- 30% del modal
+   (con piso de legibilidad en mobile). */
+.agent-field-narrow { width: 30%; min-width: 150px; }
+
+/* Theming de flatpickr (pestaña Agentes, #agent-datetime/#agent-time --
+   reemplazo de los <input type="datetime-local"/"time"> nativos, pedido
+   del usuario 2026-09-17) -- reusa las MISMAS variables de tema que el
+   resto de Vision (--surface/--surface-2/--accent/--ink/--line-strong) en
+   vez del CSS propio de flatpickr, para que seady con los 4 temas
+   (oscuro/claro/azul/rojo) sin duplicar reglas por tema. */
+.flatpickr-calendar {
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .35);
+  font-family: var(--font-mono);
+}
+.flatpickr-calendar.arrowTop:before, .flatpickr-calendar.arrowTop:after { border-bottom-color: var(--line-strong); }
+.flatpickr-months, .flatpickr-weekdays { background: transparent; }
+.flatpickr-month { color: var(--ink); fill: var(--ink); }
+.flatpickr-current-month .flatpickr-monthDropdown-months,
+.flatpickr-current-month input.cur-year { color: var(--ink); }
+.flatpickr-weekday { color: var(--ink-soft); background: transparent; }
+.flatpickr-day { color: var(--ink); }
+.flatpickr-day.flatpickr-disabled, .flatpickr-day.prevMonthDay, .flatpickr-day.nextMonthDay { color: var(--ink-faint, var(--ink-soft)); }
+.flatpickr-day:hover { background: var(--surface); border-color: var(--line-strong); }
+.flatpickr-day.selected, .flatpickr-day.selected:hover {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+.flatpickr-day.today { border-color: var(--accent); }
+.flatpickr-time { background: transparent; border-top: 1px solid var(--line-strong); }
+.flatpickr-time input, .flatpickr-time .flatpickr-time-separator, .flatpickr-time .flatpickr-am-pm { color: var(--ink); }
+.flatpickr-time input:hover, .flatpickr-time input:focus { background: var(--surface); }
+.numInputWrapper span.arrowUp:after { border-bottom-color: var(--ink-soft); }
+.numInputWrapper span.arrowDown:after { border-top-color: var(--ink-soft); }
+/* El input VISIBLE que arma flatpickr (altInput de #agent-datetime, o
+   #agent-time directo -- ambos type="text" dentro de .agent-field-col)
+   hereda solo el estilo GENERICO de .settings-field input[type="text"] de
+   mas arriba -- no hace falta duplicarlo aca, verificado en vivo. */
+
+/* -- spec bateria-qa-integracion REQ-005: pasada visual conservadora de
+   formularios de Configuracion (2026-09). Scoped bajo .settings-field:
+   solo apariencia (width/focus/tipos nativos), sin cambiar estructura HTML
+   ni reglas de los botones de acciones globales. */
+.settings-field input[type="text"],
+.settings-field input[type="password"],
+.settings-field input[type="number"],
+.settings-field input[type="time"],
+.settings-field input[type="datetime-local"],
+.settings-field input[type="email"],
+.settings-field select,
+.settings-field textarea {
+  width: 100%;
+  box-sizing: border-box;
+}
+/* Picks nativos (time/datetime) con tema oscuro, y slider/checkbox con el
+   accent de Vision para que no queden con el azul generico del SO. */
+.settings-field input[type="time"],
+.settings-field input[type="datetime-local"] { color-scheme: dark; }
+.settings-field input[type="range"] { width: 100%; accent-color: var(--accent); }
+.settings-field input[type="checkbox"] { width: auto; accent-color: var(--accent); }
+/* Botoneras de formulario (Guardar/Cancelar/Explorar) alineadas y con aire. */
+.settings-actions { display: flex; gap: 8px; align-items: center; margin-top: 4px; flex-wrap: wrap; }
+.settings-field .acc-action-btn { align-self: flex-start; }
+@media (prefers-reduced-motion: reduce) {
+  .settings-field select, .settings-field input, .settings-field textarea { transition: none; }
+}
+
+/* REQ-003: Badge Clasificador de respuesta */
+.msg-response-type {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 4px 8px;
+  border-radius: 6px;
+  margin-bottom: 10px;
+  width: fit-content;
+}
+.msg-response-type svg { opacity: 0.9; }
+

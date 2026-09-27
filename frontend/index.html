@@ -1,0 +1,1539 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vision · Asistente Inteligente</title>
+  <!-- Favicon: la "V" de Vision sobre azul (spec vision-generico REQ-005,
+       assets/logo.svg; los PNG y el .ico se generan de ese diseño). El .ico multi-size
+       cubre navegadores viejos y el atajo de escritorio de Windows; el PNG de
+       32px lo prefieren Chrome/Edge/Firefox modernos. -->
+  <link rel="icon" href="./assets/favicon.ico" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="./assets/favicon-32.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="./assets/favicon-180.png" />
+  <!-- flatpickr VENDORIZADO (ver vendor/flatpickr.min.js.LICENSE.txt, MIT
+       gratis -- descartado dhtmlx por licencia paga, pedido explicito del
+       usuario 2026-09) -- selector de fecha/hora para #agent-datetime/
+       #agent-time (pestaña Agentes) en formato dd/mm/yyyy y 24hs FIJO,
+       sin depender del idioma del navegador (a diferencia del <input
+       type="datetime-local"> nativo, que si sigue ese idioma). -->
+  <link rel="stylesheet" href="./vendor/flatpickr.min.css" />
+  <link rel="stylesheet" href="./css/styles.css" />
+  <!--
+    Aplica el tema guardado ANTES de que el CSS pinte el primer frame --
+    si esto viviera en app.js (que carga como <script type="module">,
+    diferido por naturaleza), habria un flash visible del tema oscuro por
+    defecto antes de conmutar a claro. Duplica la clave/logica minima de
+    applyTheme() en app.js (fuente real, que ademas actualiza el <select>
+    de Configuracion) -- este bloque es solo el "primer pintado" rapido.
+  -->
+  <script>
+    (function () {
+      // 3 temas posibles (ver applyTheme()/getSavedTheme() en app.js,
+      // fuente real de esta logica -- esta copia es solo el "primer
+      // pintado" rapido antes de que ese modulo diferido cargue):
+      //   "dark"      Oscuro Rojo -- default de :root, SIN atributo
+      //   "light"     Claro Azul -- default si nunca se eligio nada
+      //   "dark-blue" Oscuro Azul
+      // Pedido explicito del usuario (2026-09-08): "light" (azul)
+      // pasa a ser el default si el usuario nunca eligio explicitamente
+      // otra cosa.
+      var valid = ["dark", "light", "dark-blue"];
+      try {
+        var saved = localStorage.getItem("vision.theme");
+        var resolved = valid.indexOf(saved) !== -1 ? saved : "light";
+        if (resolved !== "dark") document.documentElement.dataset.theme = resolved;
+      } catch {
+        // noop -- localStorage inaccesible, se queda en el tema claro por defecto igual (ver mas abajo)
+        document.documentElement.dataset.theme = "light";
+      }
+    })();
+  </script>
+</head>
+<body>
+  <!--
+    REQ-001/002/003/004 (spec pantalla-bienvenida-ojo): splash screen que
+    se ve EN CADA carga de pagina, ANTES del resto de la app -- reusa
+    voice-eye.js (REQ-011 de narracion-agente-efimera) en modo decorativo
+    (useCamera:false, sin pedir permisos de camara/mic aca). Estructura
+    visual tomada de _mockup_jarvis_animation.html: titulo "VISION"
+    ARRIBA (no junto al subtitulo -- correccion explicita del usuario,
+    la 1ra version los tenia agrupados y pegados abajo), el ojo ocupando
+    el centro/fondo completo, y el subtitulo de marca ABAJO DEL OJO
+    (pedido explicito: "arriba VISION, lo otro abajo"). z-index alto para
+    tapar #app-shell mientras esta activo; se oculta (display:none) tras
+    la transicion de zoom+fade (REQ-003/004), sin desmontarse del DOM del
+    todo -- solo el ojo (voice-eye) se destruye para liberar el canvas.
+  -->
+  <div id="splash-screen" class="splash-screen">
+    <div id="splash-eye-container" class="splash-eye-container"></div>
+    <div class="splash-title-wrap">
+      <h1 class="splash-title" id="splash-title"></h1>
+    </div>
+    <!-- spec vision-generico REQ-005: " · <empresa>" lo agrega app.js con
+         VISION_COMPANY_NAME (ver applyCompanyName). -->
+    <p class="splash-subtitle" id="splash-subtitle">Asistente Inteligente</p>
+  </div>
+
+  <div class="app-shell" id="app-shell">
+
+    <!-- Scrim de movil: cierra el sidebar al tocar fuera -->
+    <div id="scrim" class="scrim"></div>
+
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-text">
+          <h1>VISION</h1>
+          <span class="brand-tagline">ASISTENTE IA</span>
+        </div>
+        <span class="brand-mark" aria-hidden="true">
+          <!-- Logo de Vision (la "V" sobre azul), a la derecha de "VISION". -->
+          <img src="./assets/logo.svg" alt="" />
+        </span>
+        <button id="sidebar-close" class="sidebar-close" type="button" aria-label="Cerrar menu" title="Cerrar panel">✕</button>
+      </div>
+      <p class="brand-subtitle" id="brand-subtitle">Asistente Inteligente</p>
+
+      <!-- Panel de estado tipo OpenCode: todo colapsado por defecto (<details>
+           nativo = accesible por teclado sin JS extra), cada resumen muestra
+           el dato clave sin necesitar abrir la seccion. -->
+      <nav class="acc-list" aria-label="Panel de estado de la sesion">
+
+        <details class="acc-section" id="acc-session">
+          <summary title="Conversacion actual y sesiones guardadas">
+            <span class="acc-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5Z"/></svg>
+            </span>
+            <span class="acc-title">Sesión</span>
+            <span class="acc-summary" id="session-summary">nueva</span>
+          </summary>
+          <div class="acc-body">
+            <button id="session-new-btn" class="acc-action-btn" type="button" title="Iniciar una conversacion nueva">+ Nueva sesión</button>
+            <!--
+              REQ-001 (spec busqueda-mensajes): input fijo de busqueda,
+              arriba de la lista de sesiones. Mientras tiene texto,
+              #session-list se reemplaza por #session-search-results
+              (ver renderSearchResults) en vez de coexistir con la lista
+              normal -- evita mostrar dos listas parecidas a la vez.
+            -->
+            <div class="session-search">
+              <input type="search" id="session-search-input" class="session-search-input" placeholder="Buscar en conversaciones…" autocomplete="off" />
+            </div>
+            <ul id="session-list" class="session-list"></ul>
+            <ul id="session-search-results" class="session-list hidden"></ul>
+          </div>
+        </details>
+
+        <details class="acc-section" id="acc-context">
+          <summary title="Tokens estimados usados en esta conversacion">
+            <span class="acc-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3v9l6 3"/></svg>
+            </span>
+            <span class="acc-title">Contexto</span>
+            <span class="acc-summary" id="context-summary">—</span>
+          </summary>
+          <div class="acc-body">
+            <div class="context-track">
+              <div class="context-fill" id="context-fill"></div>
+            </div>
+            <div class="context-detail" id="context-detail">Sin datos aun</div>
+          </div>
+        </details>
+
+        <details class="acc-section" id="acc-connectors">
+          <summary title="Estado de Oracle/BigQuery/SharePoint/SAP/Graph">
+            <span class="acc-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a3.5 3.5 0 0 0 5 0l2.3-2.3a3.5 3.5 0 0 0-5-5L10.8 8.2"/><path d="M14 10a3.5 3.5 0 0 0-5 0l-2.3 2.3a3.5 3.5 0 0 0 5 5L13.2 15.8"/></svg>
+            </span>
+            <span class="acc-title">Conectores</span>
+            <span class="acc-summary" id="connectors-summary">—</span>
+          </summary>
+          <div class="acc-body">
+            <ul id="connectors-list" class="connectors-list"></ul>
+          </div>
+        </details>
+
+        <details class="acc-section" id="acc-todo">
+          <summary title="Lista de tareas del agente">
+            <span class="acc-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="4.5" width="15" height="15" rx="2"/><path d="M8 12.3l2.4 2.4L16.2 9"/></svg>
+            </span>
+            <span class="acc-title">Tareas</span>
+            <span class="acc-summary" id="todo-summary">0</span>
+          </summary>
+          <div class="acc-body">
+            <ul id="todo-list" class="todo-list">
+              <li class="todo-empty">Sin tareas activas</li>
+            </ul>
+          </div>
+        </details>
+
+        <details class="acc-section" id="acc-tools">
+          <summary title="Historial de tools ejecutadas">
+            <span class="acc-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3l1.6 1.6-1 2.5-2.5 1-1.6-1.6M10.5 10.5 4 17v2.5H6.5L13 12.9"/><circle cx="14.7" cy="6.3" r="1.4"/></svg>
+            </span>
+            <span class="acc-title">Herramientas</span>
+            <span class="acc-summary" id="tools-summary">0</span>
+          </summary>
+          <div class="acc-body">
+            <ul id="tool-log" class="tool-log">
+              <li class="tool-empty">Aún no se ejecutó ninguna tool</li>
+            </ul>
+          </div>
+        </details>
+
+        <!--
+          spec agentes-programados: pedido explicito del usuario -- ver
+          los agentes de ESTA sesion sin tener que abrir Configuración,
+          con pausa/activación y "Ejecutar ahora" a mano.
+        -->
+        <details class="acc-section" id="acc-agents">
+          <summary title="Agentes programados en esta sesión">
+            <span class="acc-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="13" r="7.5"/><path d="M12 9.5v3.5l2.2 1.3"/><path d="M9 3.5h6M8 6.5l1-2M16 6.5l-1-2"/></svg>
+            </span>
+            <span class="acc-title">Agentes</span>
+            <span class="acc-summary" id="session-agents-summary">0</span>
+          </summary>
+          <div class="acc-body">
+            <ul id="session-agents-list" class="session-list">
+              <li class="session-list-empty">Sin agentes en esta sesión</li>
+            </ul>
+            <button id="session-agents-config-btn" class="acc-action-btn" type="button">Configurar en Ajustes</button>
+          </div>
+        </details>
+
+        <!-- pedido del usuario 2026-09-17: las alarmas (globales, no por
+             sesion) tambien visibles ademas de en Configuracion. -->
+        <details class="acc-section" id="acc-alarms">
+          <summary title="Alarmas y recordatorios programados">
+            <span class="acc-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v1M4.2 6.2l.7.7M19.8 6.2l-.7.7"/><path d="M6 13a6 6 0 1 1 12 0c0 3 1 4.5 1 4.5H5S6 16 6 13Z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>
+            </span>
+            <span class="acc-title">Alarmas</span>
+            <span class="acc-summary" id="session-alarms-summary">0</span>
+          </summary>
+          <div class="acc-body">
+            <ul id="session-alarms-list" class="session-list">
+              <li class="session-list-empty">Sin alarmas programadas</li>
+            </ul>
+            <button id="session-alarms-config-btn" class="acc-action-btn" type="button">Configurar en Ajustes</button>
+          </div>
+        </details>
+      </nav>
+
+      <div class="sidebar-footer-info">
+        <button class="footer-row" id="footer-project-path" type="button" title="Carpeta de proyecto activa (click para configurar)">
+          <span class="footer-icon">📁</span>
+          <span class="footer-text" id="footer-project-text">Sin proyecto configurado</span>
+        </button>
+        <button class="footer-row" id="footer-model" type="button" title="Motor / modelo activo (click para configurar)">
+          <span class="footer-icon">⚡</span>
+          <span class="footer-text" id="footer-model-text">—</span>
+        </button>
+      </div>
+
+      <div class="sidebar-footer">
+        <span class="stripe-badge">
+          <span class="stripe stripe-1"></span>
+          <span class="stripe stripe-2"></span>
+        </span>
+        <span class="footer-label" id="footer-company">Vision</span>
+      </div>
+
+      <!-- Cache local (localStorage) de esta conversacion -- sutil, no bloqueante -->
+      <div class="cache-meter">
+        <div class="cache-meter-row">
+          <span class="cache-meter-label">Caché local</span>
+          <span class="cache-meter-pct" id="cache-pct">0%</span>
+        </div>
+        <div class="cache-meter-track">
+          <div class="cache-meter-fill" id="cache-fill"></div>
+        </div>
+        <button id="cache-clear-btn" class="cache-clear-btn" type="button" title="Borra el historial de esta conversacion guardado en el navegador">Liberar caché</button>
+      </div>
+
+      <!-- REQ-001/002/003 (spec perfil-usuario-y-footer): atribucion de
+           autoria -- el avatar circular placeholder se quito (pedido
+           explicito del usuario), queda solo el credito con link. -->
+      <div class="dev-footer">
+        <a
+          class="dev-credit"
+          href="https://www.linkedin.com/in/ingenierogamez/"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Ver perfil de LinkedIn"
+        >Desarrollado por Jorge O. Gamez</a>
+        <!-- Version del backend REALMENTE cargado en este proceso (ver
+             app/version.py) -- se llena via /api/status en checkBackendStatus().
+             Motivo: un .exe portable compilado congela el codigo backend
+             adentro; sin esto no habia forma rapida de confirmar en la UI
+             si el .exe corriendo tenia o no un fix ya aplicado en el
+             codigo fuente (ver CHANGELOG.md, incidente 2026-09-05). -->
+        <span class="dev-version" id="dev-version" title="Version del backend en ejecucion"></span>
+      </div>
+    </aside>
+
+    <main class="chat-main">
+      <!--
+        REQ-006 (spec persistencia-sqlite-sesiones): banner persistente,
+        visible solo mientras NO hay carpeta de proyecto elegida (nada que
+        guardar el historial en disco). Arranca oculto -- se muestra desde
+        JS al detectar persistence_available:false en /api/session/status.
+      -->
+      <div class="persistence-banner hidden" id="persistence-banner" role="status">
+        <span class="persistence-banner-icon">⚠</span>
+        <span>
+          Sin carpeta de proyecto: tu historial no se está guardando.
+          Elegí una carpeta en <a href="#" id="persistence-banner-settings-link">esta sesión</a>
+          o exportá manualmente antes de cerrar.
+        </span>
+      </div>
+
+      <!--
+        spec modo-plan-loop REQ-009: banner de "el loop necesita tu ayuda" --
+        visible SOLO mientras `loop_paused_for_question` esta activo (ver
+        handleEvent 'loop-paused' y activateSession). Rojo/accent (a
+        diferencia del ambar informativo de persistencia) porque requiere
+        accion humana YA, no es solo informativo.
+      -->
+<div class="loop-banner hidden" id="loop-banner" role="alert">
+        <span class="loop-banner-icon">🔔</span>
+        <span>El loop necesita tu ayuda para continuar — respondé la pregunta de abajo.</span>
+        <button type="button" class="loop-banner-stop" id="loop-banner-stop">Detener loop</button>
+      </div>
+
+      <!-- REQ-004 (spec programador-alarmas): toast de aviso cuando dispara
+           una alarma/recordatorio/pomodoro -- distinto del banner del loop,
+           es informativo y auto-descarta (ver app.js showAlarmToast). -->
+      <div class="alarm-toast hidden" id="alarm-toast" role="status">
+        <span class="alarm-toast-icon">⏰</span>
+        <span id="alarm-toast-text"></span>
+      </div>
+
+      <!-- Encabezado de comando: contexto vivo, no decorativo -->
+      <header class="command-bar">
+        <button id="menu-btn" class="menu-btn" type="button" aria-label="Abrir menu" aria-controls="sidebar" title="Abrir panel lateral">
+          <span></span><span></span><span></span>
+        </button>
+
+        <button id="settings-btn" class="icon-btn" type="button" title="Configuración">
+          <!-- Bug real reportado (2026-09): el path anterior (2 <path> a mano,
+               un circulo interno NO centrado en 12,12 + una corona de dientes
+               dispareja) se veia asimetrico/roto. Reemplazado por el icono
+               "settings" de Feather (via, path unico, 6 petalos redondeados
+               bien centrados en el viewBox 24x24, ampliamente verificado). -->
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82A1.65 1.65 0 0 0 3 13.09H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+        </button>
+
+        <div class="command-status" id="conn-status" data-state="connecting" title="Estado de conexion con el backend">
+          <span class="status-dot"></span>
+          <span class="status-text" id="conn-status-text">Conectando…</span>
+        </div>
+
+        <!--
+          REQ-006/007 (spec proyecto-por-sesion): chip de sesion, con 3
+          lineas -- nombre (grande/negrita), Session ID COMPLETO
+          (restaurado: una spec anterior lo habia reemplazado por error
+          por el nombre, en vez de mostrar ambos), y la ruta de la carpeta
+          de proyecto asignada a ESTA sesion (o la raiz de Vision si
+          todavia no tiene ninguna, ver resolve_project_path_for_display).
+          Un click abre el modal de edicion (renombrar + asignar carpeta),
+          REEMPLAZA la edicion inline directa que tenia antes. Reubicado a
+          la derecha del command-bar (pedido explicito del usuario) --
+          antes vivia entre #conn-status y la barra de progreso, que se
+          movio a los mensajes (ver #progress-bar mas abajo, dentro de
+          #messages).
+        -->
+        <button type="button" class="meta-chip meta-chip-btn session-chip" id="meta-session" title="Click para editar nombre y carpeta de esta sesión">
+          <span class="session-chip-name" id="meta-session-name">—</span>
+          <span class="session-chip-id" id="meta-session-id">—</span>
+          <span class="session-chip-path" id="meta-session-path">—</span>
+        </button>
+
+        <div class="command-meta">
+          <div class="model-picker">
+            <button type="button" class="meta-chip meta-chip-btn" id="meta-model" aria-haspopup="listbox" aria-expanded="false" title="Modelo activo (click para cambiar)">
+              <span class="meta-key">MODELO</span>
+              <span class="meta-val">—</span>
+              <span class="meta-caret">▾</span>
+            </button>
+            <div class="model-dropdown hidden" id="model-dropdown" role="listbox"></div>
+          </div>
+        </div>
+
+        <button id="fullscreen-btn" class="icon-btn" type="button" title="Pantalla completa">
+          <svg class="ic-expand" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <svg class="ic-collapse hidden" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 9h5V4M4 15h5v5M20 9h-5V4M20 15h-5v5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+
+        <button id="eye-btn" class="icon-btn" type="button" title="Mostrar/ocultar panel lateral">
+          <svg class="ic-eye-open" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 12s3.5-6.5 10-6.5S22 12 22 12s-3.5 6.5-10 6.5S2 12 2 12Z" stroke="currentColor" stroke-width="1.6"/><circle cx="12" cy="12" r="2.6" stroke="currentColor" stroke-width="1.6"/></svg>
+          <svg class="ic-eye-closed hidden" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 3l18 18M10.6 10.7a2.6 2.6 0 0 0 3.6 3.6M6.5 6.8C4 8.4 2 12 2 12s3.5 6.5 10 6.5c1.7 0 3.2-.4 4.5-1M17.6 17.6C20.4 15.8 22 12 22 12s-1.1-2.1-3.1-3.9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        </button>
+
+        <!--
+          REQ-004 (spec asistente-contextual-voz): boton "Cerebro" --
+          reusa la MISMA clase `.icon-btn` que #eye-btn (32x32px, mismo
+          alto/ancho, pedido explicito del usuario), ubicado inmediatamente
+          al lado. Activa/desactiva el modo Cerebro (conversacion por voz
+          continua con acceso a las mismas tools del chat de texto, ver
+          REQ-005 en adelante) -- estado visual (idle/escuchando/
+          procesando/hablando) via el atributo `data-state` (REQ-013,
+          mismo patron ya usado en el resto del proyecto para estado
+          visual, ver `data-recording` de #voice-record-btn).
+        -->
+        <button id="brain-btn" class="icon-btn" type="button" title="Modo Cerebro (conversación por voz continua)" data-state="idle">
+          <svg class="ic-brain" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M9 4.5a3 3 0 0 0-3 3v.2A3 3 0 0 0 4.5 10.5v.3a3 3 0 0 0-1 5.4 3 3 0 0 0 2.8 3.8H9a2 2 0 0 0 2-2V6.5a2 2 0 0 0-2-2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M15 4.5a3 3 0 0 1 3 3v.2a3 3 0 0 1 1.5 2.8v.3a3 3 0 0 1 1 5.4 3 3 0 0 1-2.8 3.8H15a2 2 0 0 1-2-2V6.5a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+
+        <!--
+          REQ-010/013 (spec asistente-contextual-voz): animacion de ondas
+          de sonido -- feedback en tiempo real de que el microfono SI esta
+          captando lo que el usuario dice, pedido explicito del usuario
+          ("tiene que tener una animacion de ondas de sonido para saber que
+          esta tomando lo que digo"). 4 barras cuya altura se actualiza en
+          vivo (JS, mismo loop del VAD) segun el nivel real de audio -- no
+          es una animacion CSS generica en loop, refleja el volumen real.
+          Oculto por defecto; solo visible mientras brainSpeechActive.
+        -->
+        <div id="brain-waveform" class="brain-waveform hidden" aria-hidden="true">
+          <span class="brain-waveform-bar"></span>
+          <span class="brain-waveform-bar"></span>
+          <span class="brain-waveform-bar"></span>
+          <span class="brain-waveform-bar"></span>
+        </div>
+      </header>
+
+      <!--
+        REQ-004 (spec busqueda-mensajes): barra de navegacion entre
+        coincidencias resaltadas en la conversacion abierta. Arranca
+        oculta -- se muestra desde JS al activar un resultado de busqueda
+        que cae en la sesion actual (ver activateSearchInOpenSession).
+      -->
+      <div class="search-nav-bar hidden" id="search-nav-bar">
+        <span id="search-nav-count">0 de 0</span>
+        <button type="button" class="search-nav-btn" id="search-nav-prev" title="Coincidencia anterior">↑</button>
+        <button type="button" class="search-nav-btn" id="search-nav-next" title="Coincidencia siguiente">↓</button>
+        <button type="button" class="search-nav-btn search-nav-close" id="search-nav-close" title="Cerrar búsqueda">✕</button>
+      </div>
+
+      <div id="messages" class="messages">
+        <div class="messages-watermark" aria-hidden="true">
+          <!-- Marca de agua del chat vacío: el logo de Vision. -->
+          <img src="./assets/logo.svg" alt="" />
+        </div>
+        <!--
+          REQ-004/005 (spec barra-progreso-adaptativa), reubicada (pedido
+          explicito del usuario): ya no vive fija en el command-bar --
+          ahora JS la crea/destruye DENTRO del .turn-response-slot del
+          turno que esta procesandose (mismo mecanismo que appendToolBadge/
+          appendMessage con mountEl, ver getOrCreateProgressBar en app.js),
+          asi queda pegada debajo de la respuesta que se esta generando en
+          vez de en un lugar fijo lejos del texto. Sin markup estatico
+          aca: el template completo (progress-head/progress-track/etc) se
+          arma en runtime.
+        -->
+      </div>
+
+      <div id="question-panel" class="question-panel hidden"></div>
+
+      <!-- Menu de skills al escribir "/" en el input -->
+      <div id="slash-menu" class="slash-menu hidden"></div>
+
+      <!--
+        REQ-002 (spec comandos-slash) ya tiene un modal generico -- este
+        es distinto: aviso de bloqueo (REQ-002 de contexto-multimodal) si
+        el modelo activo no soporta imagenes. Simple, sin overlay, se
+        auto-oculta -- no amerita el peso de un modal centrado.
+      -->
+      <div id="image-blocked-notice" class="image-blocked-notice hidden"></div>
+
+      <!--
+        REQ-005 (spec contexto-multimodal): fila de miniaturas pendientes
+        de enviar, arriba del compositor -- oculta mientras no hay
+        imagenes adjuntas todavia.
+      -->
+      <div id="pending-images-row" class="pending-images-row hidden"></div>
+
+      <form id="chat-form" class="chat-form">
+        <!--
+          spec modo-plan-loop REQ-005: chip de modo actual (Plan/Activo) --
+          "PLAN" en ambar (mismo criterio semantico ya usado en el resto
+          del sistema: "atencion", no error) cuando Vision no puede
+          escribir/editar/ejecutar. Clickeable como alternativa al atajo
+          Tab (REQ-001, que solo funciona con foco en el chat). Reubicado
+          abajo a la izquierda del compositor (pedido explicito del
+          usuario) -- antes vivia en el command-bar de arriba.
+        -->
+        <button type="button" class="meta-chip meta-chip-btn mode-chip" id="mode-chip" data-mode="active" title="Modo actual — click o Tab (con foco en el chat) para alternar">
+          <span class="meta-key">MODO</span>
+          <span class="meta-val" id="mode-chip-val">ACTIVO</span>
+        </button>
+
+        <!--
+          REQ-001 (spec narracion-agente-efimera, "Interaccion por voz"):
+          2 botones DIRECTOS, sin modal intermedio (la 1ra revision de la
+          spec tenia un solo boton con modal "¿que modo queres?" -- el
+          usuario lo confirmo como "tedioso, pregunta a cada rato" y pidio
+          reemplazarlo por estos 2 botones separados). Microfono dispara
+          directo el Modo chat por voz (REQ-002); Record dispara directo
+          el Modo reunion (REQ-003), con el "ojo" a pantalla completa
+          (REQ-011, ver #voice-eye-overlay mas abajo).
+        -->
+        <button type="button" id="voice-mic-btn" class="voice-mic-btn" title="Hablar (modo chat por voz)">
+          <span class="voice-mic-btn-circle">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z" stroke="currentColor" stroke-width="1.6"/><path d="M19 11a7 7 0 0 1-14 0M12 18v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+          </span>
+        </button>
+        <button type="button" id="voice-record-btn" class="voice-record-btn" title="Modo reunión">
+          <span class="voice-record-btn-circle">
+            <span class="voice-record-btn-dot" aria-hidden="true"></span>
+          </span>
+        </button>
+
+        <!-- REQ-001: selector de archivos nativo, oculto -- disparado por
+             el boton de adjuntar (clip). accept restringe a imagenes de
+             entrada, coherente con el alcance de esta spec (no documentos). -->
+        <input type="file" id="image-file-input" accept="image/*" multiple hidden />
+        <button type="button" id="attach-image-btn" class="attach-image-btn" title="Adjuntar imagen">📎</button>
+        <!--
+          REQ-001/002/003 (spec compositor-expandible): wrapper con
+          position:relative para anclar el boton ampliar/reducir en la
+          esquina superior derecha del textarea, sin alterar el layout
+          flex de .chat-form (el wrapper hereda flex:1, no el textarea
+          directo -- ver styles.css).
+        -->
+        <div class="chat-input-wrap">
+          <textarea
+            id="chat-input"
+            placeholder="Escribile a Vision... ('/' para skills, Shift+Enter para nueva linea, Ctrl+V para pegar imagenes)"
+            rows="2"
+          ></textarea>
+          <button type="button" id="composer-expand-btn" class="composer-expand-btn" title="Ampliar compositor">↕</button>
+        </div>
+        <!--
+          Boton unico Enviar/Detener (pedido explicito del usuario --
+          reemplaza los 2 botones independientes que habia antes: "Enviar"
+          siempre visible + "Detener" aparte solo mientras corria un
+          turno). Alterna via `data-state` (mismo criterio que el resto
+          del sistema, ver #conn-status/#mode-chip):
+            - "idle"     -> icono+texto "Enviar", dispara el submit normal.
+            - "active"   -> icono+texto "Detener" (mano STOP), hay un
+                            turno realmente corriendo y se puede parar.
+            - "stopping" -> deshabilitado, con spinner (esperando cierre
+                            limpio de la tool en curso).
+          `type="button"` a proposito (no "submit"): el click se maneja
+          100% en JS (ver sendOrStopBtnEl en app.js) para poder decidir
+          "enviar" vs "detener" segun el estado en vez de depender del
+          comportamiento nativo de submit.
+        -->
+        <button type="button" id="send-btn" class="send-or-stop-btn" title="Enviar mensaje" data-state="idle">
+          <svg class="ic-send" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M20 12l-16-8 6 8-6 8 16-8Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+          </svg>
+          <svg class="ic-stop-hand" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V12M11 12V4a1.5 1.5 0 0 1 3 0v8M14 12V5.5a1.5 1.5 0 0 1 3 0V13M17 9.5a1.5 1.5 0 0 1 3 0V14c0 4-2.5 7-6.5 7h-1C9 21 7 19 6 17l-2.2-3.8c-.5-.9-.1-2 .8-2.4.8-.3 1.6 0 2.1.7L8 13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="stop-spinner" aria-hidden="true"></span>
+          <span class="send-or-stop-label" id="send-btn-label">Enviar</span>
+        </button>
+      </form>
+
+      <!--
+        REQ-002 (spec asistente-contextual-voz, reemplaza el overlay de
+        pantalla completa original de narracion-agente-efimera REQ-003/
+        011): widget FLOTANTE chico del "ojo" (Three.js+anime.js, ver
+        voice-eye.js) -- NUNCA tapa el chat ni bloquea clicks fuera de su
+        propia area (position:fixed pero de tamaño acotado, arrastrable
+        por drag-and-drop, ver dragElement() en app.js). Se monta DENTRO
+        de #voice-eye-container recien cuando se activa (initVoiceEye),
+        nunca corre de fondo. Arranca oculto. Sin panel de transcript en
+        vivo ni de "hilo de procesamiento" (decision registrada en
+        spec.md 2026-09-10): la opinion de Vision aparece directo como
+        mensaje del chat cuando responde. La confirmacion de salida sigue
+        siendo un modal centrado sobre la vista normal del chat (ya no
+        sobre un overlay de pantalla completa).
+      -->
+      <div id="voice-eye-widget" class="voice-eye-widget hidden">
+        <div id="voice-eye-drag-handle" class="voice-eye-drag-handle" title="Arrastrar">
+          <span class="voice-eye-rec-dot"></span>
+        </div>
+        <div id="voice-eye-container" class="voice-eye-container"></div>
+      </div>
+
+      <!--
+        Spec panel-flotante-control-rapido (2026-09-12): boton circular
+        flotante FIJO (a diferencia de #voice-eye-widget, no es
+        arrastrable -- pedido explicito del usuario) en la esquina
+        inferior izquierda, arriba del compositor de chat. Un solo click
+        despliega un menu con 4 accesos rapidos que hoy viven dispersos
+        en distintas partes de la UI (REQ-001):
+          - Silenciar voz (REQ-002): corta el TTS en curso, sin tocar la
+            preferencia permanente de Configuracion > Audio.
+          - Auto-envio (REQ-003): espejo del MISMO estado que el checkbox
+            de Configuracion > Audio del Modo Cerebro (localStorage
+            compartido, no un estado nuevo).
+          - Navegador (REQ-004): boton que abre/cierra el panel del
+            lienzo embebido (#quick-browser-panel, mas abajo).
+          - Skills (REQ-005): reemplaza el CONTENIDO del mismo menu
+            in-place (submenu, no modal aparte) con la lista de skills
+            LOCALES del proyecto de la sesion actual.
+      -->
+      <div id="quick-panel-widget" class="quick-panel-widget">
+        <button type="button" id="quick-panel-btn" class="quick-panel-btn" title="Accesos rapidos" aria-expanded="false">
+          <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="6" cy="12" r="1.8" fill="currentColor"/><circle cx="18" cy="12" r="1.8" fill="currentColor"/></svg>
+        </button>
+        <div id="quick-panel-menu" class="quick-panel-menu hidden">
+          <!-- Vista principal: 4 opciones -->
+          <div id="quick-panel-main-view" class="quick-panel-view">
+            <button type="button" id="quick-panel-mute-btn" class="quick-panel-item">
+              <span class="quick-panel-item-icon">
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z" stroke="currentColor" stroke-width="1.6"/><path d="M19 11a7 7 0 0 1-14 0M12 18v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M4 4l16 16" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+              </span>
+              <span class="quick-panel-item-label">Silenciar voz</span>
+              <span id="quick-panel-mute-toggle" class="quick-panel-toggle" data-checked="false" aria-hidden="true"><span class="quick-panel-toggle-knob"></span></span>
+            </button>
+            <button type="button" id="quick-panel-autosend-btn" class="quick-panel-item" title="Auto-envío: si esta desactivado, Vision espera a que digas 'visión' para enviar lo dicho">
+              <span class="quick-panel-item-icon">
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M9 4.5a3 3 0 0 0-3 3v.2A3 3 0 0 0 4.5 10.5v.3a3 3 0 0 0-1 5.4 3 3 0 0 0 2.8 3.8H9a2 2 0 0 0 2-2V6.5a2 2 0 0 0-2-2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M15 4.5a3 3 0 0 1 3 3v.2a3 3 0 0 1 1.5 2.8v.3a3 3 0 0 1 1 5.4 3 3 0 0 1-2.8 3.8H15a2 2 0 0 1-2-2V6.5a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </span>
+              <span class="quick-panel-item-label">Auto-envío</span>
+              <span id="quick-panel-autosend-toggle" class="quick-panel-toggle" data-checked="false" aria-hidden="true"><span class="quick-panel-toggle-knob"></span></span>
+            </button>
+            <button type="button" id="quick-panel-loop-btn" class="quick-panel-item" title="Repetir en bucle: al reproducir un fragmento con 🔊, se repite hasta desactivarlo o detenerlo">
+              <span class="quick-panel-item-icon">
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M17 2l4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M3 11V9a4 4 0 0 1 4-4h14M7 22l-4-4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M21 13v2a4 4 0 0 1-4 4H3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </span>
+              <span class="quick-panel-item-label">Repetir en bucle</span>
+              <span id="quick-panel-loop-toggle" class="quick-panel-toggle" data-checked="false" aria-hidden="true"><span class="quick-panel-toggle-knob"></span></span>
+            </button>
+            <button type="button" id="quick-panel-looprun-btn" class="quick-panel-item" title="Loop: inicia/detiene la ejecución automática de la lista de tareas pendientes">
+              <span class="quick-panel-item-icon">
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M17 2l4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M3 11V9a4 4 0 0 1 4-4h14M7 22l-4-4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M21 13v2a4 4 0 0 1-4 4H3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </span>
+              <span class="quick-panel-item-label">Loop</span>
+              <span id="quick-panel-looprun-toggle" class="quick-panel-toggle" data-checked="false" aria-hidden="true"><span class="quick-panel-toggle-knob"></span></span>
+            </button>
+            <button type="button" id="quick-panel-loopauto-btn" class="quick-panel-item" title="Auto: en loop, Vision decide las opciones (Recomendada); pausa si hay (Riesgo) o ninguna recomendada">
+              <span class="quick-panel-item-icon">
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.6"/>
+                  <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+                </svg>
+              </span>
+              <span class="quick-panel-item-label">Auto</span>
+              <span id="quick-panel-loopauto-toggle" class="quick-panel-toggle" data-checked="false" aria-hidden="true"><span class="quick-panel-toggle-knob"></span></span>
+            </button>
+            <button type="button" id="quick-panel-browser-btn" class="quick-panel-item">
+              <span class="quick-panel-item-icon">
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6"/><path d="M3 12h18M12 3c2.5 2.5 3.8 5.7 3.8 9s-1.3 6.5-3.8 9c-2.5-2.5-3.8-5.7-3.8-9s1.3-6.5 3.8-9Z" stroke="currentColor" stroke-width="1.6"/></svg>
+              </span>
+              <span class="quick-panel-item-label">Navegador</span>
+            </button>
+            <button type="button" id="quick-panel-skills-btn" class="quick-panel-item">
+              <span class="quick-panel-item-icon">
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3l2.2 4.5 5 .7-3.6 3.5.9 5-4.5-2.4-4.5 2.4.9-5-3.6-3.5 5-.7L12 3Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+              </span>
+              <span class="quick-panel-item-label">Skills</span>
+              <span class="quick-panel-item-chevron">›</span>
+            </button>
+          </div>
+          <!-- Submenu in-place de Skills (REQ-005): reemplaza la vista de
+               arriba en vez de abrir un modal aparte, pedido explicito
+               del usuario. -->
+          <div id="quick-panel-skills-view" class="quick-panel-view hidden">
+            <button type="button" id="quick-panel-skills-back" class="quick-panel-back">‹ Accesos rápidos</button>
+            <div id="quick-panel-skills-list" class="quick-panel-skills-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <!--
+        REQ-004 (panel-flotante-control-rapido): panel del "lienzo"
+        embebido, reusa el backend YA EXISTENTE de vista previa en vivo
+        (browser_workspace.py + /api/browser/{id}/fingerprint +
+        /browser/{id}/...) -- Vision escribe HTML/CSS/JS en
+        browser/{session_id}/ via write/edit/bash, este panel lo muestra
+        en un iframe con auto-refresh por polling de fingerprint. Arranca
+        oculto; el polling de fingerprint SOLO corre mientras el panel
+        esta visible (mismo criterio ya usado para el medidor de nivel de
+        microfono en Configuracion > Audio, evita gasto de red/CPU de
+        fondo si el usuario nunca lo abre).
+      -->
+      <div id="quick-browser-panel" class="quick-browser-panel hidden">
+        <div class="quick-browser-header">
+          <span class="quick-browser-title">Navegador — vista previa en vivo</span>
+          <span id="quick-browser-url" class="quick-browser-url" title="Hacé click para copiar la dirección"></span>
+          <div class="quick-browser-window-cntrls">
+            <button type="button" id="quick-browser-open-btn" class="quick-browser-cntrl-btn" title="Abrir en pestaña del navegador" aria-label="Abrir en navegador">
+              <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 13L13 3M7 3h6v6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <button type="button" id="quick-browser-min-btn" class="quick-browser-cntrl-btn" data-action="minimize" title="Minimizar" aria-label="Minimizar">─</button>
+            <button type="button" id="quick-browser-max-btn" class="quick-browser-cntrl-btn" data-action="maximize" title="Maximizar" aria-label="Maximizar">
+              <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="3" width="10" height="10" stroke="currentColor" stroke-width="1.5"/></svg>
+            </button>
+            <button type="button" id="quick-browser-close-btn" class="quick-browser-cntrl-btn quick-browser-cntrl-btn-close" title="Cerrar" aria-label="Cerrar">✕</button>
+          </div>
+        </div>
+        <iframe id="quick-browser-iframe" class="quick-browser-iframe" title="Vista previa generada por Vision"></iframe>
+      </div>
+
+
+      <!--
+        Bug real reportado por el usuario: no habia forma de salir
+        DESCARTANDO la grabacion -- solo "guardar y salir" (genera
+        resumen) o "cancelar" (seguir grabando). Se agrega un 3er boton
+        "Descartar" (accion destructiva, color de peligro para
+        diferenciarlo visualmente de las otras 2) que sale del modo
+        reunion SIN llamar a /api/meeting/summarize -- borra
+        meetingFullTranscript sin generar ni persistir nada. Ya NO vive
+        dentro de un overlay de pantalla completa (REQ-002) -- queda
+        centrado sobre la vista normal del chat, con su propio z-index.
+      -->
+      <div id="voice-eye-exit-confirm" class="voice-eye-exit-confirm hidden">
+        <span>¿Seguro que querés salir del Modo reunión?</span>
+        <button type="button" id="voice-eye-exit-no">Cancelar</button>
+        <button type="button" id="voice-eye-exit-discard" class="voice-eye-exit-discard">Descartar y salir</button>
+        <button type="button" id="voice-eye-exit-yes" class="voice-eye-exit-yes">Guardar y salir</button>
+      </div>
+    </main>
+  </div>
+
+  <!--
+    REQ-002 (spec comandos-slash): modal centrado generico para comandos
+    "/" del sistema -- a diferencia de una skill (que inserta texto en el
+    input), elegir un comando de la seccion "Comandos" del menu "/" abre
+    ESTE modal. El contenido de #command-modal-body se arma dinamicamente
+    en JS segun el `kind` del comando (confirm/export/rename/unavailable),
+    ver renderCommandModal() en app.js.
+  -->
+  <div id="command-modal-overlay" class="dashboard-overlay hidden">
+    <div class="dashboard-modal command-modal" role="dialog" aria-modal="true" aria-labelledby="command-modal-title">
+      <header class="dashboard-header">
+        <div>
+          <span class="dashboard-eyebrow" id="command-modal-eyebrow">COMANDO</span>
+          <h2 id="command-modal-title">/comando</h2>
+        </div>
+        <button id="command-modal-close" class="dashboard-close" type="button" title="Cerrar">✕</button>
+      </header>
+      <div class="dashboard-body" id="command-modal-body"></div>
+    </div>
+  </div>
+
+  <!--
+    Modal de edicion de sesion -- reemplaza la edicion inline directa del
+    chip (specs gestion-sesiones/comandos-slash). Arquitectura
+    carpeta-por-sesion (definitiva): permite renombrar Y cambiar la
+    carpeta de proyecto PROPIA de esta sesion -- ya NO existe una carpeta
+    global unica en Configuracion (ver docstring largo en
+    app/persistence/service.py). Mismo patron visual .dashboard-overlay
+    ya usado en el resto.
+  -->
+  <div id="session-edit-overlay" class="dashboard-overlay hidden">
+    <div class="dashboard-modal session-edit-modal" role="dialog" aria-modal="true" aria-labelledby="session-edit-title">
+      <header class="dashboard-header">
+        <div>
+          <span class="dashboard-eyebrow">SESIÓN</span>
+          <h2 id="session-edit-title">Editar sesión</h2>
+        </div>
+        <button id="session-edit-close" class="dashboard-close" type="button" title="Cerrar">✕</button>
+      </header>
+      <div class="dashboard-body">
+        <div class="settings-field">
+          <label for="session-edit-name">Nombre</label>
+          <input id="session-edit-name" type="text" maxlength="80" />
+        </div>
+        <div class="settings-field">
+          <label for="session-edit-id">Session ID</label>
+          <input id="session-edit-id" type="text" readonly />
+        </div>
+        <div class="settings-field">
+          <label for="session-edit-path">Carpeta de proyecto</label>
+          <div class="session-edit-path-row">
+            <input id="session-edit-path" type="text" readonly placeholder="Sin carpeta asignada" />
+            <button id="session-edit-browse" type="button" class="acc-action-btn" title="Abrir el Explorador de Windows para elegir la carpeta">📁 Elegir…</button>
+          </div>
+        </div>
+        <div class="settings-actions">
+          <button id="session-edit-save" class="acc-action-btn" type="button">Guardar</button>
+          <span id="session-edit-status" class="settings-status"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal de confirmacion generico (reemplaza confirm()/alert() nativos
+       del navegador, que rompen la estetica de Vision) -- reusable para
+       cualquier accion destructiva, no solo eliminar sesion. -->
+  <div id="confirm-overlay" class="dashboard-overlay hidden">
+    <div class="dashboard-modal confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
+      <header class="dashboard-header">
+        <div>
+          <span class="dashboard-eyebrow" id="confirm-eyebrow">CONFIRMAR</span>
+          <h2 id="confirm-title">¿Estás seguro?</h2>
+        </div>
+        <button id="confirm-close" class="dashboard-close" type="button" title="Cancelar">✕</button>
+      </header>
+      <div class="dashboard-body confirm-body">
+        <p id="confirm-message" class="confirm-message"></p>
+        <div class="confirm-actions">
+          <button id="confirm-cancel-btn" class="acc-action-btn secondary" type="button">Cancelar</button>
+          <button id="confirm-accept-btn" class="acc-action-btn danger" type="button">Confirmar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dashboard modal: grafico (dona/barras) armado por Chart.js a partir
+       de una llamada a la tool `render_chart`, cuando el usuario lo pide
+       explicitamente en el chat ("hacer un grafico/dashboard de..."). No
+       pide nada nuevo al backend -- lee el mismo resultado ya mostrado en
+       el chat. La vista previa de KPIs genericos+tabla completa (que se
+       abria automaticamente desde un boton en cada tool-call de datos) se
+       elimino junto con ese boton. -->
+  <div id="dashboard-overlay" class="dashboard-overlay hidden">
+    <div class="dashboard-modal" role="dialog" aria-modal="true" aria-labelledby="dashboard-title">
+      <header class="dashboard-header">
+        <div>
+          <span class="dashboard-eyebrow">DASHBOARD · RESULTADOS</span>
+          <h2 id="dashboard-title">—</h2>
+        </div>
+        <button id="dashboard-close" class="dashboard-close" type="button" title="Cerrar dashboard">✕</button>
+      </header>
+      <div class="dashboard-body">
+        <!--
+          REQ-001/003/004/005 (spec dashboard-graficos): un solo <canvas>
+          reusado -- cada llamada a render_chart lo redibuja (REQ-005, no
+          se acumulan graficos).
+        -->
+        <div id="dashboard-chart-wrap" class="dashboard-chart-wrap hidden">
+          <canvas id="dashboard-chart"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal de Configuracion: modelo+parametros dinamicos, carpeta de
+       proyecto (local/SharePoint), y repo de skills compartidas. -->
+  <div id="settings-overlay" class="dashboard-overlay hidden">
+    <div class="dashboard-modal settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <header class="dashboard-header">
+        <div>
+          <span class="dashboard-eyebrow">CONFIGURACIÓN</span>
+          <h2 id="settings-title">Vision</h2>
+        </div>
+        <button id="settings-close" class="dashboard-close" type="button" title="Cerrar configuración">✕</button>
+      </header>
+
+      <nav class="settings-tabs" role="tablist">
+        <button class="settings-tab active" type="button" data-tab="model" role="tab" title="Modelo, temperatura, razonamiento">Modelo e inteligencia</button>
+        <button class="settings-tab" type="button" data-tab="appearance" role="tab" title="Tema visual claro/oscuro">Apariencia</button>
+        <button class="settings-tab" type="button" data-tab="audio" role="tab" title="Voz de Vision (TTS), micrófono y medidor de nivel">Audio</button>
+        <button class="settings-tab" type="button" data-tab="skills" role="tab" title="Carpeta/repo donde viven las skills">Skills</button>
+        <button class="settings-tab" type="button" data-tab="commands" role="tab" title="Comandos propios del menú &quot;/&quot;">Comandos</button>
+        <button class="settings-tab" type="button" data-tab="agentes" role="tab" title="Automatizaciones programadas: comandos, skills, archivos o alarmas/recordatorios">Agentes</button>
+        <button class="settings-tab" type="button" data-tab="credentials" role="tab" title="Credenciales de conectores (Oracle/SAP/BigQuery/SharePoint), cifradas en disco">Credenciales</button>
+        <button class="settings-tab" type="button" data-tab="connections" role="tab" title="Estado de cada conector, exploracion de datasets/tablas y umbral de consulta pesada">Conexiones</button>
+        <button class="settings-tab" type="button" data-tab="server" role="tab" title="Direccion y token del backend (util al abrir Vision desde otro dispositivo en la misma red)">Servidor</button>
+      </nav>
+
+      <div class="dashboard-body settings-body">
+
+        <section class="settings-pane" data-pane="model">
+          <div class="settings-field">
+            <label for="cfg-model-select">Modelo activo</label>
+            <select id="cfg-model-select"></select>
+          </div>
+          <div class="settings-field">
+            <label for="cfg-small-model-select">Modelo pequeño (tareas menores, ej. títulos)</label>
+            <select id="cfg-small-model-select"></select>
+          </div>
+          <div id="cfg-dynamic-params" class="settings-dynamic-params">
+            <p class="settings-hint">Elegí un modelo para ver sus parámetros disponibles.</p>
+          </div>
+          <div class="settings-actions">
+            <button id="cfg-model-save" class="acc-action-btn" type="button">Guardar</button>
+            <span id="cfg-model-status" class="settings-status"></span>
+          </div>
+
+          <!-- spec salto-automatico-modelos REQ-001: lista de prioridad que arma el usuario -->
+          <h3 class="settings-subheading">Salto automático de modelos</h3>
+          <p class="settings-hint">
+            Si un modelo llega a su límite de uso o el servicio no responde, Vision sigue con el siguiente de
+            esta lista y, pasada la pausa, vuelve a probar el anterior. Con esto activo, el selector de
+            modelos ofrece «Automático».
+          </p>
+          <div class="settings-field">
+            <label class="settings-checkbox-label">
+              <input type="checkbox" id="cfg-fallback-enabled" />
+              Activar el salto automático de modelos
+            </label>
+          </div>
+          <ol id="cfg-fallback-list" class="fallback-list"></ol>
+          <div class="settings-field fallback-add">
+            <label for="cfg-fallback-add-select">Agregar a la lista</label>
+            <div class="fallback-add-row">
+              <select id="cfg-fallback-add-select"></select>
+              <button id="cfg-fallback-add" class="acc-action-btn" type="button">Agregar</button>
+            </div>
+          </div>
+          <div class="settings-field">
+            <label for="cfg-fallback-pause">Minutos de pausa antes de volver a probar un modelo</label>
+            <input id="cfg-fallback-pause" type="number" min="1" max="120" value="10" />
+          </div>
+          <div class="settings-actions">
+            <button id="cfg-fallback-save" class="acc-action-btn" type="button">Guardar prioridad</button>
+            <span id="cfg-fallback-status" class="settings-status"></span>
+          </div>
+        </section>
+
+        <!--
+          Selector de tema visual (pedido explicito del usuario): 3
+          temas -- oscuro rojo (acento rojo + fondos negros, el
+          original), claro azul (acento azul #0000FF, fondos blancos,
+          texto oscuro; default actual) y oscuro azul (MISMOS fondos
+          oscuros que el rojo, con el acento azul). Se aplica via `data-theme`
+          en <html> (ver applyTheme() en app.js), persistido en
+          localStorage -- toma efecto en TODA la app al instante, sin
+          recargar la pagina. Los colores de semaforo (rojo/ambar/verde de
+          estado real, ej. el chip Plan/Activo o el boton Enviar/Detener)
+          NUNCA cambian entre NINGUN tema -- solo el acento decorativo/de
+          marca.
+        -->
+        <section class="settings-pane hidden" data-pane="appearance">
+          <div class="settings-field">
+            <label for="cfg-theme-select">Tema visual</label>
+            <select id="cfg-theme-select">
+              <option value="dark">Oscuro — Rojo</option>
+              <option value="dark-blue">Oscuro — Azul</option>
+              <option value="light">Claro — Azul</option>
+            </select>
+          </div>
+          <p class="settings-hint">El cambio se aplica al instante en toda la aplicación. Los colores de estado (verde/ámbar/rojo — ej. tareas, conectores, modo Plan/Activo) no cambian con el tema.</p>
+        </section>
+
+        <!--
+          REQ-009/010 (spec narracion-agente-efimera): pestaña "Audio",
+          analoga a "Apariencia" -- activar/desactivar TTS de las
+          respuestas y de la narracion de progreso (REQ-007/008), elegir
+          microfono con medidor de nivel EN VIVO que solo captura mientras
+          esta pestaña esta abierta (patron adoptado de Meetily, ver
+          Decisiones registradas en spec.md -- evita gastar CPU/bateria de
+          fondo), y probar la voz configurada antes de una reunion real.
+          Selector de SALIDA de audio eliminado del alcance (ver REQ-010
+          revisado en spec.md): la Web Speech API no lo soporta.
+        -->
+        <section class="settings-pane hidden" data-pane="audio">
+<div class="settings-field">
+            <label class="settings-checkbox-label">
+              <input type="checkbox" id="cfg-tts-enabled" />
+              Leer en voz alta las respuestas de Vision y la narración de progreso
+            </label>
+          </div>
+          <div class="settings-field">
+            <label for="cfg-tts-voice-select">Voz (español)</label>
+            <select id="cfg-tts-voice-select">
+              <option value="">(mejor voz masculina disponible automáticamente)</option>
+            </select>
+          </div>
+          <div class="settings-actions">
+            <button id="cfg-tts-test-btn" class="acc-action-btn" type="button">Probar voz</button>
+          </div>
+          <div class="settings-field">
+            <label for="cfg-mic-select">Micrófono</label>
+            <select id="cfg-mic-select">
+              <option value="">(dispositivo por defecto)</option>
+            </select>
+          </div>
+          <!--
+            Bug real reportado por el usuario: hablando en español, a veces
+            Whisper transcribia en INGLES -- causa confirmada: sin forzar
+            el idioma, Whisper hace auto-deteccion por cada clip, y con
+            audio corto/ruidoso puede "adivinar mal". Se agrega este
+            selector para forzar el idioma (mejora precision Y latencia,
+            Whisper se salta el paso de deteccion) -- default explicito
+            del usuario: Auto-detectar, orden de las opciones fijo pedido:
+            Español, Inglés, Portugués, luego el resto alfabetico.
+          -->
+          <div class="settings-field">
+            <label for="cfg-stt-language-select">Idioma de grabación (transcripción de voz)</label>
+            <select id="cfg-stt-language-select">
+              <option value="">Auto-detectar</option>
+              <option value="es">Español</option>
+              <option value="en">Inglés</option>
+              <option value="pt">Portugués</option>
+              <option value="de">Alemán</option>
+              <option value="zh">Chino</option>
+              <option value="ko">Coreano</option>
+              <option value="fr">Francés</option>
+              <option value="it">Italiano</option>
+              <option value="ja">Japonés</option>
+<option value="ru">Ruso</option>
+            </select>
+          </div>
+
+          <div class="settings-field">
+            <span class="settings-section-label">Alarma del loop</span>
+          </div>
+          <div class="settings-field">
+            <label for="cfg-loop-alarm-type">Tipo de alarma</label>
+            <select id="cfg-loop-alarm-type">
+              <option value="beep">Beep (simple)</option>
+              <option value="double">Doble (beep-boop)</option>
+              <option value="pulse">Pulso (urgente)</option>
+              <option value="sirena">Sirena (alarma)</option>
+            </select>
+          </div>
+          <div class="settings-field">
+            <label for="cfg-loop-alarm-interval">Frecuencia</label>
+            <select id="cfg-loop-alarm-interval">
+              <option value="2000">Cada 2 s</option>
+              <option value="4000">Cada 4 s</option>
+              <option value="6000">Cada 6 s</option>
+              <option value="8000">Cada 8 s</option>
+            </select>
+          </div>
+          <div class="settings-field">
+            <label for="cfg-loop-alarm-volume">Volumen: <span id="cfg-loop-alarm-volume-val">20%</span></label>
+            <input type="range" id="cfg-loop-alarm-volume" min="0.05" max="0.8" step="0.05" value="0.2" />
+          </div>
+          <div class="settings-field">
+            <button id="cfg-loop-alarm-test" class="acc-action-btn" type="button">Probar alarma</button>
+            <p class="settings-hint">Reproduce el tipo, cadencia y volumen seleccionados.</p>
+          </div>
+          <div class="settings-field">
+            <label>Nivel de entrada (hablá para probar)</label>
+            <div class="settings-mic-meter">
+              <div id="cfg-mic-meter-fill" class="settings-mic-meter-fill"></div>
+            </div>
+            <span id="cfg-mic-status" class="settings-status"></span>
+          </div>
+          <p class="settings-hint">El medidor de nivel solo captura audio mientras esta pestaña de Configuración está abierta — se libera el micrófono automáticamente al cerrarla o cambiar de pestaña.</p>
+
+          <!--
+            REQ-012 (spec asistente-contextual-voz): controles del modo
+            Cerebro -- mismo patron visual que el resto de esta pestaña
+            (checkbox + campo numerico con su propio settings-field).
+            Auto-envio ACTIVADO por defecto (pedido explicito del
+            usuario); si se desactiva, el modo Cerebro pasa a necesitar
+            decir "Vision" para forzar el envio (ver REQ-005).
+          -->
+          <div class="settings-field">
+            <label class="settings-checkbox-label">
+              <input type="checkbox" id="cfg-brain-autosend-enabled" checked />
+              Auto-envío en Modo Cerebro (sin necesidad de decir "Vision")
+            </label>
+          </div>
+<div class="settings-field" id="cfg-brain-autosend-pause-field">
+            <label for="cfg-brain-autosend-pause">Pausa para auto-envío en Modo Cerebro (segundos)</label>
+            <input type="number" id="cfg-brain-autosend-pause" min="1" max="10" step="1" value="2" />
+          </div>
+          <!--
+            REQ-004 (spec atajo-espacio-modo-cerebro, 2026-09-26): pedido
+            explicito del usuario -- interrumpir a Vision con la barra
+            espaciadora mientras habla en Modo Cerebro, y reiniciar la
+            ronda de escucha en curso (reset liviano, sin reabrir el
+            microfono). Activado por defecto, mismo criterio que
+            cfg-brain-autosend-enabled.
+          -->
+          <div class="settings-field">
+            <label class="settings-checkbox-label">
+              <input type="checkbox" id="cfg-brain-space-interrupt-enabled" checked />
+              Interrumpir a Vision con la barra espaciadora en Modo Cerebro
+            </label>
+          </div>
+        </section>
+
+        <!--
+          REQ-101/102 (spec configuracion-limpieza-credenciales-servidor,
+          2026-09-19): se eliminaron las pestañas "Pomodoro" (100% frontend/
+          localStorage, sin valor real diferencial, confirmado que el
+          backend ya la ignoraba explicitamente en scheduler/alarms.py) y
+          "Sitio SharePoint" (confirmado leyendo graph_search/
+          sharepoint_connector.py que la carpeta/biblioteca elegida NUNCA
+          acotaba ninguna busqueda real del LLM -- solo agregaba una frase
+          decorativa al system prompt). El backend de Sitio SharePoint
+          (project_context.py, build_project_context_prompt, endpoints
+          /api/config/project/sharepoint) se dejo INTACTO a proposito, solo
+          se quito el acceso desde esta UI.
+        -->
+
+        <section class="settings-pane hidden" data-pane="skills">
+          <div class="settings-field">
+            <label for="cfg-skills-path">Carpeta de skills (local o clon de repo git)</label>
+            <div class="settings-path-row">
+              <input id="cfg-skills-path" type="text" placeholder="C:\Proyectos\Jarvis\vision-web\backend\data\skills_repo" />
+              <button id="cfg-skills-browse" class="acc-action-btn" type="button" title="Abrir el Explorador de Windows para elegir la carpeta">📁 Explorar…</button>
+            </div>
+          </div>
+          <div class="settings-actions">
+            <button id="cfg-skills-save" class="acc-action-btn" type="button">Guardar ruta</button>
+            <span id="cfg-skills-status" class="settings-status"></span>
+          </div>
+          <p class="settings-hint">Las skills descubiertas acá se combinan con las skills globales del usuario y aparecen en el menú "/" del chat. Apuntá esta carpeta a una ruta ya sincronizada localmente (ej. por el cliente de OneDrive/SharePoint) si querés compartir skills entre equipos -- Vision solo lee/escribe subcarpetas con SKILL.md, sin depender de ningún repo Git.</p>
+
+          <!-- REQ-008 (spec agentes-huerfanos-y-gestion-skills): listado
+               de las skills GLOBALES encontradas en la carpeta de arriba
+               (solo lectura -- viven fuera de Vision, ver spec.md seccion
+               Reglas de negocio) + CRUD completo de skills LOCALES de
+               esta sesion. -->
+          <div class="settings-field">
+            <span class="settings-section-label">Skills globales (solo lectura)</span>
+            <ul id="cfg-skills-global-list" class="session-list"></ul>
+          </div>
+
+          <div class="settings-field">
+            <div class="settings-actions">
+              <span class="settings-section-label">Skills locales de esta sesión</span>
+              <button id="cfg-local-skill-new" class="acc-action-btn secondary" type="button">+ Nueva</button>
+            </div>
+            <ul id="cfg-skills-local-list" class="session-list"></ul>
+          </div>
+        </section>
+
+        <!-- REQ-008: editor de skill local (crear/editar) -- modal simple
+             de 3 campos (nombre, descripcion, contenido markdown), con
+             ejemplo precargado como placeholder. Mismo patron visual
+             .dashboard-overlay/.dashboard-header/.dashboard-body ya usado
+             en el resto (ver session-edit-overlay como referencia). -->
+        <div id="local-skill-editor-overlay" class="dashboard-overlay hidden">
+          <div class="dashboard-modal" role="dialog" aria-modal="true" aria-labelledby="local-skill-editor-title">
+            <header class="dashboard-header">
+              <div>
+                <span class="dashboard-eyebrow">SKILL LOCAL</span>
+                <h2 id="local-skill-editor-title">Nueva skill local</h2>
+              </div>
+              <button id="local-skill-editor-close" class="dashboard-close" type="button" title="Cerrar">✕</button>
+            </header>
+            <div class="dashboard-body">
+              <div class="settings-field">
+                <label for="local-skill-name">Nombre</label>
+                <input id="local-skill-name" type="text" placeholder="Ej. resumen-turno" />
+              </div>
+              <div class="settings-field">
+                <label for="local-skill-description">Descripción corta</label>
+                <input id="local-skill-description" type="text" placeholder="Ej. Resume el turno actual en 5 bullets con KPIs clave" />
+              </div>
+              <div class="settings-field">
+                <label for="local-skill-content">Contenido (instrucciones en Markdown)</label>
+                <textarea id="local-skill-content" rows="10" placeholder="Explicá acá, paso a paso, qué debe hacer el agente cuando use esta skill. Ejemplo:&#10;&#10;1. Leé los últimos mensajes de la sesión.&#10;2. Identificá los KPIs mencionados.&#10;3. Armá un resumen de 5 bullets como máximo."></textarea>
+              </div>
+              <div class="settings-actions">
+                <button id="local-skill-save" class="acc-action-btn" type="button">Guardar</button>
+                <button id="local-skill-cancel" class="acc-action-btn secondary" type="button">Cancelar</button>
+                <span id="local-skill-status" class="settings-status"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!--
+          REQ-008/009 (spec comandos-slash): CRUD de comandos propios --
+          nombre + prompt fijo que se manda al LLM al elegir el comando
+          del menu "/" (mismo camino que una skill, a diferencia de los
+          comandos del sistema que ejecutan acciones directas).
+        -->
+        <section class="settings-pane hidden" data-pane="commands">
+          <div class="settings-field">
+            <label for="cfg-command-name">Nombre del comando (sin "/")</label>
+            <input id="cfg-command-name" type="text" placeholder="kpi-diario" />
+          </div>
+          <div class="settings-field">
+            <label for="cfg-command-prompt">Prompt que se envía al elegir el comando</label>
+            <textarea id="cfg-command-prompt" rows="4" placeholder="Generame el resumen de KPIs del día con..."></textarea>
+          </div>
+          <div class="settings-actions">
+            <button id="cfg-command-save" class="acc-action-btn" type="button">Guardar comando</button>
+            <span id="cfg-command-status" class="settings-status"></span>
+          </div>
+          <ul id="cfg-command-list" class="session-list"></ul>
+          <p class="settings-hint">Los comandos propios envían su prompt al chat (como una skill) al elegirlos desde el menú "/". Se guardan en la carpeta de proyecto de la sesión actual — asignala desde el chip de sesión si todavía no la tiene.</p>
+        </section>
+
+        <!--
+          spec agentes-programados, unificada (pedido explicito del usuario
+          2026-09: "fusion en una sola pestaña" de Tiempo/Agenda + Agentes,
+          salvo Pomodoro que va aparte). Un "agente" automatiza UNA de 4
+          cosas a un horario dado, elegida en #agent-type:
+            - "command": secuencia ORDENADA de comandos propios (pestaña
+              Comandos) -- se arman/reordenan en #agent-command-fields.
+            - "skill": una skill (global o local de la sesion elegida).
+            - "file": un archivo (.exe/.bat/.ps1) via os.startfile.
+            - "alarm": alarma/recordatorio (sonido + alerta visual nativa,
+              archivo opcional) -- disparan del lado del BACKEND igual que
+              command/skill/file (ver app/scheduler/agents.py y
+              app/scheduler/alarms.py), aunque no haya navegador abierto.
+          Los campos de horario (una vez / recurrente) son COMPARTIDOS por
+          los 4 tipos -- mismo bloque, mismo vocabulario de reglas.
+        -->
+        <section class="settings-pane hidden" data-pane="agentes">
+          <div class="settings-field">
+            <span class="settings-section-label">Agentes y alarmas programados</span>
+            <p class="settings-hint">Comandos, skills, archivos y alarmas se disparan en el servidor aunque cierres el navegador -- vas a ver una alerta nativa con sonido en loop hasta que la cierres o la pospongas.</p>
+            <div id="agents-list" class="schedules-list"></div>
+          </div>
+
+          <div class="settings-field">
+            <label for="agent-snooze-minutes">Posponer (botón Zzz de la alerta) -- minutos</label>
+            <input id="agent-snooze-minutes" type="number" min="1" max="60" step="1" value="10" class="agent-field-narrow" />
+            <p class="settings-hint" id="agent-snooze-status"></p>
+          </div>
+
+          <!-- REQ-001 (spec agentes-huerfanos-y-gestion-skills): sesion de
+               reserva para agentes que quedan sin sesion destino (borrada
+               por el usuario). Es una sesion NORMAL que el usuario ya
+               creo y elige aca -- Vision nunca la crea sola. -->
+          <div class="settings-field">
+            <label for="agent-fallback-session">Sesión de reserva para agentes sin sesión</label>
+            <select id="agent-fallback-session">
+              <option value="">(sin configurar)</option>
+            </select>
+            <p class="settings-hint">Si borrás una sesión que un agente usa como destino, se reasigna automáticamente a esta sesión. Sin esto configurado, el agente queda marcado como "sin sesión" hasta que lo edites a mano.</p>
+            <p class="settings-hint" id="agent-fallback-session-status"></p>
+          </div>
+
+          <div class="settings-field">
+            <span class="settings-section-label">Nuevo / editar</span>
+            <div class="agent-field-row">
+              <div class="agent-field-col">
+                <label for="agent-label">Etiqueta</label>
+                <input id="agent-label" type="text" placeholder="Ej. Reporte diario de KPIs" />
+              </div>
+              <div class="agent-field-col">
+                <label for="agent-type">Tipo de automatización</label>
+                <select id="agent-type">
+                  <option value="command">Comando(s)</option>
+                  <option value="skill">Skill</option>
+                  <option value="file">Archivo</option>
+                  <option value="alarm">Alarma y recordatorio</option>
+                </select>
+              </div>
+            </div>
+
+            <div id="agent-session-field">
+              <label for="agent-session">Sesión destino</label>
+              <select id="agent-session"></select>
+            </div>
+
+            <!-- automation_type="command": secuencia ORDENADA, arma/reordena manualmente -->
+            <div id="agent-command-fields">
+              <label for="agent-command-picker">Agregar comando</label>
+              <div class="alarm-file-row">
+                <select id="agent-command-picker"></select>
+                <button id="agent-command-add" class="acc-action-btn" type="button">+ Agregar</button>
+              </div>
+              <ul id="agent-command-sequence" class="session-list"></ul>
+              <p class="settings-hint">Se ejecutan en ESTE orden, uno detrás del otro. Usá las flechas para reordenar.</p>
+            </div>
+
+            <!-- automation_type="skill" -->
+            <div id="agent-skill-fields" class="hidden">
+              <label for="agent-skill-picker">Skill</label>
+              <select id="agent-skill-picker"></select>
+            </div>
+
+            <!-- automation_type="file" (tambien lo usa "alarm" como archivo OPCIONAL) -->
+            <div id="agent-file-fields" class="hidden">
+              <label for="agent-file">Archivo a ejecutar</label>
+              <div class="alarm-file-row">
+                <input id="agent-file" type="text" placeholder="Ej. C:\scripts\cierre.bat (o .exe/.ps1)" title="Se ejecuta con la app por defecto (os.startfile), auditado en audit.log" />
+                <button id="agent-file-browse" class="acc-action-btn" type="button" title="Elegir archivo con el Explorador de Windows">Explorar…</button>
+              </div>
+            </div>
+
+            <!-- automation_type="alarm" -->
+            <div id="agent-alarm-fields" class="hidden">
+              <div class="agent-field-narrow">
+                <label for="agent-sound">Sonido</label>
+                <select id="agent-sound">
+                  <option value="beep">Beep (simple)</option>
+                  <option value="double">Doble (beep-boop)</option>
+                  <option value="pulse">Pulso (urgente)</option>
+                  <option value="sirena">Sirena (alarma)</option>
+                </select>
+              </div>
+              <label for="agent-alarm-file">Archivo a ejecutar al disparar (opcional)</label>
+              <div class="alarm-file-row">
+                <input id="agent-alarm-file" type="text" placeholder="Ej. C:\scripts\cierre.bat (o .exe/.ps1)" />
+                <button id="agent-alarm-file-browse" class="acc-action-btn" type="button" title="Elegir archivo con el Explorador de Windows">Explorar…</button>
+              </div>
+            </div>
+
+            <div class="agent-field-row">
+              <div class="agent-field-col">
+                <label for="agent-kind">Horario</label>
+                <select id="agent-kind">
+                  <option value="once">Una vez (fecha y hora)</option>
+                  <option value="recurring">Recurrente</option>
+                </select>
+              </div>
+              <div id="agent-once-fields" class="agent-field-col">
+                <label for="agent-datetime">Fecha y hora</label>
+                <input id="agent-datetime" type="text" placeholder="dd/mm/yyyy hh:mm" autocomplete="off" />
+              </div>
+            </div>
+            <div id="agent-recurring-fields" class="hidden">
+              <div class="agent-field-row">
+                <div class="agent-field-col">
+                  <label for="agent-rule">Regla</label>
+                  <select id="agent-rule">
+                    <option value="daily">Diario</option>
+                    <option value="weekdays">Días hábiles (lun-vie)</option>
+                    <option value="weekly">Un día de la semana</option>
+                    <option value="ndays">Cada N días</option>
+                    <option value="nhours">Cada N horas</option>
+                  </select>
+                </div>
+                <div class="agent-field-col">
+                  <label for="agent-time">Hora</label>
+                  <input type="text" id="agent-time" value="08:30" placeholder="hh:mm" autocomplete="off" />
+                </div>
+              </div>
+              <div id="agent-weekday-field" class="hidden">
+                <label for="agent-weekday">Día de la semana</label>
+                <select id="agent-weekday">
+                  <option value="1">Lunes</option><option value="2">Martes</option>
+                  <option value="3">Miércoles</option><option value="4">Jueves</option>
+                  <option value="5">Viernes</option><option value="6">Sábado</option>
+                  <option value="0">Domingo</option>
+                </select>
+              </div>
+              <div id="agent-n-field" class="hidden">
+                <label for="agent-n">Cada cuántos (días/horas)</label>
+                <input type="number" id="agent-n" min="1" max="365" step="1" value="1" />
+              </div>
+            </div>
+
+            <div class="settings-actions">
+              <button id="agent-save" class="acc-action-btn" type="button">Guardar</button>
+              <button id="agent-cancel-edit" class="acc-action-btn secondary hidden" type="button">Cancelar</button>
+            </div>
+            <p class="settings-hint" id="agent-status"></p>
+          </div>
+
+          <div class="settings-field">
+            <div class="settings-actions">
+              <span class="settings-section-label">Historial de ejecuciones</span>
+              <button id="agent-runs-clear" class="acc-action-btn secondary" type="button" title="Borra las ejecuciones ya terminadas (las que siguen en curso no se tocan)">Limpiar historial viejo</button>
+            </div>
+            <div id="agent-runs-list" class="schedules-list"></div>
+            <div class="settings-actions">
+              <button id="agent-runs-prev" class="acc-action-btn secondary" type="button">‹ Anteriores</button>
+              <span id="agent-runs-page" class="settings-hint"></span>
+              <button id="agent-runs-next" class="acc-action-btn secondary" type="button">Siguientes ›</button>
+            </div>
+          </div>
+        </section>
+
+        <!--
+          REQ-103/104/105/106 (spec configuracion-limpieza-credenciales-
+          servidor, 2026-09-19): rediseño DATA-DRIVEN -- antes esta seccion
+          tenia 6 campos hardcodeados a mano (solo "secretos": user/
+          password/client_secret/json-key), cubriendo apenas 6 de los 22
+          campos reales que los 4 conectores necesitan (host/puerto/
+          project_id/site_url/etc quedaban solo editables en backend/.env
+          a mano). Ahora el HTML es un esqueleto VACIO de 4 acordeones
+          <details> (mismo patron nativo ya usado en el panel lateral,
+          ver #acc-connectors mas arriba) -- los campos de cada conector
+          se generan 100% en JS a partir de GET /api/config/credentials/
+          schema (backend/app/credentials.py:CONNECTOR_SCHEMA), asi que
+          agregar un campo nuevo a futuro es extender ese schema, nunca
+          este HTML. Cada acordeon tiene su PROPIO boton Guardar (REQ-105,
+          guarda solo ese conector) y Probar conexion (REQ-106, reusa
+          test_connection() de cada conector).
+        -->
+        <section class="settings-pane hidden" data-pane="credentials">
+          <p class="settings-hint">
+            Estas credenciales se guardan CIFRADAS en <code>backend/.env.enc</code> (nunca en texto
+            plano) usando una clave derivada de tu par de llaves SSH local. Dejar un campo vacío no
+            lo borra. Expandí cada sección para completar sus credenciales.
+          </p>
+
+          <div id="cred-accordion"></div>
+
+          <div class="settings-actions">
+            <button id="cred-clear" class="acc-action-btn secondary" type="button">Quitar todas las credenciales</button>
+            <span id="cred-status" class="settings-status"></span>
+          </div>
+        </section>
+
+        <!--
+          spec controles-seguridad-optimizacion-lightspeed-bigquery
+          (pedido del usuario 2026-09-21): status por color de cada
+          conector + umbral configurable de "consulta pesada" (dry run de
+          costo REQ-002, export automatico REQ-004) + precarga simple de
+          datasets/tablas de BigQuery y listas de SharePoint. El arbol
+          expandible/colapsable completo (dataset -> tabla -> columnas,
+          al estilo de la pestaña Credenciales) queda para una spec
+          dedicada -- esta primera version usa listas simples anidadas.
+        -->
+        <section class="settings-pane hidden" data-pane="connections">
+          <p class="settings-hint">
+            Estado de cada conector de datos, exploración rápida de lo que hay disponible, y el
+            umbral que decide cuándo una consulta se considera "pesada" (dispara la pausa de costo
+            de BigQuery y el export automático a CSV).
+          </p>
+
+          <div id="conn-status-list" class="conn-status-list"></div>
+          <div class="settings-actions">
+            <button id="conn-status-refresh" class="acc-action-btn secondary" type="button">Actualizar estado</button>
+            <span id="conn-status-status" class="settings-status"></span>
+          </div>
+
+          <h3 class="settings-subheading">Umbral de consulta pesada</h3>
+          <div class="settings-field">
+            <label for="conn-cost-threshold-mb">Límite de costo de BigQuery (MB) antes de pausar y pedir confirmación</label>
+            <input id="conn-cost-threshold-mb" type="number" min="1" placeholder="(default: 1024 MB / 1 GiB)" />
+          </div>
+          <div class="settings-field">
+            <label for="conn-export-threshold">Filas antes de exportar automáticamente a CSV</label>
+            <input id="conn-export-threshold" type="number" min="1" placeholder="(default: 50)" />
+          </div>
+          <div class="settings-field">
+            <label for="conn-preview-rows">Filas mostradas como preview en el chat</label>
+            <input id="conn-preview-rows" type="number" min="1" placeholder="(default: 50)" />
+          </div>
+          <div class="settings-actions">
+            <button id="conn-thresholds-save" class="acc-action-btn" type="button">Guardar umbrales</button>
+            <span id="conn-thresholds-status" class="settings-status"></span>
+          </div>
+
+          <h3 class="settings-subheading">Explorar datos disponibles</h3>
+          <div class="conn-explore-block">
+            <button id="conn-bq-datasets-toggle" class="conn-tree-toggle" type="button" aria-expanded="false">
+              <span class="conn-tree-caret">▶</span> BigQuery — datasets
+            </button>
+            <ul id="conn-bq-datasets-list" class="conn-tree-list hidden"></ul>
+          </div>
+          <div class="conn-explore-block">
+            <button id="conn-sp-lists-toggle" class="conn-tree-toggle" type="button" aria-expanded="false">
+              <span class="conn-tree-caret">▶</span> SharePoint — listas
+            </button>
+            <ul id="conn-sp-lists-list" class="conn-tree-list hidden"></ul>
+          </div>
+        </section>
+
+        <!--
+          spec jarvis-mobile-pwa: direccion + token del backend. Solo hace
+          falta tocar esto al abrir Vision desde OTRO dispositivo (ej. un
+          celular en la misma red WiFi que la notebook que corre el
+          backend) -- en el uso normal en la misma maquina (127.0.0.1) esta
+          pestaña puede quedar intacta con los valores por defecto.
+        -->
+        <section class="settings-pane hidden" data-pane="server">
+          <div class="settings-field">
+            <label for="cfg-server-url">Direccion del backend</label>
+            <input id="cfg-server-url" type="text" placeholder="http://192.168.1.50:8030" />
+          </div>
+          <div class="settings-field">
+            <label for="cfg-server-token">Token de acceso (si el backend tiene ACCESS_TOKEN configurado)</label>
+            <input id="cfg-server-token" type="password" autocomplete="off" placeholder="dejar vacío si no aplica" />
+          </div>
+          <div class="settings-actions">
+            <button id="cfg-server-test" class="acc-action-btn secondary" type="button">Probar conexión</button>
+            <button id="cfg-server-save" class="acc-action-btn" type="button">Guardar y reconectar</button>
+            <span id="cfg-server-status" class="settings-status"></span>
+          </div>
+          <p class="settings-hint">Por defecto, Vision usa la misma dirección con la que abriste esta página. Solo necesitás cambiar esto si querés apuntar a otra notebook/servidor distinto.</p>
+
+          <!--
+            REQ-107/108 ELIMINADOS (spec configuracion-limpieza-credenciales-
+            servidor, 2026-09-20): se habia agregado deteccion de IPs
+            locales para ayudar a conectarse desde el celular, pero el
+            servidor sigue bindeado a 127.0.0.1 (loopback) -- exponerlo a la
+            red (0.0.0.0) requeria ademas crear una regla de firewall de
+            Windows con privilegios de administrador, y el usuario decidio
+            explicitamente NO automatizar la apertura de un puerto de
+            entrada en una notebook corporativa por riesgo real de
+            politica de seguridad informatica. Sin el bind a la red, mostrar la
+            lista de IPs no tenia ningun uso practico -- se elimino toda la
+            feature (backend app/network_info.py tambien eliminado).
+          -->
+        </section>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Explorador generico (filesystem local o SharePoint), reusado por
+       Configuracion > Proyecto local / SharePoint / Skills. -->
+  <div id="explorer-overlay" class="dashboard-overlay hidden">
+    <div class="dashboard-modal explorer-modal" role="dialog" aria-modal="true" aria-labelledby="explorer-title">
+      <header class="dashboard-header">
+        <div>
+          <span class="dashboard-eyebrow" id="explorer-eyebrow">EXPLORADOR</span>
+          <h2 id="explorer-title">Elegir carpeta</h2>
+        </div>
+        <button id="explorer-close" class="dashboard-close" type="button" title="Cerrar explorador">✕</button>
+      </header>
+      <div class="dashboard-body explorer-body">
+        <div class="explorer-toolbar">
+          <div id="explorer-breadcrumb" class="explorer-breadcrumb"></div>
+          <!-- Solo visible en modo "local" (crear carpetas en SharePoint
+               requiere otra logica, fuera de alcance por ahora). -->
+          <button id="explorer-new-folder-btn" class="explorer-new-folder-btn hidden" type="button" title="Crear una carpeta nueva acá">
+            <span class="folder-icon">📁</span><span class="plus-icon">+</span>
+          </button>
+        </div>
+        <ul id="explorer-list" class="explorer-list"></ul>
+        <div class="settings-actions">
+          <button id="explorer-select-btn" class="acc-action-btn" type="button">Seleccionar esta carpeta</button>
+          <span id="explorer-status" class="settings-status"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!--
+    REQ-007 (spec dashboard-graficos): Chart.js VENDORIZADO (copiado al
+    repo en frontend/vendor/, ver chart.js.LICENSE.txt) -- nunca un
+    <script src="https://cdn..."> real, consistente con AGENTS.md ("cero
+    CDN, cero dependencias de terceros"). Sin type="module": el build UMD
+    de Chart.js expone `window.Chart` global, que app.js consume tal cual.
+  -->
+  <script src="./vendor/chart.js"></script>
+  <!--
+    REQ-011 (spec narracion-agente-efimera): anime.js VENDORIZADO (ver
+    anime.min.js.LICENSE.txt), mismo criterio que Chart.js arriba -- build
+    UMD clasico, expone `window.anime` global, consumido desde
+    js/voice-eye.js. three.module.min.js (build ES Module, tambien
+    vendorizado) NO se carga aca -- se importa directo con `import` desde
+    dentro de voice-eye.js, que a su vez es importado por app.js.
+  -->
+  <script src="./vendor/anime.min.js"></script>
+  <!-- flatpickr, mismo criterio de vendorizado -- build UMD clasico,
+       expone `window.flatpickr` global, consumido desde js/app.js.
+       flatpickr-es.js registra flatpickr.l10ns.es (meses/dias en
+       espaniol + time_24hr:true por defecto) -- mismo LICENSE.txt del
+       paquete (MIT), no es un archivo aparte con licencia propia. -->
+  <script src="./vendor/flatpickr.min.js"></script>
+  <script src="./vendor/flatpickr-es.js"></script>
+  <script type="module" src="./js/app.js"></script>
+  <script>
+    // Guard de doble-inicializacion (util ya en modo local y obligatorio el
+    // dia que esto se pegue en un Script Editor de SharePoint, que puede
+    // re-inyectar el script en ciclos de guardado/preview -- ver skill
+    // sharepoint-fullpage-app §11).
+    if (window.visionAppInitialized) {
+      console.warn("Vision ya estaba inicializado -- se omite una doble carga.");
+    }
+    window.visionAppInitialized = true;
+  </script>
+</body>
+</html>

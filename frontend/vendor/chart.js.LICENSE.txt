@@ -1,0 +1,14 @@
+Chart.js v4.4.0
+https://www.chartjs.org
+(c) 2023 Chart.js Contributors
+Released under the MIT License
+
+Vendorizado (copiado al repo, sin CDN) para la spec dashboard-graficos de
+Vision, siguiendo la convencion del proyecto (AGENTS.md: "cero
+dependencias de terceros, cero CDN -- si hace falta una lib, se
+vendoriza"). Descargado desde:
+https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js
+
+Para actualizar a una version nueva: descargar el archivo
+chart.umd.min.js correspondiente y reemplazar frontend/vendor/chart.js
+manualmente (sin gestor de paquetes, coherente con el resto del proyecto).

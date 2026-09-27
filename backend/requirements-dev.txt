@@ -1,0 +1,12 @@
+# Dependencias SOLO de desarrollo/QA (spec bateria-qa-integracion REQ-001).
+# No se empaquetan ni se necesitan en runtime -- ningun modulo de `app/` las
+# importa y `tests/test_prod_boundary.py` lo verifica (junto con que este
+# archivo nunca viaje a prod: ver FORBIDDEN_IN_PROD en sync_prod.py).
+#   .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+#   .venv\Scripts\python.exe -m pytest
+pytest
+pytest-cov      # cobertura (config en backend/.coveragerc): pytest --cov
+pytest-timeout  # un test colgado falla con traceback en vez de trabar la corrida
+# playwright (e2e en Chromium real, marcador `e2e`) viene de requirements.txt: desde
+# 2026-09-25 es dependencia de runtime (pedido del usuario). Una vez:
+#   .venv\Scripts\python.exe -m playwright install chromium

@@ -1,0 +1,79 @@
+# === Vision - Asistente superinteligente (backend FastAPI) ===
+# Framework web + streaming SSE hacia el frontend vanilla JS
+fastapi>=0.136
+uvicorn[standard]>=0.49
+sse-starlette>=2.1
+
+# Configuracion desde .env
+pydantic-settings>=2.14
+python-dotenv>=1.2
+
+# Cifrado de credenciales locales (import directo en app/credentials.py)
+cryptography>=46.0
+
+# Cliente del proveedor de IA (formato OpenAI: Anthropic via su capa compatible,
+# OpenAI, Azure OpenAI o el gateway de una empresa; ver app/llm/client.py)
+openai>=1.50
+
+# Datos
+pandas>=2.3
+numpy>=2.5
+
+# --- Conector Oracle ---
+oracledb>=3.3
+
+# --- Conector Excel ---
+openpyxl>=3.1
+xlrd>=2.0
+tabulate>=0.9
+
+# --- Analisis/visualizacion de datos (pedido 2026-09-16: la tool `bash`
+# necesita poder parsear/analizar Excel y graficar sin depender de que el
+# modelo pida un CSV manual -- ver Warehouse Task .xlsx binarios que el
+# tool `read` (solo texto plano) no puede leer directo). NO se incluyen
+# streamlit/dash: son server-frameworks (levantan su PROPIO puerto/proceso
+# web) que no encajan con el panel "Navegador" de Vision, que sirve
+# archivos ESTATICOS (index.html escrito por el modelo, ver
+# app/llm/loop.py) -- plotly/bokeh/altair ya exportan HTML standalone
+# embebible ahi mismo, sin la infraestructura extra (lanzar/matar proceso,
+# exponer otro puerto) que streamlit/dash exigirian. ---
+scipy>=1.17
+sympy>=1.13
+matplotlib>=3.10
+seaborn>=0.13
+plotly>=5.24
+altair>=5.4
+scikit-learn>=1.6
+statsmodels>=0.14
+
+# --- Conector SharePoint (Microsoft Graph API) ---
+msal>=1.37
+requests>=2.34
+
+# --- Conector BigQuery (Google Cloud) ---
+google-cloud-bigquery>=3.27
+google-cloud-bigquery-storage>=2.27
+db-dtypes>=1.3
+
+# --- webfetch tool: conversion HTML -> Markdown ---
+markdownify>=0.13
+beautifulsoup4>=4.12
+
+# --- spec diagnosticos-lsp-loop: LSP de Python para autocorreccion en el loop ---
+# pyflakes/pycodestyle son extras opcionales de python-lsp-server. Sin
+# ellos, pylsp arranca pero no reporta los diagnosticos requeridos.
+python-lsp-server[pyflakes]>=1.15
+pycodestyle>=2.14
+
+# --- Automatizacion de navegador con Playwright (pedido del usuario 2026-09-25) ---
+# Para scripts que la tool `bash` corre con `from playwright.sync_api import
+# sync_playwright` (navegar, completar formularios, extraer datos de sitios web).
+# Tambien lo usan los tests e2e de dev. OJO: el paquete NO trae el navegador --
+# usar el Edge ya instalado en la PC (`p.chromium.launch(channel="msedge")`)
+# o descargar el Chromium de Playwright una vez: `python -m playwright install chromium`.
+playwright>=1.62
+
+# --- app/scheduler/alarms.py: toast nativo de Windows para alarmas/recordatorios ---
+# (si el indice de pip de tu empresa no lo tiene, instalar con
+# --index-url https://pypi.org/simple)
+win11toast>=0.36
