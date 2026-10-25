@@ -59,6 +59,15 @@ Expone:
     GET  /api/sharepoint/children    -> contenido de una carpeta SharePoint
     GET  /api/skills                 -> lista de skills descubiertas (para
                                          el menu "/" del chat)
+    POST /api/voice/speak            -> audio de UNA frase con el primer motor
+                                         de voz de la cadena que responda (spec
+                                         voz-fish-audio; ver app/voice/)
+    GET/POST /api/voice/config       -> cadena de voces, voces, consentimiento
+                                         y efecto (Configuracion > Audio)
+    GET  /api/voice/voices/{engine}  -> voces de la cuenta de un motor
+    POST /api/voice/local/install    -> instala la clonacion local (con
+                                         simulacion previa); GET .../status
+    POST/DELETE /api/voice/local/sample -> muestra de voz para clonar
     GET  /api/sessions/{id}/exports/{filename} -> descarga un CSV exportado
                                          por REQ-004 (spec controles-
                                          seguridad-optimizacion-lightspeed-
@@ -74,11 +83,13 @@ import json
 import logging
 import logging.handlers
 import platform
+import re
 import threading
 import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 # BUG real corregido (deteccion QA 2026-09-14): en esta maquina, el loop de
 # asyncio con el que corre uvicorn en Windows NO admite subprocesos
@@ -115,9 +126,11 @@ from app.friendly_errors import (
     describe_internal_error,
     describe_os_error,
     describe_transcription_error,
+    describe_voice_engine_error,
     technical_summary,
 )
 from app.llm import model_fallback
+from app.llm import providers as llm_providers
 from app.llm.client import get_client, get_stt_client
 from app.llm.loop import run_turn
 from app.meeting_gate import MeetingGateState, check_invocation
@@ -130,6 +143,12 @@ from app.session.events import get_session_store
 from app.token_estimate import estimate_tokens
 from app.tools.skill import discover_local_skills, discover_skills
 from app.version import __version__
+from app.voice import local_clone
+from app.voice import service as voice_service
+from app.voice.engines import VoiceEngineError
+from app.voice.settings import VoiceConfigError
+from app.voice.settings import load_config as voice_load_config
+from app.voice.settings import update_config as voice_update_config
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -288,6 +307,9 @@ class ChatRequest(BaseModel):
     # peligrosas (ver run_turn en app/llm/loop.py). False (default) = chat
     # de texto normal, ejecuta sin confirmar (comportamiento sin cambios).
     voice_confirm: bool = False
+    # spec informe-tecnico-hablado: el frontend avisa si el informe tecnico
+    # hablado esta prendido (ver UserTurn.narrate).
+    narrate: bool = False
 
 
 class TranscribeRequest(BaseModel):
@@ -375,6 +397,140 @@ def transcribe_audio(req: TranscribeRequest) -> dict:
         else getattr(response, "text", str(response))
     )
     return {"text": text.strip()}
+
+
+# ---------------------------------------------------------------------------
+# Voz de Vision (spec voz-fish-audio): motores intercambiables (Fish Audio,
+# ElevenLabs, clonacion local) en una cadena de prioridad, con la voz del
+# navegador como ultimo eslabon. La logica vive en app/voice/.
+# ---------------------------------------------------------------------------
+class VoiceSpeakRequest(BaseModel):
+    text: str
+    # Probar un eslabon puntual desde Configuracion > Audio, sin salto.
+    engine: str | None = None
+    model: str | None = None
+
+
+@app.post("/api/voice/speak")
+def voice_speak(req: VoiceSpeakRequest) -> dict:
+    """REQ-001/003/004: audio (base64) de UNA frase con el primer motor de la
+    cadena que responda. `audio: null` = ningun motor pudo (o la cadena esta
+    vacia): el frontend habla con la voz del navegador y, si viene `notice`,
+    lo muestra una sola vez."""
+    import base64
+
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(400, detail="No hay texto para leer en voz alta.")
+    if len(text) > voice_service.MAX_TEXT_CHARS:
+        raise HTTPException(400, detail="El texto es demasiado largo para una sola frase.")
+    only = None
+    if req.engine:
+        engine = voice_service.ENGINES.get(req.engine)
+        if engine is None:
+            raise HTTPException(400, detail="Ese motor de voz no existe.")
+        # REQ-002: ni siquiera la prueba sale a la nube sin consentimiento.
+        if engine.cloud and not voice_load_config().consent.get(req.engine):
+            raise HTTPException(
+                400, detail=f"Primero confirmá que el texto que Vision lee se envía a {engine.label}."
+            )
+        only = {"engine": req.engine, "model": req.model or engine.models[0]}
+    try:
+        result = voice_service.speak(text, only=only)
+    except voice_service.NoVoiceEngineAvailable as exc:
+        notice = exc.notice
+        return {
+            "audio": None,
+            "notice": {"code": notice.code, "message": notice.message} if notice else None,
+        }
+    return {
+        "audio": base64.b64encode(result.audio.data).decode("ascii"),
+        "mime": result.audio.mime,
+        "engine": result.engine,
+        "model": result.model,
+        "notice": {"code": result.notice.code, "message": result.notice.message} if result.notice else None,
+    }
+
+
+@app.get("/api/voice/config")
+def get_voice_config() -> dict:
+    return voice_service.status_payload()
+
+
+class VoiceConfigRequest(BaseModel):
+    chain: list[dict[str, str]] | None = None
+    fish_voice_id: str | None = None
+    elevenlabs_voice_id: str | None = None
+    consent: dict[str, bool] | None = None
+    effect: bool | None = None
+    pause_minutes: int | None = None
+
+
+@app.post("/api/voice/config")
+def set_voice_config(req: VoiceConfigRequest) -> dict:
+    """REQ-001/002/003/008: guarda la cadena, las voces, el consentimiento y el
+    efecto. Guardar limpia las pausas: si el usuario arreglo algo (cargo
+    credito, cambio la voz), la proxima frase ya lo vuelve a probar."""
+    try:
+        cfg = voice_update_config(req.model_dump(), voice_service.models_by_engine())
+    except VoiceConfigError as exc:
+        raise HTTPException(400, detail=str(exc)) from None
+    voice_service.PAUSES.clear()
+    return voice_service.status_payload(cfg)
+
+
+@app.get("/api/voice/voices/{engine}")
+def list_voice_engine_voices(engine: str) -> dict:
+    """REQ-006: las voces de la cuenta para elegir en Configuracion > Audio."""
+    voice_engine = voice_service.ENGINES.get(engine)
+    if voice_engine is None:
+        raise HTTPException(404, detail="Ese motor de voz no existe.")
+    try:
+        return {"voices": voice_engine.list_voices()}
+    except VoiceEngineError as exc:
+        friendly = describe_voice_engine_error(exc.kind, voice_engine.label, status=exc.status)
+        logger.warning("No se pudieron listar las voces de %s [%s]: %s", engine, friendly.code, exc.detail[:300])
+        raise HTTPException(502, detail=friendly.message) from None
+
+
+@app.post("/api/voice/local/install")
+def install_local_voice() -> dict:
+    """REQ-007: instala la clonacion local en segundo plano, con simulacion
+    previa; el progreso se consulta en /api/voice/local/status."""
+    return local_clone.start_install()
+
+
+@app.get("/api/voice/local/status")
+def local_voice_status() -> dict:
+    return {**local_clone.install_status(), "sample": local_clone.sample_info()}
+
+
+class VoiceSampleRequest(BaseModel):
+    audio: str  # data URI, mismo criterio que TranscribeRequest
+    filename: str
+
+
+@app.post("/api/voice/local/sample")
+def upload_voice_sample(req: VoiceSampleRequest) -> dict:
+    """REQ-007: guarda la muestra de voz (WAV o MP3, 10 s como minimo) en la
+    carpeta de datos, nunca en el repo."""
+    import base64
+    import binascii
+
+    try:
+        data = base64.b64decode(req.audio.partition(",")[2], validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(400, detail="No pude leer el archivo (llegó dañado). Probá subirlo de nuevo.") from None
+    try:
+        return local_clone.save_sample(data, req.filename)
+    except local_clone.SampleError as exc:
+        raise HTTPException(400, detail=str(exc)) from None
+
+
+@app.delete("/api/voice/local/sample")
+def delete_voice_sample() -> dict:
+    local_clone.delete_sample()
+    return local_clone.sample_info()
 
 
 # REQ-004: estado del gate heuristico, UNO por sesion -- vive en memoria
@@ -708,7 +864,7 @@ def status() -> dict:
     # 2026-09-05, para el bug real que motivo agregar este campo).
     return {
         "status": "ok",
-        "model": settings.llm_model,
+        "model": default_model_id(),  # spec varios-proveedores: "proveedor/modelo"
         "version": __version__,
         # spec vision-generico REQ-005: nombre de la empresa en la pantalla.
         "company_name": settings.vision_company_name,
@@ -733,18 +889,45 @@ def status() -> dict:
 _MODELS_CACHE: dict = {"data": None, "fetched_at": 0.0}
 _MODELS_CACHE_TTL = 300  # 5 min
 
-# Parametros de generacion que acepta cualquier proveedor compatible con OpenAI
-# (Anthropic los admite en su capa compatible): arman el panel "Modelo e
-# inteligencia" de Configuracion.
+# Parametros de generacion que acepta cualquier proveedor compatible con OpenAI:
+# arman el panel "Modelo e inteligencia" de Configuracion.
 _GENERIC_VALID_ARGS = ["temperature", "top_p", "max_tokens"]
+# Bug real (2026-09-27, un "hola" rechazado por los tres modelos): Anthropic
+# responde 400 si recibe parametros de muestreo en sus modelos nuevos
+# ("`top_p` is deprecated for this model" en claude-sonnet-5; Sonnet 5, Opus
+# 4.7 en adelante y Fable no aceptan temperature/top_p/top_k), y en los que
+# todavia los aceptan (Haiku 4.5, Opus/Sonnet 4.6 y anteriores) no admite
+# `temperature` y `top_p` juntos. Con Anthropic, esos modelos reciben solo
+# `temperature`; cualquier otro, ninguno (un modelo que salga despues se trata
+# como nuevo: mandar de menos nunca rompe el pedido, mandar de mas si).
+_ANTHROPIC_SAMPLING_MODEL_RE = re.compile(r"^claude-(?:3-|(?:opus|sonnet|haiku)-4(?:-[0-6])?(?:-\d{8})?$)")
 
 
-def _model_entry(model_id: str) -> dict:
+def _valid_args_for(model_id: str) -> list[str]:
+    """Parametros de generacion que acepta `model_id`. spec varios-proveedores:
+    la regla de Anthropic vale para los modelos de Claude, sea el proveedor
+    principal o uno mas; el resto recibe los genericos."""
+    provider_id, name = llm_providers.split_model(model_id)
+    active = llm_providers.active_providers().get(provider_id or "")
+    if not (provider_id == "anthropic" or (active is not None and active.anthropic)):
+        return list(_GENERIC_VALID_ARGS)
+    if _ANTHROPIC_SAMPLING_MODEL_RE.match(name):
+        return ["temperature", "max_tokens"]
+    return ["max_tokens"]
+
+
+def _model_entry(model_id: str, provider: Any = None, free: bool = False) -> dict:
+    provider_id, name = llm_providers.split_model(model_id)
     return {
         "id": model_id,
+        # spec varios-proveedores REQ-004: el selector agrupa por proveedor.
+        "name": name,
+        "provider": provider.id if provider is not None else provider_id,
+        "provider_label": provider.label if provider is not None else (provider_id or ""),
+        "free": free,
         "aliases": [],
         "hosted_on_prem": False,
-        "valid_args": list(_GENERIC_VALID_ARGS),
+        "valid_args": _valid_args_for(model_id),
         "reasoning_levels": [],
         # Los modelos actuales aceptan imagenes; si uno no, el chat lo explica
         # (MODELO-IMAGEN en app/friendly_errors.py).
@@ -753,39 +936,141 @@ def _model_entry(model_id: str) -> dict:
     }
 
 
+def default_model_id(configured: str | None = None) -> str:
+    """El modelo por defecto como "proveedor/modelo" (spec varios-proveedores):
+    el configurado (`LLM_MODEL`) del proveedor principal, o si no hay principal,
+    el primero de la lista."""
+    configured = configured or settings.llm_model
+    if llm_providers.has_principal():
+        return llm_providers.canonical(configured)
+    models = (_MODELS_CACHE.get("data") or {}).get("models") or []
+    return models[0]["id"] if models else llm_providers.canonical(configured)
+
+
+def _provider_catalog() -> tuple[list[dict], list[dict]]:
+    """(modelos para el selector, estado de cada proveedor) -- spec
+    varios-proveedores REQ-003/004/006."""
+    cfg = pc.get_project_config()
+    principal = llm_providers.principal_id()
+    models: list[dict] = []
+    status: list[dict] = []
+    for provider in llm_providers.active_providers().values():
+        error = None
+        try:
+            ids = llm_providers.provider_models(provider)
+        except Exception as exc:  # noqa: BLE001 -- un proveedor caido no tapa a los demas
+            logger.warning("No se pudo obtener la lista de modelos de %s: %s", provider.label, exc)
+            ids, error = [], "no respondió (revisá la clave o la conexión)"
+        suggested = list(ids) if provider.fixed_models else llm_providers.suggested_models(provider, ids)
+        visible = [m for m in cfg.provider_models.get(provider.id, suggested) if m in ids] if ids else []
+        # REQ-006: un proveedor gratuito se usa recien cuando el usuario lo
+        # confirma (el principal de siempre, configurado a mano, cuenta como confirmado).
+        consent = bool(cfg.provider_consent.get(provider.id)) or provider.id == principal
+        for name in visible:
+            free = llm_providers.is_free(provider.id, name)
+            if free and not consent:
+                continue
+            models.append(_model_entry(f"{provider.id}/{name}", provider, free))
+        status.append(
+            {
+                "id": provider.id,
+                "label": provider.label,
+                "free": provider.free,
+                "consent": consent,
+                "principal": provider.id == principal,
+                "models": ids,
+                "visible": visible,
+                "suggested": suggested,
+                "error": error,
+            }
+        )
+    return models, status
+
+
+def model_needs_consent(model_id: str) -> str | None:
+    """spec varios-proveedores REQ-006: nombre del proveedor gratuito que el
+    usuario todavia no confirmo (None si se puede usar)."""
+    provider_id, name = llm_providers.split_model(model_id)
+    if not provider_id or provider_id == llm_providers.principal_id():
+        return None
+    if not llm_providers.is_free(provider_id, name):
+        return None
+    if pc.get_project_config().provider_consent.get(provider_id):
+        return None
+    provider = llm_providers.active_providers().get(provider_id)
+    return provider.label if provider else provider_id
+
+
 @app.get("/api/models")
 def list_models() -> dict:
-    """spec vision-generico REQ-002: modelos del selector. Si LLM_MODELS esta
-    completo manda esa lista (la que eligio quien administra Vision); si no,
-    la del proveedor (GET /models). Siempre incluye el modelo por defecto."""
+    """spec varios-proveedores REQ-002/003/004 (antes: vision-generico REQ-002):
+    los modelos de TODOS los proveedores con clave en el `.env`, "proveedor/
+    modelo". Se renueva a los 5 minutos o apenas cambia una clave. Siempre
+    incluye el modelo por defecto."""
     now = time.monotonic()
+    signature = llm_providers.signature()
     if (
         _MODELS_CACHE["data"] is not None
         and (now - _MODELS_CACHE["fetched_at"]) < _MODELS_CACHE_TTL
+        and _MODELS_CACHE.get("signature") == signature
     ):
         return _MODELS_CACHE["data"]
 
+    models, status = _provider_catalog()
+    failed = [s["label"] for s in status if s["error"]]
     warning = None
-    ids = list(settings.llm_model_list)
-    if not ids:
-        try:
-            ids = [m.id for m in get_client().models.list()]
-        except Exception as exc:  # noqa: BLE001 -- sin lista del proveedor, queda el modelo por defecto
-            logger.warning("No se pudo obtener la lista de modelos del proveedor: %s", exc)
-            warning = "No se pudo consultar la lista de modelos del proveedor de IA."
-    ids = sorted({*ids, settings.llm_model})
-    models = [_model_entry(model_id) for model_id in ids]
-    payload = {"models": models, "current_default": settings.llm_model}
+    if not status:
+        warning = "No hay ningún proveedor de IA con clave en el .env."
+    elif failed:
+        warning = f"No se pudo consultar la lista de modelos de: {', '.join(failed)}."
+    ids = {m["id"] for m in models}
+    # El por defecto: el del principal (LLM_MODEL) o, sin principal, el primero.
+    default = default_model_id() if llm_providers.has_principal() or not models else models[0]["id"]
+    if default not in ids and (llm_providers.has_principal() or not status):
+        models.append(_model_entry(default))
+    payload = {"models": models, "current_default": default}
     if warning:
         payload["warning"] = warning
-        return payload  # sin cache: se reintenta en la proxima apertura
+        if not models or len(failed) == len(status):
+            return payload  # sin cache: se reintenta en la proxima apertura
     _MODELS_CACHE["data"] = payload
     _MODELS_CACHE["by_id"] = {m["id"]: m for m in models}
-    _MODELS_CACHE["fetched_at"] = now
+    # Si algun proveedor no respondio, se guarda lo que si respondio solo 1
+    # minuto (para no volver a esperar al caido en cada apertura del selector).
+    _MODELS_CACHE["fetched_at"] = now - (_MODELS_CACHE_TTL - 60) if failed else now
+    _MODELS_CACHE["signature"] = signature
     return payload
 
 
-@app.get("/api/models/{model_id}")
+# ---------------------------------------------------------------------------
+# spec varios-proveedores REQ-003/006: proveedores con clave en el `.env`, sus
+# modelos (cuales se muestran) y el consentimiento de los gratuitos.
+# ---------------------------------------------------------------------------
+@app.get("/api/providers")
+def get_providers() -> dict:
+    _, status = _provider_catalog()
+    active = {s["id"] for s in status}
+    missing = [
+        {"id": spec.id, "label": spec.label, "key_names": list(spec.key_names), "free": spec.free}
+        for spec in llm_providers.KNOWN.values()
+        if spec.id not in active
+    ]
+    return {"providers": status, "available": missing}
+
+
+class ProvidersRequest(BaseModel):
+    models: dict[str, list[str]] | None = None
+    consent: dict[str, bool] | None = None
+
+
+@app.post("/api/providers")
+def set_providers(req: ProvidersRequest) -> dict:
+    pc.set_providers(models=req.models, consent=req.consent)
+    _MODELS_CACHE.update({"data": None, "fetched_at": 0.0, "by_id": None})
+    return get_providers()
+
+
+@app.get("/api/models/{model_id:path}")
 def get_model_detail(model_id: str) -> dict:
     """Devuelve valid_args/reasoning_levels de UN modelo puntual (por id o
     alias), leyendo del cache que arma list_models() -- si el cache esta
@@ -986,6 +1271,7 @@ def _launch_turn(session, session_id: str, turn) -> None:
                 user_message_id=turn.id,
                 images=turn.images,
                 voice_confirm=turn.voice_confirm,
+                narrate=turn.narrate,
             ):
                 session.push_event(event["type"], event.get("data", {}))
         except Exception:  # turno en background: si no se avisa aca, nadie lo ve
@@ -1109,6 +1395,7 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         generation_params=_resolve_gen_params(req),
         images=req.images or None,
         voice_confirm=req.voice_confirm,
+        narrate=req.narrate,
     )
 
     if session.is_busy:
@@ -2244,7 +2531,7 @@ def get_context_usage(session_id: str) -> dict:
         return {"tokens": 0, "context_window": 0, "pct_used": 0, "estimated": True}
 
     tokens = estimate_tokens(session.messages)
-    context_window = resolve_context_window(settings.llm_model)
+    context_window = resolve_context_window(default_model_id())
 
     pct = min(100, round((tokens / context_window) * 100)) if context_window else 0
     return {
@@ -2420,7 +2707,9 @@ def check_model_fallback(req: ModelFallbackCheckRequest) -> dict:
     catalog = _MODELS_CACHE.get("by_id") or {}
     return {
         "enabled": True,
-        **model_fallback.check_now(fallback, req.model, settings.llm_model, catalog),
+        **model_fallback.check_now(
+            fallback, llm_providers.canonical(req.model) if req.model else None, default_model_id(), catalog
+        ),
     }
 
 
@@ -2600,6 +2889,10 @@ def save_credentials_endpoint(req: SaveCredentialsRequest) -> dict:
         credentials.save_credentials(req.fields)
     except credentials.CredentialsError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Bug real (2026-09-27, cambio de Claude a Gemini): la lista de modelos
+    # quedaba en cache 5 minutos y el selector seguia ofreciendo los modelos
+    # del proveedor anterior. Al guardar credenciales se vuelve a pedir.
+    _MODELS_CACHE.update({"data": None, "fetched_at": 0.0, "by_id": None})
     return credentials.get_credentials_status()
 
 
@@ -3102,7 +3395,7 @@ async def compact_session_endpoint(session_id: str) -> dict:
     if not session.messages:
         return {"compacted": False, "reason": "sin historial que compactar"}
 
-    model = settings.llm_model
+    model = default_model_id()
     compacted = await compact_session(
         session_id, session.messages, resolve_context_window(model), model
     )

@@ -149,6 +149,25 @@ def test_saved_mic_is_used_by_meeting_mode(app):
     assert app.start_listening("#voice-record-btn")["label"] == MIC_1
 
 
+def test_voice_modes_explain_that_dictation_is_not_configured(app, whisper):
+    """Bug real (2026-09-27, spec vision-generico REQ-003): sin el dictado
+    configurado, el Modo Cerebro y el modo reunion decian "sigo intentando,
+    apaga y volve a prender el modo" -- reintentar no lo arregla. Ahora
+    muestran el motivo real que manda el backend."""
+    from app.llm.client import ProviderNotConfigured
+
+    whisper.exc = ProviderNotConfigured("faltan STT_BASE_URL y STT_API_KEY")
+    try:
+        app.open()
+        app.start_listening("#voice-record-btn")
+        app.wait_note("El dictado por voz no está configurado")
+        note = next(n for n in app.notes() if "dictado por voz" in n)
+        assert note.startswith("Modo reunión:")
+        assert "Sigo intentando" not in note
+    finally:
+        whisper.exc = None
+
+
 def test_unplugged_saved_mic_falls_back_to_default_and_warns_once(app):
     app.open(saved=(OLD_ID, MIC_1), hidden=(MIC_1,))
     call = app.start_listening("#voice-mic-btn")

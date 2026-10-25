@@ -177,7 +177,7 @@ def test_empty_promise_triggers_automatic_retry(monkeypatch):
     ]
     fake_client = _FakeClient([empty_promise_chunks, _tool_call_chunk()])
     monkeypatch.setattr(
-        loop_module, "get_client", lambda force_refresh=False: fake_client
+        loop_module, "get_client", lambda force_refresh=False, **_k: fake_client
     )
 
     session = _make_session()
@@ -228,7 +228,7 @@ def test_repeated_empty_promise_gives_up_after_max_retries(monkeypatch):
     responses = [empty_promise_chunks] * (loop_module._MAX_EMPTY_PROMISE_RETRIES + 2)
     fake_client = _FakeClient(responses)
     monkeypatch.setattr(
-        loop_module, "get_client", lambda force_refresh=False: fake_client
+        loop_module, "get_client", lambda force_refresh=False, **_k: fake_client
     )
 
     session = _make_session()
@@ -265,7 +265,7 @@ def test_normal_turn_without_tools_is_unaffected(monkeypatch):
     ]
     fake_client = _FakeClient([chunks])
     monkeypatch.setattr(
-        loop_module, "get_client", lambda force_refresh=False: fake_client
+        loop_module, "get_client", lambda force_refresh=False, **_k: fake_client
     )
 
     session = _make_session()

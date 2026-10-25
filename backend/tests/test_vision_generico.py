@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from app import config, main
 from app.friendly_errors import describe_model_error
 from app.llm import client as client_module
+from app.llm import providers as llm_providers
 from app.llm.client import ANTHROPIC_BASE_URL, ProviderNotConfigured, get_client
 
 pytestmark = pytest.mark.unit
@@ -101,6 +102,7 @@ def test_client_is_reused_until_the_configuration_changes(llm):
 @pytest.fixture
 def api(monkeypatch):
     monkeypatch.setattr(main, "_MODELS_CACHE", {"data": None, "fetched_at": 0.0})
+    llm_providers.clear_caches()
     return TestClient(main.app)
 
 
@@ -114,30 +116,83 @@ def _fake_provider(ids=None, exc=None):
 
 
 def test_models_from_the_env_list_win_and_the_provider_is_not_asked(api, llm, monkeypatch):
+    """spec varios-proveedores REQ-007: con LLM_MODELS completa, esa lista manda
+    para el proveedor principal (ahora con prefijo "proveedor/modelo")."""
     llm(model="claude-sonnet-5", models="claude-opus-5-5, claude-haiku-4-5-20251001")
     monkeypatch.setattr(main, "settings", config.get_settings())
-    monkeypatch.setattr(main, "get_client", lambda *a, **k: pytest.fail("no debe consultar al proveedor"))
+    monkeypatch.setattr(llm_providers, "OpenAI", lambda *a, **k: pytest.fail("no debe consultar al proveedor"))
     data = api.get("/api/models").json()
-    assert [m["id"] for m in data["models"]] == ["claude-haiku-4-5-20251001", "claude-opus-5-5", "claude-sonnet-5"]
-    assert data["current_default"] == "claude-sonnet-5"
-    assert data["models"][0]["valid_args"] == ["temperature", "top_p", "max_tokens"]
+    assert [m["id"] for m in data["models"]] == [
+        "anthropic/claude-opus-5-5",
+        "anthropic/claude-haiku-4-5-20251001",
+        "anthropic/claude-sonnet-5",
+    ]
+    assert data["current_default"] == "anthropic/claude-sonnet-5"
+    by_id = {m["id"]: m["valid_args"] for m in data["models"]}
+    assert by_id["anthropic/claude-haiku-4-5-20251001"] == ["temperature", "max_tokens"]
+    assert by_id["anthropic/claude-sonnet-5"] == ["max_tokens"]
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("claude-haiku-4-5-20251001", ["temperature", "max_tokens"]),
+        ("claude-haiku-4-5", ["temperature", "max_tokens"]),
+        ("claude-opus-4-6", ["temperature", "max_tokens"]),
+        ("claude-sonnet-4-20250514", ["temperature", "max_tokens"]),
+        ("claude-3-7-sonnet-20250219", ["temperature", "max_tokens"]),
+        ("claude-opus-4-7", ["max_tokens"]),
+        ("claude-opus-4-8", ["max_tokens"]),
+        ("claude-sonnet-5", ["max_tokens"]),
+        ("claude-opus-5-5", ["max_tokens"]),
+        ("claude-fable-5-1", ["max_tokens"]),
+    ],
+)
+def test_anthropic_models_only_get_the_sampling_params_they_accept(llm, monkeypatch, model, expected):
+    """Bug real (2026-09-27): un "hola" rechazado por los tres modelos porque se
+    mandaban temperature y top_p juntos ("`top_p` is deprecated for this model",
+    "cannot both be specified"). Con Anthropic, nunca top_p; temperature solo a
+    los modelos que todavia lo aceptan."""
+    llm()
+    monkeypatch.setattr(main, "settings", config.get_settings())
+    assert main._valid_args_for(model) == expected
+
+
+def test_other_providers_keep_the_generic_params(llm, monkeypatch):
+    llm(provider="openai_compatible", base_url="https://gateway.test/v1")
+    monkeypatch.setattr(main, "settings", config.get_settings())
+    assert main._valid_args_for("gpt-mini") == ["temperature", "top_p", "max_tokens"]
+
+
+def _fake_openai(ids=None, exc=None):
+    """Reemplazo de `OpenAI` en app/llm/providers.py: solo `models.list()`."""
+
+    def factory(*args, **kwargs):
+        def _list():
+            if exc:
+                raise exc
+            return [SimpleNamespace(id=i) for i in ids or []]
+
+        return SimpleNamespace(models=SimpleNamespace(list=_list))
+
+    return factory
 
 
 def test_without_env_list_the_provider_list_is_used(api, llm, monkeypatch):
     llm(model="gpt-mini", models="")
     monkeypatch.setattr(main, "settings", config.get_settings())
-    monkeypatch.setattr(main, "get_client", lambda *a, **k: _fake_provider(["gpt-a", "gpt-b"]))
+    monkeypatch.setattr(llm_providers, "OpenAI", _fake_openai(["gpt-a", "gpt-b"]))
     ids = [m["id"] for m in api.get("/api/models").json()["models"]]
-    assert ids == ["gpt-a", "gpt-b", "gpt-mini"]  # el modelo por defecto siempre esta
+    assert ids == ["anthropic/gpt-a", "anthropic/gpt-b", "anthropic/gpt-mini"]  # el por defecto siempre esta
 
 
 def test_provider_failure_leaves_the_default_model_and_a_plain_warning(api, llm, monkeypatch):
     llm(model="claude-sonnet-5", models="")
     monkeypatch.setattr(main, "settings", config.get_settings())
-    monkeypatch.setattr(main, "get_client", lambda *a, **k: _fake_provider(exc=RuntimeError("sin red")))
+    monkeypatch.setattr(llm_providers, "OpenAI", _fake_openai(exc=RuntimeError("sin red")))
     data = api.get("/api/models").json()
-    assert [m["id"] for m in data["models"]] == ["claude-sonnet-5"]
-    assert data["warning"] == "No se pudo consultar la lista de modelos del proveedor de IA."
+    assert [m["id"] for m in data["models"]] == ["anthropic/claude-sonnet-5"]
+    assert data["warning"] == "No se pudo consultar la lista de modelos de: Claude."
     assert main._MODELS_CACHE["data"] is None  # se reintenta en la proxima apertura
 
 
@@ -220,7 +275,7 @@ def test_no_company_specific_or_personal_data_in_the_repo():
     hits = []
     for path in _REPO.rglob("*"):
         parts = set(path.parts)
-        if not path.is_file() or parts & {".venv", "vendor", "__pycache__", ".git", "specs", "node_modules"}:
+        if not path.is_file() or parts & {".venv", "vendor", "__pycache__", ".git", "node_modules", "logs", ".pytest_cache"}:
             continue
         if path.suffix.lower() not in {".py", ".js", ".html", ".css", ".bat", ".ini", ".json", ".md", ".txt", ".example"}:
             continue

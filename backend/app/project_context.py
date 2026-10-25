@@ -108,10 +108,16 @@ class ProjectConfig:
     # (REQ-006: sin activarlo, el comportamiento es el de siempre). La lista
     # por defecto y los limites viven en app/llm/model_fallback.py.
     model_fallback_enabled: bool = False
-    model_fallback_order: list[str] = field(
-        default_factory=lambda: ["claude-opus-5-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"]
-    )
+    # spec varios-proveedores REQ-005: la lista arranca VACIA (decision del
+    # usuario: "vacia, la armo yo"); admite modelos de cualquier proveedor.
+    model_fallback_order: list[str] = field(default_factory=list)
     model_fallback_pause_minutes: int = 10
+
+    # spec varios-proveedores REQ-003/006: modelos que se muestran de cada
+    # proveedor ({"gemini": ["gemini-2.5-flash", ...]}; sin entrada = los
+    # sugeridos) y proveedores gratuitos que el usuario confirmo.
+    provider_models: dict[str, list[str]] = field(default_factory=dict)
+    provider_consent: dict[str, bool] = field(default_factory=dict)
 
 
 def _load() -> ProjectConfig:
@@ -190,6 +196,22 @@ def set_model_fallback(
         cfg.model_fallback_order = list(order)
     if pause_minutes is not None:
         cfg.model_fallback_pause_minutes = pause_minutes
+    _save(cfg)
+    return cfg
+
+
+def set_providers(
+    *, models: dict[str, list[str]] | None = None, consent: dict[str, bool] | None = None
+) -> ProjectConfig:
+    """spec varios-proveedores REQ-003/006: modelos visibles y consentimiento
+    por proveedor (solo se tocan los proveedores que vienen en el pedido)."""
+    cfg = _load()
+    if models is not None:
+        for provider_id, ids in models.items():
+            cfg.provider_models[provider_id] = [str(i) for i in ids]
+    if consent is not None:
+        for provider_id, ok in consent.items():
+            cfg.provider_consent[provider_id] = bool(ok)
     _save(cfg)
     return cfg
 

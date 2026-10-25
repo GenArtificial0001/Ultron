@@ -224,7 +224,14 @@ def test_status_items_show_alias_target_pause_and_missing(clock):
     mf.PAUSES.pause(GPT, 600)
     settings = mf.FallbackSettings(enabled=True, order=("claude-opus-latest", GPT, "dado-de-baja"), pause_minutes=10)
     items = mf.status_items(settings, _catalog())
-    assert items[0] == {"model": "claude-opus-latest", "resolved": OPUS, "missing": False, "paused_until": None, "secret_data_compliant": True}
+    assert items[0] == {
+        "model": "claude-opus-latest",
+        "label": "claude-opus-latest",  # spec varios-proveedores: nombre legible (sin prefijo, igual)
+        "resolved": OPUS,
+        "missing": False,
+        "paused_until": None,
+        "secret_data_compliant": True,
+    }
     assert items[1]["paused_until"] == mf.hhmm(clock.now + 600)
     assert items[2]["missing"] is True and items[2]["resolved"] is None
 
@@ -377,7 +384,7 @@ def fallback_env(monkeypatch, clock):
         settings = mf.FallbackSettings(enabled=enabled, order=tuple(order), pause_minutes=10)
         monkeypatch.setattr(mf, "load_settings", lambda: settings)
         client = RoutingClient(script or {})
-        monkeypatch.setattr(loop_module, "get_client", lambda force_refresh=False: client)
+        monkeypatch.setattr(loop_module, "get_client", lambda force_refresh=False, **_k: client)
         return client
 
     return configure
@@ -528,12 +535,21 @@ def api(monkeypatch, clock):
 
 
 @pytest.mark.integration
-def test_config_defaults_to_disabled_with_the_claude_family(api):
-    """spec vision-generico: la lista precargada es la familia de Claude (el
-    proveedor por defecto); un modelo que el proveedor no publica se marca."""
+def test_config_defaults_to_disabled_with_an_empty_list(api):
+    """spec varios-proveedores REQ-005: la lista arranca vacia (la arma el usuario)."""
     data = api.get("/api/config/model-fallback").json()
     assert data["enabled"] is False and data["pause_minutes"] == 10
-    assert data["order"] == list(mf.DEFAULT_ORDER) == ["claude-opus-5-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"]
+    assert data["order"] == list(mf.DEFAULT_ORDER) == []
+    assert data["items"] == []
+
+
+@pytest.mark.integration
+def test_config_marks_models_the_provider_no_longer_offers(api):
+    """Un modelo de la lista que el proveedor ya no publica se marca."""
+    from app import project_context as pc
+
+    pc.set_model_fallback(order=["claude-opus-5-5", "claude-sonnet-5"])
+    data = api.get("/api/config/model-fallback").json()
     items = {i["model"]: i for i in data["items"]}
     assert items["claude-opus-5-5"]["resolved"] == OPUS  # esta en el catalogo de prueba
     assert items["claude-sonnet-5"]["missing"] is True  # no esta: se saltea
@@ -555,6 +571,9 @@ def test_saving_the_list_persists_it_cleaned_and_enables_auto(api):
 
 @pytest.mark.integration
 def test_config_shows_which_model_is_paused(api):
+    from app import project_context as pc
+
+    pc.set_model_fallback(order=["claude-opus-5-5"])
     mf.PAUSES.pause(OPUS, 600)
     items = api.get("/api/config/model-fallback").json()["items"]
     assert next(i for i in items if i["model"] == "claude-opus-5-5")["paused_until"] is not None

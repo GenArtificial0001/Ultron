@@ -26,6 +26,10 @@ Guía para agentes (OpenCode, Claude Code) que trabajen en este repo. Todo el te
 - **Loop del modelo**: `backend/app/llm/loop.py` (tool-calling en formato OpenAI, `MAX_STEPS = 100`, aviso en `WARN_STEPS = 20`,
   prompt en `SYSTEM_PROMPT_TEMPLATE` con `{company_clause}`). Cancelación siempre cooperativa
   (`stop_requested`), nunca `.cancel()`.
+- **Varios proveedores** (spec varios-proveedores): `backend/app/llm/providers.py` (registro de proveedores
+  por su clave en el `.env`, releído sin reiniciar). Los modelos viajan como `proveedor/modelo`;
+  `get_client(model=...)` da el cliente de su proveedor y `api_model()` el nombre que entiende. Sin prefijo =
+  proveedor principal (`LLM_*`).
 - **Proveedor de IA**: `backend/app/llm/client.py` (`LLM_PROVIDER`: `anthropic` vía la capa compatible
   con OpenAI de Anthropic, u `openai_compatible` con `LLM_BASE_URL`). Dictado: `get_stt_client()`.
 - **Salto automático de modelos**: `backend/app/llm/model_fallback.py` (lista de prioridad en
@@ -35,6 +39,14 @@ Guía para agentes (OpenCode, Claude Code) que trabajen en este repo. Todo el te
   se aplica al proceso en `_apply_proxy`.
 - **Herramientas**: una por archivo en `backend/app/tools/`, registradas en `build_registry()`
   (`tools/__init__.py`). Nunca lanzan: `ToolRegistry.dispatch` devuelve el error como texto.
+- **Voz** (spec voz-fish-audio): toda la voz pasa por `speak()` de `frontend/js/tts.js`. Con motores en la
+  cadena (Configuración > Audio), cada frase se pide a `POST /api/voice/speak`; `backend/app/voice/`
+  recorre la cadena (Fish Audio, ElevenLabs, clonación local), pausa los que fallan y la voz del
+  navegador queda siempre al final. "¿Está hablando?" es `isSpeaking()`, no `speechSynthesis.speaking`.
+  Informe técnico hablado: `backend/app/tech_report.py` arma la frase de cada acción (`speech` en el
+  evento `progress-estimate`), recorre en vivo el código mientras llegan los fragmentos de la tool-call
+  (`LiveNarrator`, evento `narration`), anuncia el plan desde `todowrite` y tapa los secretos. Solo
+  corre si el pedido trae `narrate: true`.
 - **Frontend**: todo en `frontend/js/app.js` (SSE parseado a mano, `handleEvent` con `switch`);
   librerías locales en `frontend/vendor/` (cero CDN).
 

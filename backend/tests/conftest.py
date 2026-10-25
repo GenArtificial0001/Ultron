@@ -89,6 +89,15 @@ _SECRET_PREFIXES = (
     "ACCESS_TOKEN",
     "OPENAI_",
     "ANTHROPIC_",
+    # spec varios-proveedores: claves de los demas proveedores de IA.
+    "GEMINI_",
+    "DEEPSEEK_",
+    "GROQ_",
+    "META_GROQ_",
+    "OPENROUTER_",
+    "CUSTOM_",
+    "FISH_",
+    "ELEVENLABS_",
 )
 for _name in list(os.environ):
     if _name.upper().startswith(_SECRET_PREFIXES):

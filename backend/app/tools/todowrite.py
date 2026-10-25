@@ -59,6 +59,13 @@ def _todowrite_execute(args: dict, session: Any = None) -> str:
     ]
 
     if session is not None:
+        # spec informe-tecnico-hablado REQ-010: con el informe prendido, se
+        # anuncia cada tarea que empieza o termina ("Paso 2 de 4: ...").
+        if getattr(session, "narrate", False):
+            from app.tech_report import task_transitions
+
+            for spoken in task_transitions(session.todos or [], cleaned):
+                session.push_event("narration", {"text": spoken})
         session.todos = cleaned
         session.push_event("todo", {"todos": cleaned})
         # persistencia-sqlite-sesiones REQ-002: el checklist tambien se

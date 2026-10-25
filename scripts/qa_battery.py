@@ -1087,10 +1087,14 @@ def form_consistency_check() -> bool:
         wrapped |= set(
             _re.findall(r'<(?:input|select|textarea)[^>]*id="([^"]+)"', m.group(1))
         )
-    # (c) aria-label
-    aria = set(
-        _re.findall(r'<(?:input|select|textarea)[^>]*aria-label="([^"]+)"', html)
-    )
+    # (c) aria-label. Bug corregido (spec voz-fish-audio): antes se juntaban
+    # los TEXTOS del aria-label y se comparaban contra ids, asi que esta
+    # regla nunca contaba. Ahora se juntan los ids de los campos que lo tienen.
+    aria: set[str] = set()
+    for tag in _re.findall(r"<(?:input|select|textarea)\b[^>]*>", html):
+        tag_id = _re.search(r'\bid="([^"]+)"', tag)
+        if tag_id and 'aria-label="' in tag:
+            aria.add(tag_id.group(1))
     chrome = {
         "chat-input",
         "image-file-input",

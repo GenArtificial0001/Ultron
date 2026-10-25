@@ -14,11 +14,14 @@ backend. La clave Fernet se deriva con SHA-256 sobre los bytes crudos del
 archivo .pem (nunca se envia la key SSH en si a ningun lado) + `HKDF` para
 expandir a los 32 bytes exactos que Fernet exige, urlsafe-base64.
 
-Si `jarvis_deploy_key` no existe todavia (instalacion nueva sin el repo
-de skills configurado), esta feature queda deshabilitada -- se avisa al
-usuario que primero genere esa key (`ssh-keygen -t ed25519 -f
-backend/keys/jarvis_deploy_key`) antes de poder guardar credenciales
-cifradas.
+Spec vision-generico, pendiente 2 (REQ-006): una instalacion nueva no tiene
+esa deploy key (solo existia en la PC original), y antes eso dejaba la
+pestaña Credenciales inutilizable. Ahora, si no hay deploy key, la primera
+vez que se guarda algo se genera una clave Fernet LOCAL y aleatoria en
+`keys/credentials.key` (carpeta de datos, nunca versionada). Orden de
+eleccion de la clave: `credentials.key` si existe; si no, la deploy key
+(instalaciones que ya cifraron con ella siguen leyendo su `.env.enc`); si
+tampoco existe, se genera `credentials.key`.
 
 Persistencia: JSON con valores cifrados en `backend/.env.enc` (nunca
 `.env` en texto plano) -- separado del `.env` real que sigue existiendo
@@ -54,6 +57,8 @@ logger = logging.getLogger(__name__)
 
 ENC_FILE = BASE_DIR / ".env.enc"
 DEPLOY_KEY_PATH = BASE_DIR / "keys" / "jarvis_deploy_key"
+# Pendiente 2 de vision-generico (REQ-006): clave propia de cada instalacion.
+LOCAL_KEY_PATH = BASE_DIR / "keys" / "credentials.key"
 
 # ---------------------------------------------------------------------------
 # REQ-103 (spec configuracion-limpieza-credenciales-servidor, 2026-09-19):
@@ -93,7 +98,7 @@ CONNECTOR_SCHEMA: dict[str, dict[str, Any]] = {
         "fields": [
             {
                 "key": "llm_provider",
-                "label": "Proveedor (anthropic u openai_compatible)",
+                "label": "Tipo de conexión: anthropic (Claude) u openai_compatible (Gemini, DeepSeek, Groq, OpenRouter, OpenAI…; la dirección de abajo decide a cuál)",
                 "type": "text",
                 "secret": False,
                 "default": "anthropic",
@@ -111,6 +116,14 @@ CONNECTOR_SCHEMA: dict[str, dict[str, Any]] = {
             {"key": "stt_api_key", "label": "Dictado: clave", "type": "password", "secret": True},
             {"key": "stt_model", "label": "Dictado: modelo", "type": "text", "secret": False, "default": "whisper-1"},
             {"key": "vision_company_name", "label": "Nombre de la empresa", "type": "text", "secret": False},
+        ],
+    },
+    # spec voz-fish-audio REQ-009: claves de los motores de voz en la nube.
+    "voz": {
+        "label": "Voz de Vision (Fish Audio, ElevenLabs)",
+        "fields": [
+            {"key": "fish_api_key", "label": "Fish Audio: clave", "type": "password", "secret": True},
+            {"key": "elevenlabs_api_key", "label": "ElevenLabs: clave", "type": "password", "secret": True},
         ],
     },
     "oracle": {
@@ -282,22 +295,44 @@ class CredentialsError(Exception):
 
 
 def _derive_fernet_key() -> bytes:
-    """SHA-256 sobre los bytes crudos del archivo de la deploy key SSH +
-    codificacion urlsafe-base64 (formato exacto que Fernet exige para su
-    clave de 32 bytes)."""
-    if not DEPLOY_KEY_PATH.exists():
-        raise CredentialsError(
-            f"No existe la deploy key SSH en '{DEPLOY_KEY_PATH}' -- "
-            f"generala con 'ssh-keygen -t ed25519 -f \"{DEPLOY_KEY_PATH}\"' "
-            "antes de guardar credenciales cifradas."
-        )
-    raw = DEPLOY_KEY_PATH.read_bytes()
-    digest = hashlib.sha256(raw).digest()
-    return base64.urlsafe_b64encode(digest)
+    """Clave Fernet de esta instalacion (orden explicado en el docstring del
+    modulo). Con la deploy key: SHA-256 sobre sus bytes crudos +
+    urlsafe-base64 (formato exacto que Fernet exige para su clave de 32
+    bytes)."""
+    if LOCAL_KEY_PATH.exists():
+        return LOCAL_KEY_PATH.read_bytes().strip()
+    if DEPLOY_KEY_PATH.exists():
+        raw = DEPLOY_KEY_PATH.read_bytes()
+        digest = hashlib.sha256(raw).digest()
+        return base64.urlsafe_b64encode(digest)
+    return _create_local_key()
+
+
+def _create_local_key() -> bytes:
+    """Pendiente 2 de vision-generico (REQ-006): genera `credentials.key` la
+    primera vez. Se crea en modo exclusivo ("xb"): si otro hilo la creo un
+    instante antes, se usa esa en vez de pisarla (pisarla dejaria ilegible
+    lo que el otro hilo ya haya cifrado)."""
+    key = Fernet.generate_key()
+    LOCAL_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with LOCAL_KEY_PATH.open("xb") as fh:
+            fh.write(key)
+    except FileExistsError:
+        return LOCAL_KEY_PATH.read_bytes().strip()
+    logger.info("Se genero la clave local de cifrado de credenciales en %s", LOCAL_KEY_PATH)
+    return key
 
 
 def _fernet() -> Fernet:
-    return Fernet(_derive_fernet_key())
+    try:
+        return Fernet(_derive_fernet_key())
+    except ValueError as exc:
+        # Solo pasa si alguien edito o corto `credentials.key` a mano.
+        raise CredentialsError(
+            f"La clave de cifrado '{LOCAL_KEY_PATH}' esta dañada. Si no tenes una copia, "
+            "borrala y volve a cargar las credenciales desde Configuracion."
+        ) from exc
 
 
 def _load_encrypted() -> dict[str, str]:

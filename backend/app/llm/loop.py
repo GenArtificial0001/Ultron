@@ -43,6 +43,7 @@ from app.browser_workspace import get_or_create_browser_dir
 from app.config import get_settings
 from app.friendly_errors import FriendlyError, describe_model_error, describe_step_limit
 from app.llm import model_fallback
+from app.llm import providers as llm_providers
 from app.llm.client import get_client
 from app.llm.diagnostics import describe_history_shape
 from app.llm.history_compat import history_for_model
@@ -50,6 +51,7 @@ from app.perf_log import TurnPerfRecorder
 from app.persistence import service as persistence
 from app.project_context import build_project_context_prompt
 from app.session.events import SessionState
+from app.tech_report import LiveNarrator, describe_call
 from app.tool_timings import describe_operation, get_budget_ms, record_duration
 from app.tools import get_registry
 from app.tools.skill import list_available_skills_xml
@@ -546,6 +548,7 @@ async def run_turn(
     user_message_id: str | None = None,
     images: list[str] | None = None,
     voice_confirm: bool = False,
+    narrate: bool = False,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Wrapper fino de `_run_turn_impl` (ver su docstring para el
     comportamiento real del turno) -- investigacion de rendimiento 2026-09
@@ -570,6 +573,7 @@ async def run_turn(
             user_message_id=user_message_id,
             images=images,
             voice_confirm=voice_confirm,
+            narrate=narrate,
         ):
             yield event
     except BaseException:
@@ -589,6 +593,7 @@ async def _run_turn_impl(
     user_message_id: str | None = None,
     images: list[str] | None = None,
     voice_confirm: bool = False,
+    narrate: bool = False,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Ejecuta un turno completo del agente (potencialmente varias vueltas
     de tool-calling) para un nuevo mensaje del usuario. Yields eventos
@@ -665,13 +670,18 @@ async def _run_turn_impl(
     # lo elige el picker (REQ-002/003/004/009): el elegido a mano en el selector,
     # o el primero de la lista en modo Automatico, y si esta en pausa el
     # siguiente. Apagado (default), todo sigue como siempre (REQ-006).
+    # spec varios-proveedores REQ-004/007: todo modelo viaja como
+    # "proveedor/modelo" (uno sin prefijo es del proveedor principal).
+    from app.main import default_model_id  # import diferido: evita ciclo
+
+    model = llm_providers.canonical(model) if model else None
     fallback_settings = model_fallback.load_settings()
     picker = (
-        model_fallback.TurnModelPicker(fallback_settings, model, settings.llm_model, catalog)
+        model_fallback.TurnModelPicker(fallback_settings, model, default_model_id(settings.llm_model), catalog)
         if fallback_settings.enabled
         else None
     )
-    active_model = picker.home if picker is not None else (model or settings.llm_model)
+    active_model = picker.home if picker is not None else (model or default_model_id(settings.llm_model))
     extra_params = _extra_params_for(active_model, generation_params, catalog)
 
     # persistencia-sqlite-sesiones: el system prompt NUNCA se persiste en
@@ -789,6 +799,18 @@ async def _run_turn_impl(
             "explícitamente qué quiso decir el usuario, en vez de asumir o ejecutar "
             "algo al azar."
         )
+    # spec informe-tecnico-hablado REQ-009/010: con el informe tecnico
+    # hablado prendido, el modelo comenta cada seccion del codigo (de ahi sale
+    # el recorrido en vivo) y `todowrite` anuncia el avance del plan. Mismo
+    # mecanismo que la instruccion del Modo Cerebro: va en el mensaje del turno.
+    session.narrate = narrate
+    if narrate:
+        voice_confirm_instruction += (
+            "\n\n[Informe técnico hablado] El usuario escucha en voz alta lo que hacés: cuando escribas "
+            "o edites código, comentá en español cada sección y funcionalidad con una línea que diga qué "
+            "hace y dónde va (HTML <!-- -->, JS/CSS // o /* */, Python #, SQL --), incluidas las "
+            "conexiones a bases de datos o APIs."
+        )
     if voice_confirm_instruction:
         # Se agrega como continuacion del ULTIMO mensaje user recien
         # insertado (arriba) -- funciona tanto para el formato string
@@ -905,6 +927,26 @@ async def _run_turn_impl(
             yield {"type": "stopped", "data": {"reason": "user_requested"}}
             return
 
+        # spec varios-proveedores REQ-006: un modelo gratuito elegido a mano no se
+        # usa hasta que el usuario confirme ese proveedor (con el salto activo,
+        # esos modelos ni siquiera estan en el catalogo y el picker los saltea).
+        if _step == 0 and picker is None:
+            from app.main import model_needs_consent  # import diferido: evita ciclo
+
+            consent_label = model_needs_consent(active_model)
+            if consent_label:
+                yield _friendly_event(
+                    FriendlyError(
+                        "MODELO-CONSENTIMIENTO",
+                        f"{consent_label} es un servicio gratuito que puede usar lo que le mandás para "
+                        "mejorar sus productos. Si estás de acuerdo, confirmalo en Configuración > Modelo e "
+                        "inteligencia > Proveedores y volvé a enviar tu mensaje; si no, elegí otro modelo en "
+                        "el selector de arriba.",
+                    ),
+                    active_model,
+                )
+                return
+
         # spec salto-automatico-modelos: modelo de ESTE paso. `model-switch` va
         # siempre al arrancar el turno (el chip muestra el modelo que responde
         # de verdad) y cada vez que cambia, con el aviso si hubo salto.
@@ -930,6 +972,8 @@ async def _run_turn_impl(
 
         assistant_text = ""
         tool_calls_acc: dict[int, dict[str, Any]] = {}
+        # spec informe-tecnico-hablado REQ-008: un narrador por tool-call.
+        live_narrators: dict[int, LiveNarrator] = {}
         finish_reason: str | None = None
         stopped_mid_stream = False
         jump_to_next_model = False
@@ -978,7 +1022,9 @@ async def _run_turn_impl(
             # un 401), get_client hace un POST sincronico de OAuth a Azure AD
             # -- bloquearia el event loop entero mientras dura ese request.
             try:
-                client = await asyncio.to_thread(get_client, force_refresh=(attempt == 1))
+                # spec varios-proveedores REQ-005: el cliente del proveedor de
+                # ESTE paso (el salto puede cambiar de proveedor a mitad del turno).
+                client = await asyncio.to_thread(get_client, force_refresh=(attempt == 1), model=active_model)
             except Exception as exc:  # noqa: BLE001 -- login/red ANTES de hablar con el modelo
                 # Antes quedaba fuera de todo try: sin VPN o con el login de
                 # el proveedor de IA roto, la excepcion subia hasta el turno en background
@@ -990,7 +1036,7 @@ async def _run_turn_impl(
             stream = _stream_chat_completion(
                 client,
                 session,
-                model=active_model,
+                model=llm_providers.api_model(active_model),
                 # REQ-005 (spec salto-automatico-modelos): copia con ids de
                 # tool-call que el modelo destino acepta; session.messages no
                 # se toca (Gemini necesita los suyos originales).
@@ -1122,6 +1168,15 @@ async def _run_turn_impl(
                                     entry["name"] += tc.function.name
                                 if tc.function.arguments:
                                     entry["arguments"] += tc.function.arguments
+                                    # REQ-008: recorrido en vivo del codigo
+                                    # mientras el modelo lo escribe.
+                                    if narrate and entry["name"]:
+                                        narrator = live_narrators.setdefault(idx, LiveNarrator(entry["name"]))
+                                        for spoken in narrator.feed(tc.function.arguments):
+                                            yield {
+                                                "type": "narration",
+                                                "data": {"text": spoken, "call_id": entry["id"]},
+                                            }
                 else:
                     # `for...else`: corre si el loop termino SIN pasar por
                     # el `break` de arriba -- incluye el caso nuevo donde
@@ -1143,6 +1198,7 @@ async def _run_turn_impl(
                     )
                     assistant_text = ""
                     tool_calls_acc = {}
+                    live_narrators = {}
                     continue
                 yield _model_error_event(
                     exc,
@@ -1315,6 +1371,11 @@ async def _run_turn_impl(
         # concurrentes de OpenCode, ver runner/llm.ts).
         turn_had_tools = True
         ordered_calls = [tool_calls_acc[i] for i in sorted(tool_calls_acc.keys())]
+        # spec informe-tecnico-hablado REQ-008: si una tool-call ya se narro en
+        # vivo (write/edit/bash), su frase de accion no se repite al ejecutarla.
+        live_narrated_ids = {
+            tool_calls_acc[i]["id"] for i, n in live_narrators.items() if n.narrated and i in tool_calls_acc
+        }
         assistant_msg: dict[str, Any] = {
             "role": "assistant",
             "content": assistant_text or None,
@@ -1384,6 +1445,12 @@ async def _run_turn_impl(
                     "id": call["id"],
                     "operation": operation_key,
                     "label": describe_operation(operation_key),
+                    # spec informe-tecnico-hablado REQ-002/003: frase del
+                    # informe tecnico (None si no es una accion); el frontend
+                    # la dice en vez de `label` si el interruptor esta prendido.
+                    "speech": None
+                    if call["id"] in live_narrated_ids
+                    else describe_call(call["name"], call["arguments"]),
                     "budget_ms": budget_ms,
                     "has_history": has_history,
                 },

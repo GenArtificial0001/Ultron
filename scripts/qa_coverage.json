@@ -51,6 +51,12 @@
     {"slug": "diagnostico-rechazo-400", "tokens": ["test_a_400_logs_the_history_shape_without_any_content", "test_missing_tool_response_is_reported_where_it_breaks"]},
     {"slug": "salto-automatico-modelos", "tokens": ["test_limit_on_the_first_model_is_answered_by_the_next_in_the_same_turn", "test_paused_model_is_not_called_again_until_the_pause_ends", "test_mid_task_jump_skips_gemini_and_keeps_going", "test_limit_jumps_to_the_next_model_with_a_notice_and_the_chip_follows", "test_when_the_pause_ends_the_chip_and_the_notice_come_back_by_themselves"]},
     {"slug": "formulas-copiables", "tokens": ["convertLatex", "test_formula_copies_as_readable_unicode", "test_the_cauchy_answer_the_user_copied_to_whatsapp"]},
-    {"slug": "boton-reproducir-voz", "tokens": ["showMessageSpeaking", "test_pressing_it_while_vision_reads_cuts_the_voice_for_good", "test_a_late_cancel_notice_does_not_release_the_new_reading"]}
+    {"slug": "boton-reproducir-voz", "tokens": ["showMessageSpeaking", "test_pressing_it_while_vision_reads_cuts_the_voice_for_good", "test_a_late_cancel_notice_does_not_release_the_new_reading"]},
+    {"slug": "voz-motores", "tokens": ["test_the_answer_is_read_with_the_engine_and_stop_cuts_it_at_once", "test_when_the_engine_fails_the_browser_voice_speaks_and_warns_once", "test_adding_a_cloud_engine_asks_for_consent", "test_out_of_credit_jumps_to_the_free_model_and_warns"]},
+    {"slug": "credenciales-clave-local", "tokens": ["test_new_install_can_save_credentials_and_generates_its_own_key"]},
+    {"slug": "varios-proveedores", "tokens": ["test_each_key_in_the_env_enables_its_provider_with_its_address", "test_out_of_credit_pauses_the_whole_provider_and_jumps_to_another", "test_free_providers_are_hidden_until_the_user_confirms", "test_the_list_starts_empty"]},
+    {"slug": "dictado-motivo-real", "tokens": ["test_voice_modes_explain_that_dictation_is_not_configured"]},
+    {"slug": "claude-parametros-por-modelo", "tokens": ["test_anthropic_models_only_get_the_sampling_params_they_accept"]},
+    {"slug": "informe-tecnico-hablado", "tokens": ["test_by_default_each_action_is_said_in_one_phrase_and_the_chat_does_not_change", "test_the_queue_never_falls_more_than_three_phrases_behind", "test_the_code_is_narrated_live_the_plan_is_announced_and_it_never_goes_silent", "test_the_code_is_narrated_live_in_order_while_it_is_written", "test_secrets_are_hidden"]}
   ]
 }

@@ -13,6 +13,9 @@ Sin clave, o sin direccion en `openai_compatible`, se corta con
 `ProviderNotConfigured` (mensaje claro en el chat): si no se le pasa una
 direccion, la libreria de OpenAI mandaria el pedido a su servidor publico.
 
+Varios proveedores a la vez (spec varios-proveedores): ver `app/llm/providers.py`;
+`get_client(model=...)` elige el de cada modelo.
+
 El dictado por voz usa su propio proveedor (`STT_*`, ver `get_stt_client`).
 El proxy de la empresa (`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` del `.env`) lo
 aplica `app/config.py` al entorno del proceso; httpx, que usa la libreria, lo
@@ -60,11 +63,30 @@ def provider_config() -> tuple[str, str, dict[str, str] | None]:
     return base_url, api_key, None
 
 
-def get_client(force_refresh: bool = False) -> OpenAI:
+def get_client(force_refresh: bool = False, model: str | None = None) -> OpenAI:
     """Cliente del proveedor de IA. Se reusa mientras la configuracion no
     cambie (por ejemplo, desde Configuracion > Credenciales); `force_refresh`
-    lo recrea igual (el loop lo pide tras un 401)."""
+    lo recrea igual (el loop lo pide tras un 401).
+
+    spec varios-proveedores REQ-004/005: con `model` ("gemini/gemini-2.5-flash")
+    devuelve el cliente de SU proveedor, asi el salto puede cambiar de proveedor
+    a mitad de un turno. Sin `model`, el proveedor principal (LLM_*), como siempre."""
     global _CLIENT, _CLIENT_CONFIG
+
+    if model is not None or not get_settings().llm_api_key.strip():
+        from app.llm import providers  # import diferido: providers usa la config de aca
+
+        try:
+            if model is not None:
+                return providers.client_for(model, force_refresh=force_refresh)
+            provider_id = providers.principal_id()
+            if provider_id is None:
+                raise ProviderNotConfigured(
+                    "Falta LLM_API_KEY o la clave de algun proveedor (ej. GEMINI_API_KEY) en el .env."
+                )
+            return providers.client_for_provider(provider_id, force_refresh=force_refresh)
+        except providers.ProviderUnavailable as exc:
+            raise ProviderNotConfigured(str(exc)) from exc
 
     config = provider_config()
     if force_refresh or _CLIENT is None or config != _CLIENT_CONFIG:

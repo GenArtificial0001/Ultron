@@ -106,12 +106,14 @@ Conversacion a resumir:
 
 async def _summarize(transcript: str, model: str) -> str:
     from app.llm.client import get_client  # import diferido: evita ciclo
+    from app.llm.providers import api_model
 
-    client = get_client()
+    # spec varios-proveedores: el cliente y el nombre del proveedor de `model`.
+    client = get_client(model=model)
 
     def _request() -> Any:
         return client.chat.completions.create(
-            model=model,
+            model=api_model(model),
             messages=[
                 {"role": "user", "content": _SUMMARY_PROMPT.format(transcript=transcript)}
             ],

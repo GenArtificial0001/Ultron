@@ -41,11 +41,28 @@
 ### Pendientes (en este orden, decisiones del usuario)
 1. Generalizar Microsoft Graph: la región de Microsoft Search está fija en `NAM`
    (`app/connectors/graph_connector.py`) -> variable del `.env`; revisar otras suposiciones.
-2. Configuración > Credenciales cifra con una clave SSH de despliegue que solo existe en la PC del
-   usuario original -> generar una clave local propia la primera vez.
+2. ~~Configuración > Credenciales cifra con una clave SSH de despliegue que solo existe en la PC del
+   usuario original -> generar una clave local propia la primera vez.~~ **Hecho 2026-09-27** (versión
+   1.1.0, `keys/credentials.key`; ver spec voz-fish-audio, dependencia de REQ-009).
 3. Primer commit y push al repositorio de Gen (https://github.com/GenArtificial0001/Vision, PRIVADO,
    rama main, un solo commit sin historial). Firma: `GenArtificial0001 <genartificial0001@gmail.com>`.
    Antes de subir: mostrarle al usuario la lista completa de archivos y correr el guardián
    `test_no_company_specific_or_personal_data_in_the_repo`.
 4. Specs futuras (NO empezar sin pedido): varios proveedores a la vez (`providers.json` con claves en
    el `.env`, modelos `proveedor/modelo`, salto entre proveedores) y conectores MySQL/MariaDB/MongoDB.
+
+## 2026-09-27 -- arreglo (Claude Code, rama `dev`, versión 1.1.0)
+
+- REQ-001: con `LLM_PROVIDER=anthropic`, el chat fallaba con 400 en cuanto había parámetros de generación
+  guardados (`temperature` y `top_p`): "`top_p` is deprecated for this model" (claude-sonnet-5) y
+  "`temperature` and `top_p` cannot both be specified" (Haiku 4.5, Opus 4.6). `main._valid_args_for`
+  arma los parámetros por modelo: ninguno de muestreo para los modelos nuevos (y los desconocidos), solo
+  `temperature` para Haiku 4.5 y Opus/Sonnet 4.6 o anteriores. Verificado con Claude real (una consulta
+  mínima por modelo) y con `test_anthropic_models_only_get_the_sampling_params_they_accept`.
+- REQ-003: el Modo Cerebro y el modo reunión mostraban un aviso genérico ("sigo intentando, apagá y
+  volvé a prender el modo") aunque el dictado no estuviera configurado. `noticeTranscriptionProblem`
+  (app.js) ahora muestra el motivo que manda el backend. E2E:
+  `test_voice_modes_explain_that_dictation_is_not_configured`.
+- REQ-003: dictado real verificado con Groq (`https://api.groq.com/openai/v1`,
+  `whisper-large-v3-turbo`), cargado por el usuario en Configuración > Credenciales: transcripción
+  200 OK (2026-09-27 18:47). Guía paso a paso en el README.

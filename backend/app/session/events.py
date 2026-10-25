@@ -70,6 +70,10 @@ class UserTurn:
     # manejo en run_turn/app/llm/loop.py). False (default) = comportamiento
     # normal del chat de texto, sin cambios.
     voice_confirm: bool = False
+    # spec informe-tecnico-hablado REQ-008/009/010: True si el usuario tiene
+    # prendido "Hablar informe tecnico" (y "Leer en voz alta"): el turno narra
+    # el codigo en vivo, pide comentarios y anuncia el avance del plan.
+    narrate: bool = False
 
 
 @dataclass
@@ -175,6 +179,11 @@ class SessionState:
     # sentido (confirmado o no) -- nunca queda "colgado" entre sesiones de
     # modo Cerebro distintas."""
     voice_pending_confirmation: dict[str, Any] | None = None
+
+    # spec informe-tecnico-hablado REQ-010: si el turno EN CURSO pidio el
+    # informe tecnico hablado (UserTurn.narrate). La lee la tool `todowrite`
+    # para anunciar el avance del plan; la fija run_turn al empezar cada turno.
+    narrate: bool = False
 
     # --- REQ-003 (spec controles-seguridad-optimizacion-lightspeed-bigquery):
     # guardrail estructural de riesgo en BigQuery (DROP/DELETE/TRUNCATE/

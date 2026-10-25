@@ -17,15 +17,20 @@ from types import SimpleNamespace
 import openai
 import pytest
 
-from app import main
+from app import config, main
 from app.llm import loop as loop_module
 from app.llm import model_fallback as mf
+from app.llm import providers as llm_providers
 from e2e_support import FakeWhisper, launch_chromium, open_app, serve_backend
 
 pytestmark = pytest.mark.e2e
 
 OPUS, GPT, GEMINI, DEEPSEEK = "claude-opus-5-5", "gpt-6-sol", "gemini-3.1-pro", "deepseekv41-flash"
 ROSTER = [OPUS, GPT, GEMINI, DEEPSEEK]
+# spec varios-proveedores REQ-007: este modulo prueba un Vision "clasico" (un solo
+# proveedor en LLM_*, con su lista en LLM_MODELS); sus modelos se ven como
+# "principal/<modelo>" y en pantalla solo por su nombre, como antes.
+P = "principal/"
 
 
 class FakeProvider:
@@ -69,6 +74,15 @@ def base_url(proveedor):
         mp.setattr(loop_module, "get_client", lambda *a, **k: proveedor)
         # Otro modulo e2e pudo dejar cacheado un catalogo distinto (TTL 5 min).
         mp.setattr(main, "_MODELS_CACHE", {"data": None, "fetched_at": 0.0})
+        settings = config.get_settings()
+        for name, value in (
+            ("llm_provider", "openai_compatible"),
+            ("llm_base_url", "https://gateway.test/v1"),
+            ("llm_api_key", "clave-falsa"),
+            ("llm_models", ",".join(ROSTER)),
+        ):
+            mp.setattr(settings, name, value)
+        llm_providers.clear_caches()
         with serve_backend(proveedor) as url:
             yield url
 
@@ -101,13 +115,14 @@ def enable_fallback(app, order=(OPUS, GPT)) -> None:
 def open_model_settings(app) -> None:
     app.page.click("#settings-btn")
     app.page.click('.settings-tab[data-tab="model"]')
-    app.page.wait_for_selector("#cfg-fallback-list .fallback-item")
+    app.page.wait_for_selector("#cfg-fallback-list li")
 
 
 def fallback_rows(app) -> list[dict]:
     return app.page.eval_on_selector_all(
         "#cfg-fallback-list .fallback-item",
-        "els => els.map(e => ({model: e.dataset.model, info: e.querySelector('.fallback-info').textContent}))",
+        "els => els.map(e => ({model: e.dataset.model, name: e.querySelector('.fallback-name').textContent, "
+        "info: e.querySelector('.fallback-info').textContent}))",
     )
 
 
@@ -132,34 +147,32 @@ def wait_chip(app, text: str) -> None:
 # ---------------------------------------------------------------------------
 # REQ-001: la lista de prioridad en Configuracion
 # ---------------------------------------------------------------------------
-def test_default_list_is_the_claude_family(app):
-    """spec vision-generico: la lista precargada es la familia de Claude; un
-    modelo que el proveedor no publica se marca en vez de romper."""
+def test_the_list_starts_empty(app):
+    """spec varios-proveedores REQ-005: la lista arranca vacia (la arma el usuario)."""
     app.open()
     open_model_settings(app)
-    rows = fallback_rows(app)
-    assert [r["model"] for r in rows] == list(mf.DEFAULT_ORDER)
-    assert rows[0]["info"] == "disponible"  # claude-opus-5-5 esta en el catalogo falso
-    assert rows[1]["info"] == "disponible"  # el modelo por defecto siempre esta en la lista
-    assert rows[2]["info"] == "el proveedor ya no lo ofrece: se saltea"  # Haiku: el falso no lo publica
+    assert fallback_rows(app) == []
+    assert "vacía" in app.page.text_content("#cfg-fallback-list")
     assert app.page.is_checked("#cfg-fallback-enabled") is False  # REQ-006: apagado por defecto
 
 
 def test_building_the_list_and_saving_turns_on_auto(app):
     app.open()
     open_model_settings(app)
-    # quitar el ultimo, subir el segundo, agregar un modelo puntual
-    app.page.locator("#cfg-fallback-list .fallback-item").nth(2).locator("button[title='Quitar de la lista']").click()
+    for model in (OPUS, GPT, DEEPSEEK):
+        app.page.select_option("#cfg-fallback-add-select", P + model)
+        app.page.click("#cfg-fallback-add")
+    # subir el segundo y quitar el ultimo
     app.page.locator("#cfg-fallback-list .fallback-item").nth(1).locator("button[title='Subir']").click()
-    app.page.select_option("#cfg-fallback-add-select", DEEPSEEK)
-    app.page.click("#cfg-fallback-add")
+    app.page.locator("#cfg-fallback-list .fallback-item").nth(2).locator("button[title='Quitar de la lista']").click()
     app.page.check("#cfg-fallback-enabled")
     app.page.fill("#cfg-fallback-pause", "15")
     app.page.click("#cfg-fallback-save")
 
     app.page.wait_for_function("() => document.querySelector('#cfg-fallback-status').textContent === 'Guardado ✓'")
-    expected = ["claude-sonnet-5", "claude-opus-5-5", DEEPSEEK]
+    expected = [P + GPT, P + OPUS]
     assert [r["model"] for r in fallback_rows(app)] == expected
+    assert [r["name"] for r in fallback_rows(app)] == [GPT, OPUS]  # en pantalla, sin prefijo
     assert chip(app) == "Automático"
     saved = app.page.request.get(app.base_url + "/api/config/model-fallback").json()
     assert saved["enabled"] is True and saved["order"] == expected and saved["pause_minutes"] == 15
@@ -168,8 +181,6 @@ def test_building_the_list_and_saving_turns_on_auto(app):
 def test_enabling_with_an_empty_list_is_explained(app):
     app.open()
     open_model_settings(app)
-    for _ in range(len(mf.DEFAULT_ORDER)):
-        app.page.locator("#cfg-fallback-list .fallback-item").first.locator("button[title='Quitar de la lista']").click()
     app.page.check("#cfg-fallback-enabled")
     app.page.click("#cfg-fallback-save")
     app.page.wait_for_function("() => document.querySelector('#cfg-fallback-status').classList.contains('error')")
@@ -281,7 +292,7 @@ def test_the_settings_list_shows_the_model_available_again_when_the_pause_ends(a
     jump_to_gpt(app, proveedor)
     open_model_settings(app)
     first = fallback_rows(app)[0]
-    assert first["model"] == OPUS and "en pausa hasta" in first["info"]
+    assert first["model"] == P + OPUS and first["name"] == OPUS and "en pausa hasta" in first["info"]
     app.page.wait_for_function(
         "t => document.querySelector('#cfg-fallback-list .fallback-item .fallback-info').textContent === t",
         arg="disponible",

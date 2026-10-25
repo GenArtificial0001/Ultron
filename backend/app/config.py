@@ -123,6 +123,17 @@ class Settings(BaseSettings):
     stt_model: str = "whisper-1"
 
     # -------------------------------------------------------------------
+    # VOZ DE VISION (spec voz-fish-audio REQ-005/006/009): claves de los
+    # motores de voz en la nube. Que motor habla, en que orden y con que
+    # voz se elige en Configuracion > Audio (ver app/voice/settings.py);
+    # los ID de voz de aca son solo el valor inicial de esa pantalla.
+    # -------------------------------------------------------------------
+    fish_api_key: str = ""
+    fish_voice_id: str = ""
+    elevenlabs_api_key: str = ""
+    elevenlabs_voice_id: str = ""
+
+    # -------------------------------------------------------------------
     # MARCA (spec vision-generico REQ-005): nombre de la empresa que usa
     # Vision, en la pantalla de inicio y en el prompt. Vacio = sin nombre.
     # -------------------------------------------------------------------

@@ -1,9 +1,9 @@
 // REQ-007/008/009/010 (spec narracion-agente-efimera, "Interaccion por voz"):
 // TTS de las respuestas de Jarvis y narracion hablada de progreso via Web
 // Speech API (`SpeechSynthesisUtterance`) -- nativa del navegador, sin
-// costo ni tramite, procesamiento 100% local (nunca sale de la maquina,
-// ver categoria 7 de la spec). Migracion futura opcional a un servicio de
-// voz corporativo (fuera de alcance de este modulo).
+// costo ni tramite, procesamiento 100% local. Opcional (spec voz-fish-audio):
+// motores del backend (Fish Audio, ElevenLabs, clonacion local), apagados de
+// fabrica; los de la nube solo con el consentimiento del usuario.
 //
 // Modulo standalone (sin dependencias de app.js) para poder testear/
 // reusar la seleccion de voz desde la pestaña de Configuracion > Audio
@@ -34,6 +34,27 @@ export function setTtsEnabled(enabled) {
     // noop -- sin localStorage la preferencia no persiste entre recargas, pero sigue aplicada en esta sesion
   }
   if (!enabled) cancelSpeech(); // apagar TTS a mitad de una frase la corta al instante, no la deja terminar
+}
+
+// spec informe-tecnico-hablado REQ-001: "Hablar informe tecnico", PRENDIDO de
+// fabrica (decision del usuario). Solo suena si "Leer en voz alta" tambien
+// esta activo (que sigue apagado de fabrica).
+const TECH_REPORT_KEY = "vision.tts.techReport";
+
+export function isTechReportEnabled() {
+  try {
+    return localStorage.getItem(TECH_REPORT_KEY) !== "false";
+  } catch {
+    return true;
+  }
+}
+
+export function setTechReportEnabled(enabled) {
+  try {
+    localStorage.setItem(TECH_REPORT_KEY, enabled ? "true" : "false");
+  } catch {
+    // noop -- sin localStorage la preferencia no persiste entre recargas
+  }
 }
 
 function getSavedVoiceURI() {
@@ -126,7 +147,7 @@ export function pickBestSpanishMaleVoice() {
 // sonando (ej. tool-calls rapidas en cadena), se encolan en vez de
 // pisarse/solaparse. `speak()` es la unica entrada publica de esta cola.
 // -------------------------------------------------------------------------
-let _speechQueue = []; // items { text, onStart }
+let _speechQueue = []; // items { text, onStart, limitKey }
 let _speaking = false;
 // Voz que esta sonando AHORA. Bug real (2026-09-27, spec fix-boton-play-stop):
 // cancel() de la Web Speech API avisa el corte de la voz vieja DESPUES, con un
@@ -136,6 +157,43 @@ let _speaking = false;
 // arrancaba la lectura OTRA VEZ desde el principio en vez de detenerla. Los
 // eventos de una voz que ya no es la actual se ignoran.
 let _currentUtter = null;
+
+// REQ-002 (spec fix-tts-respuestas-silenciosas, 2026-09-27): watchdog. Si el
+// onend/onerror de una utterance NUNCA llega (bug conocido de Chrome/Edge:
+// la utterance muere al cambiar el dispositivo de audio del sistema, ej.
+// conectar un Bluetooth), _speaking quedaria trabado en true para siempre y
+// todas las respuestas siguientes se descartarian en _pump() sin sonar. Este
+// timer forzar fin() pasado un margen amplio segun el largo del texto.
+let _speakWatchdogTimer = null;
+const SPEAK_WATCHDOG_MIN_MS = 5000; // colchon fijo (arranque lento del motor, primer utterance)
+const SPEAK_WATCHDOG_PER_CHAR_MS = 120; // ~120ms por caracter, generoso (una voz real suele ser mas rapida)
+
+function _clearSpeakWatchdog() {
+  if (_speakWatchdogTimer) {
+    clearTimeout(_speakWatchdogTimer);
+    _speakWatchdogTimer = null;
+  }
+}
+
+// REQ-001 (spec fix-tts-respuestas-silenciosas): auto-recuperacion de la cola
+// trabada. El sintoma real reportado por el usuario fue: "Probar voz" (que
+// llama directo a speechSynthesis.speak() y NUNCA toca _speaking) suena, pero
+// las respuestas (que pasan por _pump) no. Causa: _speaking quedo true por una
+// utterance que murio sin onend. Si el motor nativo NO esta hablando ni tiene
+// nada pendiente, no puede haber una voz legítima en curso: la cola esta
+// trabada y se libera.
+function _recoverStuckQueueIfNeeded() {
+  if (!("speechSynthesis" in window)) return;
+  // spec voz-fish-audio: con motores del backend, `_speaking` es true mientras suena
+  // AUDIO propio (Web Audio) y el motor nativo no habla -- eso NO es una cola trabada.
+  // Sin este chequeo se la liberaria en falso y dos frases se pisarian.
+  if (_usesAudioEngines()) return;
+  if (_speaking && !window.speechSynthesis.speaking && !window.speechSynthesis.pending) {
+    _speaking = false;
+    _currentUtter = null;
+    _clearSpeakWatchdog();
+  }
+}
 
 // -------------------------------------------------------------------------
 // Mute de voz (spec panel-flotante-control-rapido REQ-002, evolucionado a
@@ -157,25 +215,270 @@ export function setVoiceMuted(muted) {
   if (muted) cancelSpeech(); // activar el mute a mitad de una frase la corta al instante
 }
 
-// Reproduce un texto desde la cola serial (una frase a la vez, sin pisarse)
-// con la Web Speech API -- el unico motor de voz de Vision desde que se
-// retiro Kokoro (2026-09-12, ver CHANGELOG 0.9.2): no vale la pena la
-// latencia de un TTS neural local frente a la voz nativa instantanea.
-function _pump() {
-  if (_speaking || _speechQueue.length === 0) return;
-  if (_voiceMuted || !isTtsEnabled()) {
-    _speechQueue = [];
-    return;
-  }
+// -------------------------------------------------------------------------
+// spec voz-fish-audio: motores de voz del backend (Fish Audio, ElevenLabs,
+// clonacion local) en la cadena que arma el usuario en Configuracion > Audio.
+// Con la cadena vacia (como viene de fabrica, REQ-002) todo sigue igual que
+// antes: voz del navegador. app.js conecta este modulo con el backend
+// (`configureVoiceBackend`) porque aca no hay acceso a su fetch con token.
+// -------------------------------------------------------------------------
+let _voiceBackend = null; // { fetchFn, apiBase, onNotice }
+let _voiceConfig = { chain: [], effect: false };
+// REQ-003: cada aviso ("se quedo sin credito, sigo con...") se muestra una
+// sola vez; se vuelve a mostrar recien despues de guardar la configuracion.
+const _shownNotices = new Set();
 
-  const item = _speechQueue.shift();
-  if (!("speechSynthesis" in window)) {
-    // Sin soporte del navegador -- seguir la cola (nada mas que hacer).
-    _pump();
-    return;
-  }
+export function configureVoiceBackend({ fetchFn, apiBase, onNotice }) {
+  _voiceBackend = { fetchFn, apiBase, onNotice };
+  refreshVoiceConfig();
+}
 
-  const utter = new SpeechSynthesisUtterance(item.text);
+export async function refreshVoiceConfig() {
+  if (!_voiceBackend) return;
+  try {
+    const resp = await _voiceBackend.fetchFn(`${_voiceBackend.apiBase}/api/voice/config`);
+    if (resp.ok) applyVoiceConfig(await resp.json());
+  } catch {
+    // Sin backend: queda la voz del navegador (nunca mudo).
+  }
+}
+
+export function applyVoiceConfig(cfg) {
+  _voiceConfig = { chain: Array.isArray(cfg?.chain) ? cfg.chain : [], effect: Boolean(cfg?.effect) };
+  _shownNotices.clear();
+}
+
+function _usesAudioEngines() {
+  return Boolean(_voiceBackend) && _voiceConfig.chain.length > 0;
+}
+
+// REQ-010: "esta hablando Vision?" para el boton ⏹, el barge-in y la pausa del
+// microfono del Modo Cerebro. Antes se miraba `speechSynthesis.speaking`, que
+// no ve el audio de los motores del backend.
+export function isSpeaking() {
+  return _speaking || Boolean(window.speechSynthesis && window.speechSynthesis.speaking);
+}
+
+// REQ-004: la respuesta se parte en frases y cada una se pide por separado:
+// la primera suena apenas llega mientras se genera la siguiente. El primer
+// tramo es corto (empieza a hablar antes) pero no minimo: un "Hola." suelto
+// dura medio segundo y dejaria un silencio mientras se genera el segundo.
+const FIRST_CHUNK_MIN = 60;
+const FIRST_CHUNK_MAX = 160;
+const CHUNK_MAX = 240;
+
+function _splitLong(sentence, max) {
+  const parts = [];
+  let rest = sentence;
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf(", ", max);
+    if (cut < max / 3) cut = rest.lastIndexOf(" ", max);
+    if (cut < max / 3) cut = max;
+    parts.push(rest.slice(0, cut + 1).trim());
+    rest = rest.slice(cut + 1).trim();
+  }
+  if (rest) parts.push(rest);
+  return parts;
+}
+
+export function splitForSpeech(text) {
+  const clean = (text || "").replace(/\s+/g, " ").trim();
+  if (!clean) return [];
+  const sentences = (clean.match(/[^.!?…]+(?:[.!?…]+["'»)\]]*|$)/g) || [clean])
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const pieces = sentences.flatMap((s) => (s.length > CHUNK_MAX ? _splitLong(s, CHUNK_MAX) : [s]));
+  if (pieces.length && pieces[0].length > FIRST_CHUNK_MAX) {
+    pieces.splice(0, 1, ..._splitLong(pieces[0], FIRST_CHUNK_MAX));
+  }
+  const chunks = [];
+  let current = "";
+  for (const piece of pieces) {
+    const max = chunks.length === 0 ? FIRST_CHUNK_MAX : CHUNK_MAX;
+    if (current && current.length + 1 + piece.length > max) {
+      chunks.push(current);
+      current = piece;
+    } else {
+      current = current ? `${current} ${piece}` : piece;
+    }
+    if (chunks.length === 0 && current.length >= FIRST_CHUNK_MIN) {
+      chunks.push(current);
+      current = "";
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+// Cada cancelacion sube `_playToken`: lo que llegue despues de una frase ya
+// cancelada (una respuesta del backend, el fin de un audio) se ignora.
+let _playToken = 0;
+const _inflight = new Set(); // AbortControllers de los pedidos en curso
+let _currentSource = null;
+let _playbackCtx = null;
+let _effectInput = null;
+
+function _getPlaybackCtx() {
+  if (!_playbackCtx || _playbackCtx.state === "closed") {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    _playbackCtx = new AudioCtx();
+    _effectInput = null;
+  }
+  return _playbackCtx;
+}
+
+// Si el navegador todavia no dejo arrancar el audio (politica de autoplay),
+// un AudioContext suspendido nunca avanza y la frase quedaria "sonando" muda
+// para siempre: en ese caso se usa la voz del navegador.
+async function _ensureRunning(ctx) {
+  if (ctx.state === "running") return true;
+  try {
+    await Promise.race([ctx.resume(), new Promise((resolve) => setTimeout(resolve, 500))]);
+  } catch {
+    // noop
+  }
+  return ctx.state === "running";
+}
+
+// REQ-008: efecto "IA" estilo Jarvis -- filtro de graves, un poco de presencia,
+// eco corto (convolucion con un impulso sintetico) y un leve toque metalico
+// (delay de pocos ms con realimentacion). Se arma una vez por contexto.
+function _makeImpulse(ctx, seconds, decay) {
+  const length = Math.floor(ctx.sampleRate * seconds);
+  const impulse = ctx.createBuffer(2, length, ctx.sampleRate);
+  for (let channel = 0; channel < 2; channel++) {
+    const data = impulse.getChannelData(channel);
+    for (let i = 0; i < length; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, decay);
+  }
+  return impulse;
+}
+
+function _outputNode(ctx) {
+  if (!_voiceConfig.effect) return ctx.destination;
+  if (_effectInput) return _effectInput;
+  const input = ctx.createGain();
+  const highpass = ctx.createBiquadFilter();
+  highpass.type = "highpass";
+  highpass.frequency.value = 110;
+  const presence = ctx.createBiquadFilter();
+  presence.type = "peaking";
+  presence.frequency.value = 3200;
+  presence.Q.value = 0.9;
+  presence.gain.value = 4;
+  const dry = ctx.createGain();
+  dry.gain.value = 0.85;
+  const reverb = ctx.createConvolver();
+  reverb.buffer = _makeImpulse(ctx, 0.35, 2.8);
+  const reverbWet = ctx.createGain();
+  reverbWet.gain.value = 0.22;
+  const metal = ctx.createDelay(0.05);
+  metal.delayTime.value = 0.012;
+  const metalFeedback = ctx.createGain();
+  metalFeedback.gain.value = 0.25;
+  const metalWet = ctx.createGain();
+  metalWet.gain.value = 0.15;
+  input.connect(highpass);
+  highpass.connect(presence);
+  presence.connect(dry);
+  dry.connect(ctx.destination);
+  presence.connect(reverb);
+  reverb.connect(reverbWet);
+  reverbWet.connect(ctx.destination);
+  presence.connect(metal);
+  metal.connect(metalFeedback);
+  metalFeedback.connect(metal);
+  metal.connect(metalWet);
+  metalWet.connect(ctx.destination);
+  _effectInput = input;
+  return input;
+}
+
+function _base64ToArrayBuffer(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+function _noticeOnce(notice) {
+  if (!notice || !notice.message || _shownNotices.has(notice.code)) return;
+  _shownNotices.add(notice.code);
+  try { _voiceBackend?.onNotice?.(notice.message); } catch { /* un aviso que falla no corta la voz */ }
+}
+
+// Pide el audio de UNA frase al backend. `{ buffer: null }` = hablarla con la
+// voz del navegador (ningun motor pudo, error de red, audio ilegible).
+async function _fetchChunk(text, token, link = null) {
+  const controller = new AbortController();
+  _inflight.add(controller);
+  try {
+    const body = link ? { text, engine: link.engine, model: link.model } : { text };
+    const resp = await _voiceBackend.fetchFn(`${_voiceBackend.apiBase}/api/voice/speak`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) return { buffer: null, error: data.detail || null };
+    if (token !== _playToken) return { buffer: null };
+    if (!link) _noticeOnce(data.notice);
+    if (!data.audio) return { buffer: null, error: data.notice?.message || null };
+    const buffer = await _getPlaybackCtx().decodeAudioData(_base64ToArrayBuffer(data.audio));
+    return { buffer };
+  } catch {
+    return { buffer: null };
+  } finally {
+    _inflight.delete(controller);
+  }
+}
+
+function _playBuffer(buffer, token) {
+  return new Promise((resolve) => {
+    if (token !== _playToken) { resolve(); return; }
+    const ctx = _getPlaybackCtx();
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(_outputNode(ctx));
+    source.onended = () => {
+      if (_currentSource === source) _currentSource = null;
+      resolve();
+    };
+    _currentSource = source;
+    source.start();
+  });
+}
+
+// Aviso de voz del navegador que NO arranca. Las voces "de Google" (y cualquier voz remota del
+// navegador) bajan el audio de internet: sin conexion (ej. PC detras de una VPN) aceptan `speak()` pero
+// nunca empiezan, y el usuario solo oye silencio sin saber por que (Sabina y Raul son locales y andan).
+// Si no hubo `onstart` pasados unos segundos, se le explica UNA vez la causa probable y la salida.
+const BROWSER_VOICE_START_TIMEOUT_MS = 4000;
+const BROWSER_VOICE_SILENT_NOTICE = {
+  code: "browser-voice-silent",
+  message:
+    "La voz del navegador no empezó a hablar. Si es una voz «de Google», necesita conexión a internet y " +
+    "puede no funcionar con tu red o la VPN. Elegí una voz instalada en Windows (por ejemplo Sabina o Raúl) " +
+    "en Configuración > Audio.",
+};
+
+// Devuelve una funcion `cancel()` para apagar el vigia (la voz arranco, termino o se cancelo).
+function _watchBrowserVoiceStart(utter) {
+  let started = false;
+  const previous = utter.onstart;
+  utter.onstart = (event) => {
+    started = true;
+    if (typeof previous === "function") previous.call(utter, event);
+  };
+  const timer = setTimeout(() => {
+    if (started || _currentUtter !== utter) return; // arranco, o ya la reemplazo/cancelo otra
+    _noticeOnce(BROWSER_VOICE_SILENT_NOTICE);
+  }, BROWSER_VOICE_START_TIMEOUT_MS);
+  return () => clearTimeout(timer);
+}
+
+function _makeBrowserUtterance(text) {
+  const utter = new SpeechSynthesisUtterance(text);
   const voice = pickBestSpanishMaleVoice();
   if (voice) {
     utter.voice = voice;
@@ -183,25 +486,164 @@ function _pump() {
   } else {
     utter.lang = "es-419"; // fallback: español latinoamericano generico si no hay ninguna voz es-* instalada
   }
+  return utter;
+}
+
+// REQ-003: el ultimo eslabon de la cadena, dentro del mismo flujo de frases.
+function _speakBrowserText(text, token) {
+  return new Promise((resolve) => {
+    if (token !== _playToken || !("speechSynthesis" in window)) { resolve(); return; }
+    const utter = _makeBrowserUtterance(text);
+    _currentUtter = utter;
+    let finished = false;
+    let watchdog = null;
+    const done = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(watchdog);
+      if (_currentUtter === utter) _currentUtter = null;
+      resolve();
+    };
+    utter.onend = done;
+    utter.onerror = done;
+    const stopStartWatch = _watchBrowserVoiceStart(utter);
+    const doneAndUnwatch = () => { stopStartWatch(); done(); };
+    utter.onend = doneAndUnwatch;
+    utter.onerror = doneAndUnwatch;
+    window.speechSynthesis.speak(utter);
+    // Vigilante (mismo criterio que en `_pump`, spec fix-tts-respuestas-silenciosas): algunas voces
+    // del navegador -- en particular las de Google -- NUNCA disparan onend/onerror. Sin este
+    // tope la promesa no se resolvia, `_speaking` quedaba en true para siempre y el Modo Cerebro no
+    // volvia a abrir el microfono ("me escucha la primera vez y despues no"). Margen generoso
+    // segun el largo del texto para no cortar una frase larga que si esta sonando.
+    watchdog = setTimeout(() => {
+      if (finished || _currentUtter !== utter) return;
+      try { window.speechSynthesis.cancel(); } catch { /* noop */ }
+      done();
+    }, SPEAK_WATCHDOG_MIN_MS + text.length * SPEAK_WATCHDOG_PER_CHAR_MS);
+  });
+}
+
+// Lee `item.text` frase por frase con los motores del backend, pidiendo la
+// siguiente mientras suena la actual (REQ-004). Si una frase no tiene audio,
+// esa y el resto van con la voz del navegador (REQ-003: nunca mudo).
+async function _playWithEngines(item, token) {
+  const chunks = splitForSpeech(item.text);
+  if (chunks.length === 0) return;
+  let started = false;
+  const markStarted = () => {
+    if (started) return;
+    started = true;
+    if (item.onStart) {
+      try { item.onStart(); } catch { /* un listener que falla no corta la voz */ }
+    }
+  };
+  const ctxReady = _ensureRunning(_getPlaybackCtx());
+  let next = _fetchChunk(chunks[0], token);
+  for (let i = 0; i < chunks.length; i++) {
+    const result = await next;
+    if (token !== _playToken) return;
+    next = i + 1 < chunks.length ? _fetchChunk(chunks[i + 1], token) : null;
+    if (!result.buffer || !(await ctxReady)) {
+      for (const controller of _inflight) controller.abort();
+      markStarted();
+      await _speakBrowserText(chunks.slice(i).join(" "), token);
+      return;
+    }
+    markStarted();
+    await _playBuffer(result.buffer, token);
+    if (token !== _playToken) return;
+  }
+}
+
+// Prueba de un eslabon puntual desde Configuracion > Audio (REQ-005/006/007):
+// sin salto a otro motor, para escuchar exactamente ese. Devuelve
+// `{ ok, message }` para mostrar en la pantalla.
+export async function playVoiceSample(link, text) {
+  if (!_voiceBackend) return { ok: false, message: "Vision todavía no terminó de cargar." };
+  cancelSpeech();
+  const token = _playToken;
+  _speaking = true;
+  try {
+    const result = await _fetchChunk(text, token, link);
+    if (!result.buffer) return { ok: false, message: result.error || "Esa voz no respondió." };
+    if (!(await _ensureRunning(_getPlaybackCtx()))) {
+      return { ok: false, message: "El navegador no dejó reproducir audio: tocá la página y volvé a probar." };
+    }
+    await _playBuffer(result.buffer, token);
+    return { ok: true, message: "" };
+  } finally {
+    if (token === _playToken) {
+      _speaking = false;
+      _notifySpeechEnd();
+    }
+  }
+}
+
+// Reproduce un texto desde la cola serial (una frase a la vez, sin pisarse)
+// con la Web Speech API o, si el usuario armo una cadena de motores en
+// Configuracion > Audio (spec voz-fish-audio), con esos motores del backend.
+function _pump() {
+  _recoverStuckQueueIfNeeded(); // REQ-001: libera la cola si quedo trabada por una utterance muerta sin onend
+  if (_speaking || _speechQueue.length === 0) return;
+  if (_voiceMuted || !isTtsEnabled()) {
+    _speechQueue = [];
+    return;
+  }
+
+  const item = _speechQueue.shift();
+  // spec voz-fish-audio REQ-001: con motores en la cadena, la frase va por el
+  // backend (con la voz del navegador como respaldo dentro del mismo flujo).
+  if (_usesAudioEngines()) {
+    _speaking = true;
+    const token = _playToken;
+    _playWithEngines(item, token).finally(() => {
+      if (token !== _playToken) return; // cancelada: cancelSpeech ya aviso el fin
+      _speaking = false;
+      _notifySpeechEnd();
+      _pump();
+    });
+    return;
+  }
+  if (!("speechSynthesis" in window)) {
+    // Sin soporte del navegador -- seguir la cola (nada mas que hacer).
+    _pump();
+    return;
+  }
+
+  const utter = _makeBrowserUtterance(item.text);
 
   _speaking = true;
   _currentUtter = utter;
   const finish = () => {
     if (_currentUtter !== utter) return; // aviso tardio de una voz ya cancelada
+    _clearSpeakWatchdog(); // REQ-002: el fin llego solo -- no hace falta el watchdog
     _currentUtter = null;
     _speaking = false;
     _notifySpeechEnd();
     _pump();
   };
-  utter.onend = finish;
+  const stopStartWatch = _watchBrowserVoiceStart(utter);
+  const finishAndUnwatch = () => { stopStartWatch(); finish(); };
+  utter.onend = finishAndUnwatch;
   // Voz interrumpida/no disponible a mitad de camino -- no bloquea el resto
   // de la cola (ej. si el usuario desactivo TTS a mitad de frase).
-  utter.onerror = finish;
+  utter.onerror = finishAndUnwatch;
   if (item.onStart) {
     try { item.onStart(); } catch { /* un listener que falla no corta la voz */ }
   }
 
   window.speechSynthesis.speak(utter);
+
+  // REQ-002 (spec fix-tts-respuestas-silenciosas): watchdog. Si onend/onerror
+  // nunca llega, fuerza el fin para no trabar la cola para siempre. El margen
+  // es generoso para no cortar narraciones largas legitimas.
+  _clearSpeakWatchdog();
+  _speakWatchdogTimer = setTimeout(() => {
+    if (_currentUtter !== utter) return; // ya la reemplazo otra voz
+    try { window.speechSynthesis.cancel(); } catch { /* noop */ }
+    finish();
+  }, SPEAK_WATCHDOG_MIN_MS + item.text.length * SPEAK_WATCHDOG_PER_CHAR_MS);
 }
 
 // -------------------------------------------------------------------------
@@ -228,11 +670,24 @@ function _notifySpeechEnd() {
 // `onStart` (opcional): se llama cuando ESTE texto empieza a sonar (puede
 // esperar en la cola detras de otros) -- app.js lo usa para poner en ⏹ el
 // boton del mensaje que se esta leyendo.
-export function speak(text, { onStart } = {}) {
-  if (!isTtsEnabled() || !("speechSynthesis" in window)) return;
+// `limitKey` + `limit` (spec informe-tecnico-hablado REQ-004, "en orden, sin
+// atrasarse"): si ya hay `limit` frases con esa clave esperando su turno, se
+// descartan las mas viejas. La que esta sonando termina, y nada que no tenga
+// esa clave (la lectura de la respuesta) se toca.
+export function speak(text, { onStart, limitKey, limit = 0 } = {}) {
+  if (!isTtsEnabled()) return;
+  if (!("speechSynthesis" in window) && !_usesAudioEngines()) return;
   const trimmed = (text || "").trim();
   if (!trimmed) return;
-  _speechQueue.push({ text: trimmed, onStart });
+  if (limitKey && limit > 0) {
+    let waiting = _speechQueue.filter((item) => item.limitKey === limitKey).length;
+    _speechQueue = _speechQueue.filter((item) => {
+      if (item.limitKey !== limitKey || waiting < limit) return true;
+      waiting -= 1; // descarta la mas vieja de las que esperan
+      return false;
+    });
+  }
+  _speechQueue.push({ text: trimmed, onStart, limitKey });
   _pump();
 }
 
@@ -242,6 +697,17 @@ export function cancelSpeech() {
   _speechQueue = [];
   _speaking = false;
   _currentUtter = null; // lo que avise despues la voz cortada ya no cuenta
+  _clearSpeakWatchdog(); // REQ-002: no dejar un watchdog pendiente de una voz ya cancelada
+  // spec voz-fish-audio REQ-010: corta tambien el audio de los motores del
+  // backend (al instante) y los pedidos de frases que todavia no llegaron.
+  _playToken += 1;
+  for (const controller of _inflight) controller.abort();
+  _inflight.clear();
+  if (_currentSource) {
+    const source = _currentSource;
+    _currentSource = null;
+    try { source.stop(); } catch { /* ya habia terminado */ }
+  }
   if ("speechSynthesis" in window) window.speechSynthesis.cancel();
   // Pedido del usuario (2026-09): cualquier CANCELACION (incluso el toggle
   // "Silenciar voz" de accesos rapidos) debe soltar el estado del boton de
@@ -256,19 +722,25 @@ export function cancelSpeech() {
 // para confirmar que se escucha bien antes de una reunion real -- se
 // habla SIEMPRE (sin chequear isTtsEnabled()) porque es una accion directa
 // del usuario tocando el boton, no una narracion automatica de fondo.
+export const TEST_PHRASE = "Hola, soy Vision. Así es como voy a sonar durante tus reuniones y respuestas.";
+
 export function speakTestPhrase() {
-  const phrase = "Hola, soy Vision. Así es como voy a sonar durante tus reuniones y respuestas.";
+  // spec voz-fish-audio: con motores en la cadena, se prueba la cadena
+  // completa (el primero que responda, igual que en una respuesta real).
+  if (_usesAudioEngines()) {
+    cancelSpeech();
+    const token = _playToken;
+    _speaking = true;
+    _playWithEngines({ text: TEST_PHRASE }, token).finally(() => {
+      if (token !== _playToken) return;
+      _speaking = false;
+      _notifySpeechEnd();
+    });
+    return;
+  }
   if (!("speechSynthesis" in window)) return;
   window.speechSynthesis.cancel();
-  const utter = new SpeechSynthesisUtterance(phrase);
-  const voice = pickBestSpanishMaleVoice();
-  if (voice) {
-    utter.voice = voice;
-    utter.lang = voice.lang;
-  } else {
-    utter.lang = "es-419";
-  }
-  window.speechSynthesis.speak(utter);
+  window.speechSynthesis.speak(_makeBrowserUtterance(TEST_PHRASE));
 }
 
 // -------------------------------------------------------------------------

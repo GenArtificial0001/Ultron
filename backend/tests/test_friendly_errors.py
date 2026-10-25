@@ -101,6 +101,16 @@ MODEL_CASES = [
     ),
     ("rechazo-generico", status_error(openai.BadRequestError, 400, "Unsupported parameter: top_k"), "MODELO-RECHAZO"),
     (
+        # Bug real 2026-09-27: la cuenta de Anthropic sin credito no es un "rechazo del pedido".
+        "anthropic-sin-credito",
+        status_error(
+            openai.BadRequestError,
+            400,
+            "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing",
+        ),
+        "MODELO-SIN-CREDITO",
+    ),
+    (
         # el proveedor de IA envuelve errores del proveedor: un 500 que ADENTRO dice
         # "400 Bad Request" es una falla del servicio, no un rechazo del pedido.
         "500-que-menciona-400",

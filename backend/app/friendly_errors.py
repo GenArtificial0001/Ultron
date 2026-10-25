@@ -40,6 +40,7 @@ __all__ = [
     "describe_step_limit",
     "describe_task_needs_new_message",
     "describe_transcription_error",
+    "describe_voice_engine_error",
     "model_recovered_notice",
     "model_switch_notice",
     "technical_summary",
@@ -104,6 +105,14 @@ _TOOL_HISTORY = (
 )
 _IMAGE = ("image_url", "image", "mime type")
 _QUOTA = ("too much spend", "spend limit")
+# Bug real (2026-09-27): con la cuenta de Anthropic sin credito, la API responde
+# 400 "Your credit balance is too low to access the Anthropic API" y Vision lo
+# mostraba como "no acepto este pedido tal como esta". No es del pedido ni del
+# modelo: ningun modelo de ese proveedor va a responder hasta cargar credito.
+# Ojo: Gemini responde "exceeded your current quota" cuando UN modelo no tiene cupo
+# gratuito (ej. los Pro): eso es un limite de ese modelo, no falta de credito de la cuenta
+# (medido 2026-09-27). Por eso esa frase no esta aca.
+_NO_CREDIT = ("credit balance is too low", "insufficient_quota")
 # Formato del tope de gasto visto en la prueba real del usuario (2026-09-25,
 # 15:37): "Too many requests: you've reached the $3 per 600 seconds spend limit
 # ... On-prem models are free and not spend-limited". A diferencia del formato
@@ -216,6 +225,15 @@ def describe_model_error(exc: BaseException, model: str | None = None) -> Friend
             "Avisá a quien administra Vision: tiene que completar el proveedor y la clave en la "
             "configuración (archivo .env) y volver a abrir Vision.",
             None,
+        )
+    if _has_any(text, _NO_CREDIT):
+        return FriendlyError(
+            "MODELO-SIN-CREDITO",
+            "La cuenta del servicio de inteligencia artificial se quedó sin crédito, así que ningún modelo "
+            "de ese servicio va a responder. Cargá crédito en la consola del proveedor (en Anthropic: "
+            "console.anthropic.com, en Plans & Billing) o elegí otro proveedor en Configuración > "
+            "Credenciales.",
+            status,
         )
     if _is_timeout(names):
         return FriendlyError(
@@ -370,6 +388,62 @@ def describe_transcription_error(exc: BaseException) -> FriendlyError:
     )
 
 
+# spec voz-fish-audio REQ-003/009: por que un motor de voz no pudo hablar y
+# que hacer. `kind` sale de `app.voice.engines.VoiceEngineError`.
+_VOICE_ENGINE_ERRORS: dict[str, tuple[str, str]] = {
+    "sin_clave": (
+        "VOZ-MOTOR-SIN-CLAVE",
+        "{engine} no tiene su clave cargada. Cargala en Configuración > Credenciales.",
+    ),
+    "clave_invalida": (
+        "VOZ-MOTOR-CLAVE",
+        "{engine} no aceptó la clave configurada. Revisala en Configuración > Credenciales.",
+    ),
+    "sin_voz": (
+        "VOZ-MOTOR-SIN-VOZ",
+        "{engine} no tiene una voz elegida o la voz ya no existe. Elegila en Configuración > Audio.",
+    ),
+    "sin_credito": (
+        "VOZ-MOTOR-CREDITO",
+        "{engine} se quedó sin crédito. Cargá crédito en {engine} o cambiá el orden de las voces "
+        "en Configuración > Audio.",
+    ),
+    "limite": (
+        "VOZ-MOTOR-LIMITE",
+        "{engine} está recibiendo demasiados pedidos. En unos minutos vuelvo a probarlo solo.",
+    ),
+    "sin_conexion": (
+        "VOZ-MOTOR-SIN-CONEXION",
+        "No pude conectarme con {engine}. Revisá tu conexión (y el proxy de tu empresa, si hace "
+        "falta); en unos minutos vuelvo a probarlo solo.",
+    ),
+    "no_instalado": (
+        "VOZ-LOCAL-NO-INSTALADA",
+        "La clonación local de voz no está instalada. Instalala desde Configuración > Audio.",
+    ),
+    "sin_muestra": (
+        "VOZ-LOCAL-SIN-MUESTRA",
+        "Falta tu muestra de voz para la clonación local. Subila en Configuración > Audio.",
+    ),
+    "fallo": (
+        "VOZ-MOTOR-FALLO",
+        "{engine} no pudo generar el audio. En unos minutos vuelvo a probarlo solo.",
+    ),
+}
+
+
+def describe_voice_engine_error(
+    kind: str, engine: str, next_engine: str | None = None, status: int | None = None
+) -> FriendlyError:
+    """Mensaje para el chat cuando un motor de voz falla. `next_engine`: con
+    que motor sigue hablando Vision (REQ-003: nunca queda mudo)."""
+    code, template = _VOICE_ENGINE_ERRORS.get(kind, _VOICE_ENGINE_ERRORS["fallo"])
+    message = template.format(engine=engine)
+    if next_engine:
+        message = f"{message} Mientras tanto sigo hablando con {next_engine}."
+    return FriendlyError(code, message, status)
+
+
 def describe_connector_error(exc: BaseException, system: str) -> FriendlyError:
     """Falla de un conector (BigQuery, SharePoint, Oracle, SAP, Graph).
     `system`: nombre visible del sistema, tal cual lo ve el usuario."""
@@ -496,6 +570,8 @@ _SWITCH_REASONS = {
     "MODELO-LIMITE-USUARIO": "llegó al tope de consumo del servicio de inteligencia artificial",
     "MODELO-OCUPADO": "está recibiendo demasiados pedidos",
     "MODELO-CAIDO": "no está respondiendo",
+    # spec varios-proveedores REQ-005
+    "MODELO-SIN-CREDITO": "se quedó sin crédito (cargalo en la consola de ese servicio)",
 }
 
 

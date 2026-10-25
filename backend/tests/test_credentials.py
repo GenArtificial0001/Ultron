@@ -21,14 +21,25 @@ def isolated_credentials(tmp_path, monkeypatch):
     deploy_key.write_bytes(b"contenido de prueba, no es una key SSH real")
     monkeypatch.setattr(credentials, "ENC_FILE", enc_file)
     monkeypatch.setattr(credentials, "DEPLOY_KEY_PATH", deploy_key)
+    monkeypatch.setattr(credentials, "LOCAL_KEY_PATH", tmp_path / "keys" / "credentials.key")
     return enc_file
+
+
+@pytest.fixture
+def new_install(tmp_path, monkeypatch):
+    """Instalacion nueva: sin deploy key ni clave local (pendiente 2 de
+    vision-generico)."""
+    monkeypatch.setattr(credentials, "ENC_FILE", tmp_path / ".env.enc")
+    monkeypatch.setattr(credentials, "DEPLOY_KEY_PATH", tmp_path / "keys" / "jarvis_deploy_key")
+    monkeypatch.setattr(credentials, "LOCAL_KEY_PATH", tmp_path / "keys" / "credentials.key")
+    return tmp_path
 
 
 def test_connector_schema_has_the_ai_group_and_4_connectors():
     """spec vision-generico: primero el proveedor de IA y el dictado, despues
-    los 4 conectores."""
+    la voz (spec voz-fish-audio REQ-009) y los 4 conectores."""
     schema = credentials.get_connector_schema()
-    assert list(schema.keys()) == ["ia", "oracle", "bigquery", "sharepoint", "sap"]
+    assert list(schema.keys()) == ["ia", "voz", "oracle", "bigquery", "sharepoint", "sap"]
 
 
 def test_connector_schema_never_leaks_real_values():
@@ -43,7 +54,8 @@ def test_connector_schema_never_leaks_real_values():
 
 def test_credential_fields_covers_the_ai_provider_and_the_22_connector_fields():
     """REQ-103: los 22 campos de los conectores, mas los 8 del proveedor de IA
-    y el dictado (spec vision-generico)."""
+    y el dictado (spec vision-generico) y las 2 claves de voz (spec
+    voz-fish-audio REQ-009)."""
     expected = {
         "llm_provider",
         "llm_base_url",
@@ -53,6 +65,8 @@ def test_credential_fields_covers_the_ai_provider_and_the_22_connector_fields():
         "stt_api_key",
         "stt_model",
         "vision_company_name",
+        "fish_api_key",
+        "elevenlabs_api_key",
         "oracle_user",
         "oracle_password",
         "oracle_host",
@@ -77,12 +91,12 @@ def test_credential_fields_covers_the_ai_provider_and_the_22_connector_fields():
         "sap_language",
     }
     assert set(credentials.CREDENTIAL_FIELDS) == expected
-    assert len(credentials.CREDENTIAL_FIELDS) == 30
+    assert len(credentials.CREDENTIAL_FIELDS) == 32
 
 
 def test_get_credentials_status_all_false_when_empty(isolated_credentials):
     status = credentials.get_credentials_status()
-    assert len(status) == 30
+    assert len(status) == 32
     assert all(v is False for v in status.values())
 
 
@@ -169,3 +183,70 @@ def test_ai_keys_saved_from_the_app_are_secret_and_reach_the_settings(isolated_c
     credentials.save_credentials({"llm_api_key": "clave-de-prueba"})
     assert settings.llm_api_key == "clave-de-prueba"
     assert credentials.get_credentials_status()["llm_api_key"] is True
+
+
+# ---------------------------------------------------------------------------
+# Pendiente 2 de vision-generico (REQ-006): clave de cifrado propia de cada
+# instalacion cuando no existe la deploy key de la PC original.
+# ---------------------------------------------------------------------------
+def test_new_install_can_save_credentials_and_generates_its_own_key(new_install, monkeypatch):
+    settings = credentials.get_settings()
+    monkeypatch.setattr(settings, "oracle_host", "")
+    credentials.save_credentials({"oracle_host": "10.0.0.5"})
+
+    key_file = new_install / "keys" / "credentials.key"
+    assert key_file.exists()
+    assert credentials.get_credentials_status()["oracle_host"] is True
+    assert settings.oracle_host == "10.0.0.5"
+    # El archivo cifrado no guarda el valor en claro.
+    assert "10.0.0.5" not in (new_install / ".env.enc").read_text(encoding="utf-8")
+
+
+def test_reading_without_saved_credentials_does_not_create_a_key(new_install):
+    credentials.get_credentials_status()
+    credentials.apply_credentials_to_settings()
+    assert not (new_install / "keys" / "credentials.key").exists()
+
+
+def test_the_generated_key_is_reused_and_never_overwritten(new_install):
+    credentials.save_credentials({"oracle_host": "10.0.0.5"})
+    key_file = new_install / "keys" / "credentials.key"
+    first_key = key_file.read_bytes()
+    credentials.save_credentials({"sap_user": "usuario"})
+    assert key_file.read_bytes() == first_key
+    status = credentials.get_credentials_status()
+    assert status["oracle_host"] is True and status["sap_user"] is True
+
+
+def test_existing_deploy_key_keeps_decrypting_files_saved_with_it(new_install):
+    """Una instalacion que ya cifro con la deploy key no pierde lo guardado:
+    mientras no exista `credentials.key`, se sigue usando la deploy key."""
+    deploy_key = new_install / "keys" / "jarvis_deploy_key"
+    deploy_key.parent.mkdir(parents=True)
+    deploy_key.write_bytes(b"deploy key de prueba")
+    credentials.save_credentials({"oracle_host": "10.0.0.5"})
+
+    assert not (new_install / "keys" / "credentials.key").exists()
+    assert credentials.get_credentials_status()["oracle_host"] is True
+
+
+def test_a_damaged_local_key_gives_a_clear_error(new_install):
+    key_file = new_install / "keys" / "credentials.key"
+    key_file.parent.mkdir(parents=True)
+    key_file.write_bytes(b"no es una clave fernet")
+    with pytest.raises(credentials.CredentialsError, match="dañada"):
+        credentials.save_credentials({"oracle_host": "10.0.0.5"})
+
+
+def test_voice_keys_are_secret_and_reach_the_settings(isolated_credentials, monkeypatch):
+    """spec voz-fish-audio REQ-009: las claves de Fish Audio y ElevenLabs se
+    cargan desde Configuracion > Credenciales, cifradas, y se usan sin reiniciar."""
+    fields = {f["key"]: f for f in credentials.get_connector_schema()["voz"]["fields"]}
+    assert fields["fish_api_key"]["secret"] is True
+    assert fields["elevenlabs_api_key"]["secret"] is True
+    settings = credentials.get_settings()
+    monkeypatch.setattr(settings, "fish_api_key", "")
+    monkeypatch.setattr(settings, "elevenlabs_api_key", "")
+    credentials.save_credentials({"fish_api_key": "clave-fish", "elevenlabs_api_key": "clave-eleven"})
+    assert settings.fish_api_key == "clave-fish"
+    assert settings.elevenlabs_api_key == "clave-eleven"

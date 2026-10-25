@@ -1057,6 +1057,31 @@ body {
   color: var(--ink-faint);
   font-style: italic;
 }
+/* spec varios-proveedores REQ-004: titulo de cada grupo de proveedor */
+.model-group-label {
+  padding: 8px 10px 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  border-top: 1px solid var(--line);
+}
+.model-group-label:first-child { border-top: none; }
+/* spec varios-proveedores REQ-003/006: tarjetas de proveedores en Configuracion */
+.provider-card {
+  padding: 10px 12px;
+  margin: 8px 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.provider-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.provider-card-name { font-weight: 600; }
+.provider-card-state { font-size: 12.5px; color: var(--ink-soft); }
+.provider-card-state.error { color: var(--signal-red); }
+.provider-models { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 8px; max-height: 180px; overflow: auto; }
+.provider-models label { font-family: var(--font-mono); font-size: 12px; text-transform: none; }
 .meta-key {
   font-family: var(--font-mono);
   font-size: 8.5px;
@@ -2192,6 +2217,23 @@ body {
 .fallback-empty { list-style: none; color: var(--ink-faint); font-size: 13px; }
 .fallback-add-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .fallback-add-row select { flex: 1; min-width: 200px; }
+/* spec voz-fish-audio: el ID de voz y su desplegable comparten fila; la voz
+   del navegador (ultimo eslabon fijo) va sin acciones. */
+.fallback-add-row input[type="text"] { flex: 2; min-width: 220px; }
+.fallback-item[data-state="new"] .fallback-info { color: var(--ink-faint); font-style: italic; }
+.voice-install-log {
+  max-height: 140px;
+  overflow: auto;
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 
 /* Fila de badges: varias tool-calls de un mismo turno se acomodan
    una al lado de la otra (flex-wrap) en vez de apilarse verticalmente,
@@ -2569,6 +2611,11 @@ body {
   backdrop-filter: blur(2px);
 }
 .dashboard-overlay.hidden { display: none; }
+/* La confirmacion siempre arriba de todo. Bug real (spec voz-fish-audio,
+   e2e): comparte z-index con Configuracion y esta antes en el HTML, asi que
+   una confirmacion abierta DESDE Configuracion (sumar Fish Audio, eliminar
+   una skill) quedaba tapada y no se podia tocar. */
+#confirm-overlay { z-index: 60; }
 
 .dashboard-modal {
   width: min(920px, 100%);

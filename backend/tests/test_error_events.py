@@ -110,7 +110,7 @@ def _offline_loop(monkeypatch):
 def use_client(monkeypatch, client: FakeClient) -> list[bool]:
     refreshes: list[bool] = []
 
-    def _get_client(force_refresh: bool = False):
+    def _get_client(force_refresh: bool = False, **_kwargs):
         refreshes.append(force_refresh)
         return client
 
@@ -210,7 +210,7 @@ def test_login_failure_before_calling_the_model_is_explained_not_silent(monkeypa
     """Antes `get_client()` estaba fuera de todo try: sin VPN, la excepcion
     subia hasta la Task del turno y el chat terminaba sin ningun mensaje."""
 
-    def _broken_login(force_refresh: bool = False):
+    def _broken_login(force_refresh: bool = False, **_kwargs):
         raise ConnectionError("HTTPSConnectionPool(host='login.microsoftonline.com'): proxy")
 
     monkeypatch.setattr(loop_module, "get_client", _broken_login)

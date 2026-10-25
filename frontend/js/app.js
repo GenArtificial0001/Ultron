@@ -8,7 +8,7 @@
 import { renderMarkdown, toPlainText } from "./markdown.js";
 import { initVoiceEye, destroyVoiceEye } from "./voice-eye.js";
 import { initSplashScreen } from "./splash-screen.js";
-import { isTtsEnabled, setTtsEnabled, speak, cancelSpeech, speakTestPhrase, pickBestSpanishMaleVoice, getAvailableSpanishVoices, setSavedVoiceURI, playActivationSound, isVoiceMuted, setVoiceMuted, onSpeechEnd } from "./tts.js";
+import { isTtsEnabled, setTtsEnabled, isTechReportEnabled, setTechReportEnabled, speak, cancelSpeech, speakTestPhrase, pickBestSpanishMaleVoice, getAvailableSpanishVoices, setSavedVoiceURI, playActivationSound, isVoiceMuted, setVoiceMuted, onSpeechEnd, isSpeaking, configureVoiceBackend, applyVoiceConfig, playVoiceSample, TEST_PHRASE } from "./tts.js";
 import { typesetMath } from "./math.js";
 import { convertLatexFormulasToUnicode } from "./latex-to-unicode.js";
 
@@ -81,6 +81,71 @@ function apiFetch(url, options = {}) {
   const headers = new Headers(options.headers || {});
   headers.set("X-Jarvis-Token", token);
   return window.fetch(url, { ...options, headers });
+}
+
+// spec voz-fish-audio REQ-001/003: tts.js pide el audio de cada frase al
+// backend con este mismo fetch (lleva el token de acceso) y los avisos de
+// "esta voz fallo, sigo con otra" van al chat como nota del sistema.
+configureVoiceBackend({
+  fetchFn: apiFetch,
+  apiBase: API_BASE,
+  onNotice: (text) => appendMessage("system-note", text, { persist: false }),
+});
+
+// -------------------------------------------------------------------------
+// spec informe-tecnico-hablado: todas las frases del informe van por la misma
+// cola con un tope de 3 esperando (REQ-004: en orden, sin atrasarse), y si
+// pasan ~15 s sin ninguna, se dice en que tarea sigue (REQ-011: nunca callado).
+// -------------------------------------------------------------------------
+const TECH_REPORT_PENDING_LIMIT = 3;
+const TECH_REPORT_KEEPALIVE_MS = 15_000;
+let _techKeepAliveTimer = null;
+let _techKeepAliveSessionId = null;
+let _techLastSpokenAt = 0;
+let _techCurrentTask = "";
+
+function speakTechReport(text) {
+  if (!text) return;
+  _techLastSpokenAt = Date.now();
+  speak(text, { limitKey: "tech-report", limit: TECH_REPORT_PENDING_LIMIT });
+}
+
+// La tarea mas especifica en curso del plan (una sub-tarea gana a su madre).
+function currentTaskOf(todos) {
+  let current = "";
+  for (const task of todos || []) {
+    if (task.status !== "in_progress") continue;
+    current = task.content || current;
+    const sub = (task.subtasks || []).find((s) => s.status === "in_progress");
+    if (sub) return sub.content;
+  }
+  return current;
+}
+
+function ensureTechKeepAlive() {
+  if (_techKeepAliveTimer || !isTtsEnabled() || !isTechReportEnabled()) return;
+  _techKeepAliveSessionId = state.sessionId;
+  _techLastSpokenAt = Date.now();
+  _techKeepAliveTimer = setInterval(() => {
+    if (state.sessionId !== _techKeepAliveSessionId || !isTechReportEnabled()) {
+      stopTechKeepAlive();
+      return;
+    }
+    // Mientras suena algo (la frase anterior, la respuesta) no hay silencio.
+    if (isSpeaking()) _techLastSpokenAt = Date.now();
+    if (Date.now() - _techLastSpokenAt < TECH_REPORT_KEEPALIVE_MS) return;
+    speakTechReport(_techCurrentTask ? `Sigo con: ${_techCurrentTask}` : "Sigo trabajando");
+  }, 1000);
+}
+
+// `sessionId`: solo frena si el turno que termino es el de la sesion que se
+// esta narrando (un agente en otra sesion no la corta).
+function stopTechKeepAlive(sessionId = null) {
+  if (sessionId && sessionId !== _techKeepAliveSessionId) return;
+  clearInterval(_techKeepAliveTimer);
+  _techKeepAliveTimer = null;
+  _techKeepAliveSessionId = null;
+  _techCurrentTask = "";
 }
 
 // -------------------------------------------------------------------------
@@ -602,9 +667,37 @@ const MODEL_STORAGE_KEY = "vision.selectedModel";
 // `model`) y salta al siguiente si uno llega a su limite o se cae.
 const AUTO_MODEL = "auto";
 
+// spec varios-proveedores REQ-004: los modelos viajan como "proveedor/modelo";
+// en pantalla se muestran como "Gemini · gemini-2.5-flash".
+const PROVIDER_LABELS = {
+  anthropic: "Claude",
+  gemini: "Gemini",
+  deepseek: "DeepSeek",
+  groq: "Groq",
+  openrouter: "OpenRouter",
+  openai: "OpenAI",
+};
+
+function prettyModel(modelId) {
+  const id = modelId || "";
+  const slash = id.indexOf("/");
+  if (slash < 0) return id;
+  const provider = id.slice(0, slash);
+  // El proveedor "clasico" (LLM_*) u "otro compatible": solo el nombre, como antes.
+  if (provider === "principal" || provider === "custom") return id.slice(slash + 1);
+  const label = PROVIDER_LABELS[provider];
+  return label ? `${label} · ${id.slice(slash + 1)}` : id;
+}
+
+// Un modelo guardado antes de esta spec no trae prefijo: coincide por nombre.
+function isSelectedModel(model) {
+  const selected = state.selectedModel || "";
+  return model.id === selected || (!selected.includes("/") && model.name === selected);
+}
+
 function selectedModelLabel() {
   if (state.selectedModel === AUTO_MODEL) return "Automático";
-  return state.selectedModel || "—";
+  return prettyModel(state.selectedModel) || "—";
 }
 
 // El chip muestra el modelo que responde DE VERDAD cuando hubo salto: en
@@ -613,12 +706,12 @@ function selectedModelLabel() {
 function renderModelChip() {
   let text = selectedModelLabel();
   if (state.selectedModel === AUTO_MODEL && state.activeModel) {
-    text = `Automático · ${state.activeModel}`;
+    text = `Automático · ${prettyModel(state.activeModel)}`;
   } else if (state.activeModelJumped && state.activeModel) {
-    text = `${state.activeModel} (salto)`;
+    text = `${prettyModel(state.activeModel)} (salto)`;
   }
   metaModelEl.textContent = text;
-  metaModelBtnEl.title = state.activeModel ? `Respondiendo con ${state.activeModel}` : "";
+  metaModelBtnEl.title = state.activeModel ? `Respondiendo con ${prettyModel(state.activeModel)}` : "";
 }
 
 // Lo que va en `model` del POST /api/chat: nada en Automatico.
@@ -701,18 +794,30 @@ function renderModelOptions(models) {
     };
     modelDropdownEl.appendChild(autoBtn);
   }
+  // spec varios-proveedores REQ-004: un grupo por proveedor.
+  let lastGroup = null;
   models.forEach((m) => {
+    const group = m.provider_label || "";
+    if (group && group !== lastGroup) {
+      const header = document.createElement("div");
+      header.className = "model-group-label";
+      header.textContent = group;
+      modelDropdownEl.appendChild(header);
+      lastGroup = group;
+    }
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "model-option" + (m.id === state.selectedModel ? " active" : "");
+    btn.className = "model-option" + (isSelectedModel(m) ? " active" : "");
     btn.setAttribute("role", "option");
 
     const idSpan = document.createElement("span");
     idSpan.className = "model-id";
-    idSpan.textContent = m.id;
+    idSpan.textContent = m.name || m.id;
     btn.appendChild(idSpan);
 
-    const sub = [m.hosted_on_prem ? "on-prem" : null, (m.aliases || [])[0]].filter(Boolean).join(" · ");
+    const sub = [m.free ? "gratis" : null, m.hosted_on_prem ? "on-prem" : null, (m.aliases || [])[0]]
+      .filter(Boolean)
+      .join(" · ");
     if (sub) {
       const subSpan = document.createElement("span");
       subSpan.className = "model-meta";
@@ -1059,13 +1164,15 @@ const STOP_POLL_INTERVAL_MS = 40;
 const STOP_POLL_MAX_MS = 1500;
 
 function waitForSpeechReallyStopped(cb) {
-  if (!("speechSynthesis" in window) || !window.speechSynthesis.speaking) {
+  // spec voz-fish-audio REQ-010: isSpeaking() tambien ve el audio de los
+  // motores del backend, no solo la voz del navegador.
+  if (!isSpeaking()) {
     cb();
     return;
   }
   const deadline = performance.now() + STOP_POLL_MAX_MS;
   const check = () => {
-    if (!window.speechSynthesis.speaking || performance.now() >= deadline) {
+    if (!isSpeaking() || performance.now() >= deadline) {
       cb();
       return;
     }
@@ -2124,6 +2231,10 @@ try {
         // (bash/write/edit). false (default) = chat de texto normal, sin
         // cambio de comportamiento.
         voice_confirm: voiceConfirm || undefined,
+        // spec informe-tecnico-hablado REQ-008/009/010: con el informe
+        // prendido el backend narra el codigo en vivo, pide comentarios y
+        // anuncia el avance del plan.
+        narrate: (isTtsEnabled() && isTechReportEnabled()) || undefined,
       }),
     });
     await renderIncomingStream(resp, msgId, turnSessionId);
@@ -2229,7 +2340,19 @@ function handleEvent(event, ctx) {
       // estaba en la sesion B, los eventos "todo" de A pisaban el panel de
       // tareas que B esta mirando (y viceversa al volver a A) -- reportado
       // por el usuario como "la lista de tareas se rompio/desaparecio".
-      if (ctx.turnSessionId === state.sessionId) renderTodos(event.data.todos);
+      if (ctx.turnSessionId === state.sessionId) {
+        renderTodos(event.data.todos);
+        _techCurrentTask = currentTaskOf(event.data.todos); // spec informe-tecnico-hablado REQ-011
+        ensureTechKeepAlive();
+      }
+      break;
+
+    // spec informe-tecnico-hablado REQ-008/010: recorrido del codigo en vivo y
+    // avance del plan, armados por el backend (ya sin secretos). Solo en voz.
+    case "narration":
+      if (ctx.turnSessionId !== state.sessionId) break;
+      if (isTechReportEnabled()) speakTechReport(event.data.text);
+      ensureTechKeepAlive();
       break;
 
     // REQ-001/003/004/005 (spec dashboard-graficos): el backend ya arma
@@ -2324,7 +2447,16 @@ function handleEvent(event, ctx) {
       // por sesion activa -- si la sesion A sigue con tool-calls mientras el
       // usuario esta en B, no debe narrar por voz el progreso de A ("si la
       // voz esta activada sigue leyendo lo de la sesion anterior").
-      if (event.data.label && event.data.operation !== "thinking" && ctx.turnSessionId === state.sessionId) {
+      // spec informe-tecnico-hablado REQ-001/003/004: con "Hablar informe
+      // tecnico" prendido, en vez de la etiqueta corta se dice la frase que
+      // arma el backend con lo que Vision ejecuta (`speech`), solo para las
+      // acciones (`speech` null = leer/buscar/pensar: silencio). Las frases
+      // viejas que no llegaron a sonar se reemplazan por la mas nueva.
+      if (ctx.turnSessionId !== state.sessionId) break;
+      if (isTechReportEnabled()) {
+        if (event.data.speech) speakTechReport(event.data.speech);
+        ensureTechKeepAlive();
+      } else if (event.data.label && event.data.operation !== "thinking") {
         speak(event.data.label);
       }
       break;
@@ -2338,6 +2470,7 @@ function handleEvent(event, ctx) {
       // motivo: si no se cierra/resetea aca, el proximo turno sintetico
       // arrastraria el `assistantText` del que fallo.
       ctx.closeCurrentAssistantTurn();
+      stopTechKeepAlive(ctx.turnSessionId); // spec informe-tecnico-hablado REQ-011
       // Mismo bug/fix que "progress-estimate" arriba: un error de un turno
       // en background (sesion X) no debe aparecer en la sesion Y que el
       // usuario esta mirando -- appendMessage() pinta en el DOM global sin
@@ -2360,6 +2493,7 @@ case "done":
       // sin resetear entre ellos -- el mismo bug de desorden de turnos,
       // pero para sesiones que ni siquiera se estan mirando.
       ctx.closeCurrentAssistantTurn();
+      stopTechKeepAlive(ctx.turnSessionId); // spec informe-tecnico-hablado REQ-011
       // Mismo bug/fix que "progress-estimate"/"error"/"stopped" arriba: si
       // el turno que termina es de otra sesion (background, ej. un
       // agente), no corresponde cerrar la barra de progreso NI auto-abrir
@@ -2383,6 +2517,7 @@ case "done":
       break;
 
     case "stopped":
+      stopTechKeepAlive(ctx.turnSessionId); // spec informe-tecnico-hablado REQ-011
       // Mismo bug/fix que "progress-estimate"/"error" arriba: si el turno
       // detenido es de otra sesion (no la activa), no corresponde tocar
       // NADA de la UI que el usuario esta mirando -- ni el mensaje, ni el
@@ -2671,7 +2806,7 @@ async function activeModelSupportsImages() {
       models = [];
     }
   }
-  const current = models.find((m) => m.id === state.selectedModel);
+  const current = models.find((m) => isSelectedModel(m));
   // Sin modelo seleccionado explicitamente (usa el default del backend) o
   // sin dato del roster: se permite intentar -- el backend es la fuente
   // de verdad final: es preferible una falla explicita del proveedor de IA antes
@@ -4385,13 +4520,21 @@ async function transcribeAndFillComposer(blob) {
 const TRANSCRIPTION_NOTICE_INTERVAL_MS = 60_000;
 let _lastTranscriptionNoticeAt = 0;
 
-function noticeTranscriptionProblem(modeLabel, err = null) {
+// `resp`: la respuesta con error del backend, si la hubo. Bug real
+// (2026-09-27, spec vision-generico REQ-003): sin el dictado configurado, el
+// Modo Cerebro decia "sigo intentando, apaga y volve a prender el modo" --
+// falso, reintentar no lo arregla. El backend ya explica el motivo real
+// (VOZ-NO-CONFIGURADA, clave rechazada, limite...): se muestra ese texto.
+async function noticeTranscriptionProblem(modeLabel, err = null, resp = null) {
   const now = Date.now();
   if (now - _lastTranscriptionNoticeAt < TRANSCRIPTION_NOTICE_INTERVAL_MS) return;
   _lastTranscriptionNoticeAt = now;
-  const text = isOfflineError(err)
-    ? `${modeLabel}: perdí la conexión con Vision y no puedo pasar el audio a texto. ${OFFLINE_ERROR_MESSAGE}`
-    : `${modeLabel}: no estoy pudiendo pasar el audio a texto, así que puede que me pierda partes de lo que se dice. Sigo intentando; si continúa, apagá y volvé a prender el modo.`;
+  let text = `${modeLabel}: no estoy pudiendo pasar el audio a texto, así que puede que me pierda partes de lo que se dice. Sigo intentando; si continúa, apagá y volvé a prender el modo.`;
+  if (isOfflineError(err)) {
+    text = `${modeLabel}: perdí la conexión con Vision y no puedo pasar el audio a texto. ${OFFLINE_ERROR_MESSAGE}`;
+  } else if (resp) {
+    text = `${modeLabel}: ${(await httpErrorFromResponse(resp)).message}`;
+  }
   appendMessage("system-note", text, { persist: false });
 }
 
@@ -4855,7 +4998,7 @@ async function processMeetingFragment(blob) {
       body: JSON.stringify({ audio: dataUri, language: getSavedSttLanguage() || undefined }),
     });
     if (!transcribeResp.ok) {
-      noticeTranscriptionProblem("Modo reunión");
+      noticeTranscriptionProblem("Modo reunión", null, transcribeResp);
       return;
     }
     const transcribeData = await transcribeResp.json();
@@ -4886,9 +5029,9 @@ async function processMeetingFragment(blob) {
     // Assistant): si Vision estaba hablando (TTS en curso) y se detecta
     // la mencion de nuevo, se corta la voz al instante en vez de esperar
     // a que termine -- "solo si vuelve a detectar mientras el habla que
-    // vuelvo a decir Vision". `speechSynthesis.speaking` es el chequeo
-    // nativo del navegador para saber si hay una utterance sonando ahora.
-    if ("speechSynthesis" in window && window.speechSynthesis.speaking) {
+    // vuelvo a decir Vision". `isSpeaking()` (tts.js) dice si Vision esta
+    // hablando ahora, con la voz del navegador o con un motor de voz.
+    if (isSpeaking()) {
       cancelSpeech();
     }
     playActivationSound();
@@ -4958,7 +5101,7 @@ async function analyzeManualClick() {
   // Mismo sonido/feedback inmediato que el activador por voz -- confirma
   // "te escuché" sin esperar la respuesta del LLM (que puede tardar).
   playActivationSound();
-  if ("speechSynthesis" in window && window.speechSynthesis.speaking) {
+  if (isSpeaking()) {
     cancelSpeech(); // mismo barge-in que el activador por voz, por si Vision ya estaba hablando
   }
 
@@ -5451,7 +5594,7 @@ async function processBrainUtterance(blob, speechEndedAt) {
       body: JSON.stringify({ audio: dataUri, language: getSavedSttLanguage() || undefined }),
     });
     if (!resp.ok) {
-      noticeTranscriptionProblem("Modo Cerebro");
+      noticeTranscriptionProblem("Modo Cerebro", null, resp);
       return;
     }
     const data = await resp.json();
@@ -5469,7 +5612,7 @@ async function processBrainUtterance(blob, speechEndedAt) {
   // real mientras Vision habla se interpreta como "el usuario quiere decir
   // algo nuevo ahora" -- se corta la voz al instante y se sigue escuchando
   // (la nueva intervencion se procesa igual, por auto-envio o mencion).
-  if ("speechSynthesis" in window && window.speechSynthesis.speaking) {
+  if (isSpeaking()) {
     cancelSpeech();
   }
 
@@ -5610,7 +5753,9 @@ async function startBrainMode({ notifyMicError = true } = {}) {
     // desde la ULTIMA vez que se la vio hablando (no apenas `speaking`
     // vuelve a false), para darle tiempo al audio real de dejar de sonar/
     // reverberar en el ambiente.
-    const nowSpeaking = !!(window.speechSynthesis && window.speechSynthesis.speaking);
+    // spec voz-fish-audio REQ-010: con un motor de voz del backend el audio
+    // sale por Web Audio de esta pestaña; se pausa igual que con el navegador.
+    const nowSpeaking = isSpeaking();
     if (nowSpeaking) brainLastSpeakingAt = performance.now();
     if (nowSpeaking || performance.now() - brainLastSpeakingAt < BRAIN_TTS_COOLDOWN_MS) {
       updateBrainWaveform(0);
@@ -5764,7 +5909,7 @@ document.addEventListener("keydown", (e) => {
   if (e.code !== "Space" && e.key !== " ") return;
   if (!brainModeActive || !isBrainSpaceInterruptEnabled()) return;
   e.preventDefault(); // evita el scroll de pagina / activar un boton enfocado con espacio
-  if ("speechSynthesis" in window && window.speechSynthesis.speaking) {
+  if (isSpeaking()) { // spec voz-fish-audio REQ-010: tambien corta el audio de los motores de voz
     cancelSpeech();
   }
   // REQ-008: reset liviano de la ronda en curso -- NO toca brainStream/VAD.
@@ -5917,6 +6062,7 @@ applyTheme(getSavedTheme());
 // Decisiones registradas en spec.md -- evita gastar CPU/bateria de fondo).
 // -------------------------------------------------------------------------
 const cfgTtsEnabledEl = document.getElementById("cfg-tts-enabled");
+const cfgTtsTechReportEl = document.getElementById("cfg-tts-tech-report"); // spec informe-tecnico-hablado
 const cfgTtsVoiceSelectEl = document.getElementById("cfg-tts-voice-select");
 const cfgTtsTestBtnEl = document.getElementById("cfg-tts-test-btn");
 const cfgMicSelectEl = document.getElementById("cfg-mic-select");
@@ -6258,6 +6404,8 @@ if ("speechSynthesis" in window && "onvoiceschanged" in window.speechSynthesis) 
 
 function loadAudioSettingsPane() {
   if (cfgTtsEnabledEl) cfgTtsEnabledEl.checked = isTtsEnabled();
+  if (cfgTtsTechReportEl) cfgTtsTechReportEl.checked = isTechReportEnabled();
+  loadVoiceSettings(); // spec voz-fish-audio (no bloquea el resto del panel)
   if (cfgSttLanguageSelectEl) cfgSttLanguageSelectEl.value = getSavedSttLanguage();
   // Alarma del loop (configurable): refleja el estado guardado.
   if (cfgLoopAlarmTypeEl) cfgLoopAlarmTypeEl.value = loopAlarmType();
@@ -6288,6 +6436,9 @@ function loadAudioSettingsPane() {
 if (cfgTtsEnabledEl) {
   cfgTtsEnabledEl.addEventListener("change", () => setTtsEnabled(cfgTtsEnabledEl.checked));
 }
+if (cfgTtsTechReportEl) {
+  cfgTtsTechReportEl.addEventListener("change", () => setTechReportEnabled(cfgTtsTechReportEl.checked));
+}
 if (cfgTtsVoiceSelectEl) {
   cfgTtsVoiceSelectEl.addEventListener("change", () => setSavedVoiceURI(cfgTtsVoiceSelectEl.value));
 }
@@ -6314,6 +6465,408 @@ if (cfgLoopAlarmTestEl) {
 if (cfgTtsTestBtnEl) {
   cfgTtsTestBtnEl.addEventListener("click", () => speakTestPhrase());
 }
+
+// -------------------------------------------------------------------------
+// spec voz-fish-audio REQ-001/002/003/005/006/007/008: Configuracion > Audio
+// > Motor de voz. La cadena se edita en memoria (agregar, subir/bajar,
+// quitar, probar) y se guarda con "Guardar voz", igual que la lista del salto
+// automatico de modelos. Un servicio en la nube pide confirmar el envio del
+// texto antes de entrar a la lista (REQ-002).
+// -------------------------------------------------------------------------
+const cfgVoiceChainEl = document.getElementById("cfg-voice-chain");
+const cfgVoiceAddEngineEl = document.getElementById("cfg-voice-add-engine");
+const cfgVoiceAddModelEl = document.getElementById("cfg-voice-add-model");
+const cfgVoiceAddEl = document.getElementById("cfg-voice-add");
+const cfgVoiceFishIdEl = document.getElementById("cfg-voice-fish-id");
+const cfgVoiceFishPickEl = document.getElementById("cfg-voice-fish-pick");
+const cfgVoiceElevenlabsIdEl = document.getElementById("cfg-voice-elevenlabs-id");
+const cfgVoiceElevenlabsPickEl = document.getElementById("cfg-voice-elevenlabs-pick");
+const cfgVoiceEffectEl = document.getElementById("cfg-voice-effect");
+const cfgVoicePauseEl = document.getElementById("cfg-voice-pause");
+const cfgVoiceConsentFishEl = document.getElementById("cfg-voice-consent-fish");
+const cfgVoiceConsentElevenlabsEl = document.getElementById("cfg-voice-consent-elevenlabs");
+const cfgVoiceSaveEl = document.getElementById("cfg-voice-save");
+const cfgVoiceStatusEl = document.getElementById("cfg-voice-status");
+const cfgVoiceLocalStateEl = document.getElementById("cfg-voice-local-state");
+const cfgVoiceLocalLogEl = document.getElementById("cfg-voice-local-log");
+const cfgVoiceLocalInstallEl = document.getElementById("cfg-voice-local-install");
+const cfgVoiceSampleEl = document.getElementById("cfg-voice-sample");
+const cfgVoiceSampleStatusEl = document.getElementById("cfg-voice-sample-status");
+
+const VOICE_CONSENT_ELS = { fish: cfgVoiceConsentFishEl, elevenlabs: cfgVoiceConsentElevenlabsEl };
+const VOICE_PICKERS = [
+  { engine: "fish", selectEl: cfgVoiceFishPickEl, inputEl: cfgVoiceFishIdEl },
+  { engine: "elevenlabs", selectEl: cfgVoiceElevenlabsPickEl, inputEl: cfgVoiceElevenlabsIdEl },
+];
+const VOICE_LOCAL_BUSY = ["checking", "installing", "downloading"];
+const VOICE_FREE_MODELS = ["s2.1-pro-free"];
+
+let _voiceChain = [];
+let _voiceItems = new Map();
+let _voiceEngines = [];
+let _voiceLocalSample = null;
+let _voiceLocalPollTimer = null;
+
+const voiceLinkKey = (link) => `${link.engine}:${link.model}`;
+const voiceEngineInfo = (name) => _voiceEngines.find((engine) => engine.name === name);
+
+function setVoiceStatus(text, kind = "") {
+  cfgVoiceStatusEl.textContent = text;
+  cfgVoiceStatusEl.className = kind ? `settings-status ${kind}` : "settings-status";
+}
+
+async function loadVoiceSettings() {
+  for (const picker of VOICE_PICKERS) delete picker.selectEl.dataset.loaded;
+  try {
+    const resp = await apiFetchOk(`${API_BASE}/api/voice/config`);
+    applyVoicePayload(await resp.json());
+    setVoiceStatus("");
+  } catch (err) {
+    setVoiceStatus(`No se pudo cargar la configuración de voz. ${friendlyErrorMessage(err)}`, "error");
+  }
+}
+
+function applyVoicePayload(data) {
+  _voiceEngines = data.engines || [];
+  _voiceChain = (data.chain || []).map((link) => ({ ...link }));
+  _voiceItems = new Map((data.items || []).map((item) => [voiceLinkKey(item), item]));
+  cfgVoiceFishIdEl.value = data.fish_voice_id || "";
+  cfgVoiceElevenlabsIdEl.value = data.elevenlabs_voice_id || "";
+  cfgVoiceEffectEl.checked = Boolean(data.effect);
+  cfgVoicePauseEl.value = String(data.pause_minutes ?? 30);
+  for (const [engine, el] of Object.entries(VOICE_CONSENT_ELS)) el.checked = Boolean(data.consent?.[engine]);
+  renderVoiceChain();
+  renderVoiceEngineOptions();
+  applyVoiceLocalStatus(data.local);
+}
+
+// Bug de uso real (2026-09-27): el usuario cargo el ID de su voz de Fish
+// esperando que fuera la principal, pero Fish habia quedado ultimo en la
+// lista y hablaba ElevenLabs. Cada fila muestra ahora QUE voz usa y la
+// primera dice que es la principal.
+function voiceIdFor(engineName) {
+  const id = engineName === "fish" ? cfgVoiceFishIdEl.value : engineName === "elevenlabs" ? cfgVoiceElevenlabsIdEl.value : "";
+  return id.trim();
+}
+
+function voiceLinkName(link) {
+  if (link.engine === "local") return "Tu voz clonada (en esta PC)";
+  const engine = voiceEngineInfo(link.engine);
+  const free = VOICE_FREE_MODELS.includes(link.model) ? " (gratis)" : "";
+  const voiceId = voiceIdFor(link.engine);
+  const voice = voiceId ? ` · voz ${voiceId.length > 10 ? `${voiceId.slice(0, 8)}…` : voiceId}` : "";
+  return `${engine ? engine.label : link.engine} · ${link.model}${free}${voice}`;
+}
+
+function describeVoiceLink(link, idx) {
+  const item = _voiceItems.get(voiceLinkKey(link));
+  let state = "lista";
+  if (!item) state = "sin guardar todavía";
+  else if (item.missing) state = item.missing;
+  else if (item.paused_until) state = `en pausa hasta ${item.paused_until}`;
+  return idx === 0 ? `principal · ${state}` : `respaldo · ${state}`;
+}
+
+function voiceLinkState(link) {
+  const item = _voiceItems.get(voiceLinkKey(link));
+  if (!item) return "new";
+  if (item.missing) return "missing";
+  return item.paused_until ? "paused" : "ok";
+}
+
+function makeVoiceListButton(label, title, disabled, onClick) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "msg-copy-btn";
+  btn.textContent = label;
+  btn.title = title;
+  btn.disabled = disabled;
+  btn.onclick = onClick;
+  return btn;
+}
+
+function renderVoiceChain() {
+  cfgVoiceChainEl.replaceChildren();
+  _voiceChain.forEach((link, idx) => {
+    const li = document.createElement("li");
+    li.className = "fallback-item";
+    li.dataset.state = voiceLinkState(link);
+    const name = document.createElement("span");
+    name.className = "fallback-name";
+    name.textContent = voiceLinkName(link);
+    const info = document.createElement("span");
+    info.className = "fallback-info";
+    info.textContent = describeVoiceLink(link, idx);
+    const actions = document.createElement("span");
+    actions.className = "fallback-actions";
+    const testBtn = makeVoiceListButton("▶", "Probar esta voz", false, () => testVoiceLink(link, testBtn));
+    actions.append(
+      testBtn,
+      makeVoiceListButton("↑", "Subir", idx === 0, () => moveVoiceLink(idx, -1)),
+      makeVoiceListButton("↓", "Bajar", idx === _voiceChain.length - 1, () => moveVoiceLink(idx, 1)),
+      makeVoiceListButton("✕", "Quitar de la lista", false, () => {
+        _voiceChain.splice(idx, 1);
+        renderVoiceChain();
+        setVoiceStatus("Sin guardar: tocá «Guardar voz».");
+      }),
+    );
+    li.append(name, info, actions);
+    cfgVoiceChainEl.appendChild(li);
+  });
+  // REQ-003: la voz del navegador es siempre el ultimo eslabon (no se quita).
+  const last = document.createElement("li");
+  last.className = "fallback-item";
+  last.dataset.state = "ok";
+  const lastName = document.createElement("span");
+  lastName.className = "fallback-name";
+  lastName.textContent = "Voz del navegador";
+  const lastInfo = document.createElement("span");
+  lastInfo.className = "fallback-info";
+  lastInfo.textContent = _voiceChain.length
+    ? "siempre al final: habla si ninguna de arriba puede"
+    : "es la voz que se usa ahora";
+  last.append(lastName, lastInfo);
+  cfgVoiceChainEl.appendChild(last);
+}
+
+function moveVoiceLink(idx, delta) {
+  const target = idx + delta;
+  if (target < 0 || target >= _voiceChain.length) return;
+  [_voiceChain[idx], _voiceChain[target]] = [_voiceChain[target], _voiceChain[idx]];
+  renderVoiceChain();
+  setVoiceStatus("Sin guardar: tocá «Guardar voz».");
+}
+
+async function testVoiceLink(link, btn) {
+  if (!_voiceItems.has(voiceLinkKey(link))) {
+    setVoiceStatus("Guardá la voz antes de probarla.", "error");
+    return;
+  }
+  btn.disabled = true;
+  setVoiceStatus(`Probando ${voiceLinkName(link)}…`);
+  const result = await playVoiceSample(link, TEST_PHRASE);
+  btn.disabled = false;
+  setVoiceStatus(result.ok ? "" : result.message, result.ok ? "" : "error");
+}
+
+function renderVoiceEngineOptions() {
+  const current = cfgVoiceAddEngineEl.value;
+  cfgVoiceAddEngineEl.replaceChildren();
+  for (const engine of _voiceEngines) {
+    const opt = document.createElement("option");
+    opt.value = engine.name;
+    opt.textContent = engine.name === "local" ? "Clonación local (tu voz)" : engine.label;
+    cfgVoiceAddEngineEl.appendChild(opt);
+  }
+  if (current && voiceEngineInfo(current)) cfgVoiceAddEngineEl.value = current;
+  renderVoiceModelOptions();
+}
+
+function renderVoiceModelOptions() {
+  const engine = voiceEngineInfo(cfgVoiceAddEngineEl.value);
+  cfgVoiceAddModelEl.replaceChildren();
+  for (const model of engine?.models || []) {
+    const opt = document.createElement("option");
+    opt.value = model;
+    opt.textContent = VOICE_FREE_MODELS.includes(model) ? `${model} (gratis)` : model;
+    cfgVoiceAddModelEl.appendChild(opt);
+  }
+  cfgVoiceAddModelEl.classList.toggle("hidden", (engine?.models || []).length < 2);
+}
+
+cfgVoiceAddEngineEl.addEventListener("change", renderVoiceModelOptions);
+
+cfgVoiceAddEl.addEventListener("click", async () => {
+  const engine = voiceEngineInfo(cfgVoiceAddEngineEl.value);
+  if (!engine) return;
+  const link = { engine: engine.name, model: cfgVoiceAddModelEl.value || engine.models[0] };
+  if (_voiceChain.some((l) => voiceLinkKey(l) === voiceLinkKey(link))) {
+    setVoiceStatus("Esa voz ya está en la lista.");
+    return;
+  }
+  // REQ-002: el texto no sale a un servicio en la nube sin confirmarlo.
+  if (engine.cloud && !VOICE_CONSENT_ELS[engine.name].checked) {
+    const accepted = await showConfirmModal({
+      title: `Usar ${engine.label}`,
+      message:
+        `Para hablar con ${engine.label}, Vision le envía el texto que lee en voz alta: las respuestas, ` +
+        "la narración de progreso, el Modo Cerebro y el informe técnico (comandos, nombres de archivos y " +
+        `de tablas; las claves nunca). ${engine.label} es un servicio externo; no lo actives si ese texto ` +
+        "puede incluir datos que no deben salir de tu empresa. ¿Confirmás?",
+      acceptLabel: "Sí, enviar el texto",
+    });
+    if (!accepted) return;
+    VOICE_CONSENT_ELS[engine.name].checked = true;
+  }
+  // REQ-004: la clonacion local queda exenta del limite de 2 s, pero se avisa.
+  if (engine.name === "local") {
+    await showConfirmModal({
+      title: "Clonación local",
+      message:
+        "En una PC sin placa de video NVIDIA, tu voz clonada tarda varios segundos por frase: Vision va a " +
+        "tardar en empezar a hablar. Si querés respuestas rápidas, ponela después de una voz en la nube.",
+      acceptLabel: "Entendido",
+      hideCancel: true,
+    });
+  }
+  _voiceChain.push(link);
+  renderVoiceChain();
+  setVoiceStatus("Sin guardar: tocá «Guardar voz».");
+});
+
+// Retirar el consentimiento saca ese servicio de la lista (el backend hace lo mismo).
+for (const [engineName, el] of Object.entries(VOICE_CONSENT_ELS)) {
+  el.addEventListener("change", () => {
+    if (!el.checked) {
+      _voiceChain = _voiceChain.filter((link) => link.engine !== engineName);
+      renderVoiceChain();
+    }
+    setVoiceStatus("Sin guardar: tocá «Guardar voz».");
+  });
+}
+
+cfgVoiceSaveEl.addEventListener("click", async () => {
+  setVoiceStatus("Guardando…");
+  try {
+    const resp = await apiFetchOk(`${API_BASE}/api/voice/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chain: _voiceChain,
+        fish_voice_id: cfgVoiceFishIdEl.value.trim(),
+        elevenlabs_voice_id: cfgVoiceElevenlabsIdEl.value.trim(),
+        effect: cfgVoiceEffectEl.checked,
+        pause_minutes: Number(cfgVoicePauseEl.value),
+        consent: { fish: cfgVoiceConsentFishEl.checked, elevenlabs: cfgVoiceConsentElevenlabsEl.checked },
+      }),
+    });
+    const data = await resp.json();
+    applyVoicePayload(data);
+    applyVoiceConfig(data); // tts.js: la proxima frase ya usa la cadena nueva
+    setVoiceStatus("Guardado ✓", "ok");
+  } catch (err) {
+    setVoiceStatus(friendlyErrorMessage(err), "error");
+  }
+});
+
+// REQ-006: las voces de la cuenta se piden al abrir el desplegable (no antes:
+// sin clave cargada fallaria al abrir Configuracion).
+async function loadVoicePicker({ engine, selectEl }) {
+  if (selectEl.dataset.loaded === "true") return;
+  selectEl.dataset.loaded = "true";
+  selectEl.replaceChildren(new Option("Cargando voces…", ""));
+  try {
+    const resp = await apiFetchOk(`${API_BASE}/api/voice/voices/${engine}`);
+    const { voices = [] } = await resp.json();
+    selectEl.replaceChildren(
+      new Option(voices.length ? "Elegir de mi cuenta…" : "Tu cuenta no tiene voces propias", ""),
+      ...voices.map((voice) => new Option(voice.name || voice.id, voice.id)),
+    );
+  } catch (err) {
+    delete selectEl.dataset.loaded;
+    selectEl.replaceChildren(new Option("Elegir de mi cuenta…", ""));
+    setVoiceStatus(friendlyErrorMessage(err), "error");
+  }
+}
+
+for (const picker of VOICE_PICKERS) {
+  picker.selectEl.addEventListener("focus", () => loadVoicePicker(picker));
+  picker.selectEl.addEventListener("change", () => {
+    if (!picker.selectEl.value) return;
+    picker.inputEl.value = picker.selectEl.value;
+    renderVoiceChain();
+    setVoiceStatus("Sin guardar: tocá «Guardar voz».");
+  });
+  picker.inputEl.addEventListener("input", () => {
+    renderVoiceChain();
+    setVoiceStatus("Sin guardar: tocá «Guardar voz».");
+  });
+}
+
+// REQ-007: estado de la clonacion local (instalacion y muestra).
+function applyVoiceLocalStatus(local) {
+  if (!local) return;
+  if (local.sample) _voiceLocalSample = local.sample;
+  const busy = VOICE_LOCAL_BUSY.includes(local.status);
+  let stateText = "No instalada.";
+  if (busy || local.status === "error" || local.status === "done") stateText = local.message;
+  else if (local.installed) stateText = "Instalada en esta PC.";
+  cfgVoiceLocalStateEl.textContent = stateText;
+  cfgVoiceLocalInstallEl.disabled = busy || local.installed;
+  cfgVoiceLocalInstallEl.textContent = local.installed
+    ? "Clonación local instalada"
+    : busy
+      ? "Instalando…"
+      : "Instalar clonación local";
+  const showLog = (busy || local.status === "error") && (local.log || []).length > 0;
+  cfgVoiceLocalLogEl.classList.toggle("hidden", !showLog);
+  cfgVoiceLocalLogEl.textContent = showLog ? local.log.slice(-8).join("\n") : "";
+  const sample = _voiceLocalSample;
+  cfgVoiceSampleStatusEl.textContent = sample?.present
+    ? `Muestra cargada: ${sample.seconds ?? "?"} s (${sample.format}). Subí otra para reemplazarla.`
+    : "Todavía no subiste tu muestra de voz.";
+  clearTimeout(_voiceLocalPollTimer);
+  if (busy) _voiceLocalPollTimer = setTimeout(pollVoiceLocalStatus, 2000);
+}
+
+async function pollVoiceLocalStatus() {
+  if (!isAudioSettingsPaneOpen() || settingsOverlayEl.classList.contains("hidden")) return;
+  try {
+    const resp = await apiFetchOk(`${API_BASE}/api/voice/local/status`);
+    applyVoiceLocalStatus(await resp.json());
+  } catch {
+    _voiceLocalPollTimer = setTimeout(pollVoiceLocalStatus, 5000);
+  }
+}
+
+cfgVoiceLocalInstallEl.addEventListener("click", async () => {
+  const accepted = await showConfirmModal({
+    title: "Instalar la clonación local",
+    message:
+      "Se descargan varios GB (PyTorch y el modelo de voz) y puede tardar bastante. Antes reviso que la " +
+      "instalación no cambie nada de lo que Vision ya usa: si cambiaría algo, no instalo nada y te explico " +
+      "por qué. ¿Seguimos?",
+    acceptLabel: "Instalar",
+  });
+  if (!accepted) return;
+  try {
+    const resp = await apiFetchOk(`${API_BASE}/api/voice/local/install`, { method: "POST" });
+    applyVoiceLocalStatus(await resp.json());
+  } catch (err) {
+    cfgVoiceLocalStateEl.textContent = friendlyErrorMessage(err);
+  }
+});
+
+cfgVoiceSampleEl.addEventListener("change", () => {
+  const file = cfgVoiceSampleEl.files?.[0];
+  if (!file) return;
+  if (file.size > 25 * 1024 * 1024) {
+    cfgVoiceSampleStatusEl.textContent = "La muestra pesa más de 25 MB. Con 1 a 2 minutos de voz alcanza.";
+    cfgVoiceSampleEl.value = "";
+    return;
+  }
+  cfgVoiceSampleStatusEl.textContent = "Subiendo la muestra…";
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const resp = await apiFetchOk(`${API_BASE}/api/voice/local/sample`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ audio: reader.result, filename: file.name }),
+      });
+      _voiceLocalSample = await resp.json();
+      cfgVoiceSampleStatusEl.textContent = `Muestra guardada: ${_voiceLocalSample.seconds ?? "?"} s. Ya podés sumar tu voz clonada a la lista.`;
+    } catch (err) {
+      cfgVoiceSampleStatusEl.textContent = friendlyErrorMessage(err);
+    } finally {
+      cfgVoiceSampleEl.value = "";
+    }
+  };
+  reader.onerror = () => {
+    cfgVoiceSampleStatusEl.textContent = "No pude leer el archivo. Probá de nuevo.";
+  };
+  reader.readAsDataURL(file);
+});
 
 // -------------------------------------------------------------------------
 // spec agentes-programados, UNIFICADA (pedido explicito del usuario 2026-09:
@@ -7662,6 +8215,7 @@ let _allModelsCache = null;
 
 async function loadModelSettingsPane() {
   cfgModelStatusEl.textContent = "";
+  loadProvidersSettings(); // spec varios-proveedores (no bloquea el resto del panel)
   loadFallbackSettings(); // spec salto-automatico-modelos (no bloquea el resto del panel)
   if (!_allModelsCache) {
     try {
@@ -7697,6 +8251,134 @@ async function loadModelSettingsPane() {
   renderDynamicParams(cfgModelSelectEl.value, savedGen);
   cfgModelSelectEl.onchange = () => renderDynamicParams(cfgModelSelectEl.value, savedGen);
 }
+
+// -------------------------------------------------------------------------
+// spec varios-proveedores REQ-002/003/006: proveedores con clave en el .env.
+// Por cada uno se eligen los modelos que aparecen en el selector y, si es
+// gratuito, se confirma que puede usar lo que se le manda (sin confirmar, sus
+// modelos no aparecen ni se usan en el salto). Las claves nunca pasan por aca.
+// -------------------------------------------------------------------------
+const cfgProvidersListEl = document.getElementById("cfg-providers-list");
+const cfgProvidersAvailableEl = document.getElementById("cfg-providers-available");
+const cfgProvidersSaveEl = document.getElementById("cfg-providers-save");
+const cfgProvidersRefreshEl = document.getElementById("cfg-providers-refresh");
+const cfgProvidersStatusEl = document.getElementById("cfg-providers-status");
+
+function setProvidersStatus(text, kind = "") {
+  cfgProvidersStatusEl.textContent = text;
+  cfgProvidersStatusEl.className = kind ? `settings-status ${kind}` : "settings-status";
+}
+
+async function loadProvidersSettings() {
+  try {
+    const resp = await apiFetchOk(`${API_BASE}/api/providers`);
+    renderProviders(await resp.json());
+  } catch (err) {
+    setProvidersStatus(`No se pudo cargar la lista de proveedores. ${friendlyErrorMessage(err)}`, "error");
+  }
+}
+
+function renderProviders(data) {
+  cfgProvidersListEl.replaceChildren();
+  const providers = data.providers || [];
+  if (providers.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "settings-hint";
+    empty.textContent = "Todavía no hay ningún proveedor con clave en el .env.";
+    cfgProvidersListEl.appendChild(empty);
+  }
+  for (const provider of providers) {
+    const card = document.createElement("div");
+    card.className = "provider-card";
+    card.dataset.provider = provider.id;
+    const head = document.createElement("div");
+    head.className = "provider-card-head";
+    const name = document.createElement("span");
+    name.className = "provider-card-name";
+    name.textContent = provider.label + (provider.principal ? " (principal)" : "") + (provider.free ? " · gratis" : "");
+    const stateEl = document.createElement("span");
+    stateEl.className = "provider-card-state" + (provider.error ? " error" : "");
+    stateEl.textContent = provider.error
+      ? provider.error
+      : `${provider.visible.length} de ${provider.models.length} modelos en el selector`;
+    head.append(name, stateEl);
+    card.appendChild(head);
+    if (provider.free && !provider.principal) {
+      const consentLabel = document.createElement("label");
+      consentLabel.className = "settings-checkbox-label";
+      const consent = document.createElement("input");
+      consent.type = "checkbox";
+      consent.className = "provider-consent";
+      consent.checked = Boolean(provider.consent);
+      consent.addEventListener("change", async () => {
+        if (!consent.checked) return;
+        const accepted = await showConfirmModal({
+          title: `Usar ${provider.label} gratis`,
+          message:
+            `En su plan gratuito, ${provider.label} puede usar lo que le mandás para mejorar sus productos. ` +
+            "No lo uses con datos que no deben salir de tu empresa. ¿Confirmás?",
+          acceptLabel: "Sí, lo uso",
+        });
+        if (!accepted) consent.checked = false;
+        setProvidersStatus("Sin guardar: tocá «Guardar proveedores».");
+      });
+      consentLabel.append(consent, ` Acepto que ${provider.label} (gratis) pueda usar lo que le mando`);
+      card.appendChild(consentLabel);
+    }
+    const list = document.createElement("div");
+    list.className = "provider-models";
+    for (const model of provider.models) {
+      const label = document.createElement("label");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.className = "provider-model";
+      box.value = model;
+      box.checked = provider.visible.includes(model);
+      box.addEventListener("change", () => setProvidersStatus("Sin guardar: tocá «Guardar proveedores»."));
+      label.append(box, ` ${model}`);
+      list.appendChild(label);
+    }
+    card.appendChild(list);
+    cfgProvidersListEl.appendChild(card);
+  }
+  const available = (data.available || []).map(
+    (p) => `${p.label}${p.free ? " (gratis)" : ""}: ${p.key_names.join(" o ")}`,
+  );
+  cfgProvidersAvailableEl.textContent = available.length
+    ? `Para sumar otro, poné su clave en el .env — ${available.join(" · ")}.`
+    : "";
+}
+
+cfgProvidersSaveEl.addEventListener("click", async () => {
+  const models = {};
+  const consent = {};
+  for (const card of cfgProvidersListEl.querySelectorAll(".provider-card")) {
+    const id = card.dataset.provider;
+    models[id] = [...card.querySelectorAll(".provider-model:checked")].map((box) => box.value);
+    const consentBox = card.querySelector(".provider-consent");
+    if (consentBox) consent[id] = consentBox.checked;
+  }
+  setProvidersStatus("Guardando…");
+  try {
+    const resp = await apiFetchOk(`${API_BASE}/api/providers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ models, consent }),
+    });
+    renderProviders(await resp.json());
+    _allModelsCache = null; // el selector se vuelve a pedir con la eleccion nueva
+    loadFallbackSettings(); // la lista del salto ofrece los modelos nuevos
+    setProvidersStatus("Guardado ✓", "ok");
+  } catch (err) {
+    setProvidersStatus(friendlyErrorMessage(err), "error");
+  }
+});
+
+cfgProvidersRefreshEl.addEventListener("click", () => {
+  setProvidersStatus("");
+  loadProvidersSettings();
+  loadFallbackSettings();
+});
 
 // -------------------------------------------------------------------------
 // spec salto-automatico-modelos REQ-001/003: lista de prioridad que arma el
@@ -7763,7 +8445,7 @@ function renderFallbackList() {
     li.dataset.state = !item ? "new" : item.missing ? "missing" : item.paused_until ? "paused" : "ok";
     const name = document.createElement("span");
     name.className = "fallback-name";
-    name.textContent = model;
+    name.textContent = item?.label || prettyModel(model); // spec varios-proveedores
     const info = document.createElement("span");
     info.className = "fallback-info";
     info.textContent = describeFallbackItem(item);

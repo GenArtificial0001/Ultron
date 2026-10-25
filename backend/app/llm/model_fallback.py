@@ -38,15 +38,9 @@ from app.friendly_errors import (
     model_switch_notice,
 )
 
-# REQ-001: lista precargada al activar el salto por primera vez (spec
-# vision-generico): la familia de Claude, del mas potente al mas liviano -- el
-# proveedor por defecto es Anthropic y cada modelo tiene sus propios limites.
-# Con otro proveedor, la lista se arma en Configuracion con sus modelos.
-DEFAULT_ORDER: tuple[str, ...] = (
-    "claude-opus-5-5",
-    "claude-sonnet-5",
-    "claude-haiku-4-5-20251001",
-)
+# spec varios-proveedores REQ-005: la lista arranca VACIA; el usuario la arma
+# con modelos de cualquier proveedor ("proveedor/modelo").
+DEFAULT_ORDER: tuple[str, ...] = ()
 DEFAULT_PAUSE_MINUTES = 10
 MAX_ORDER_LENGTH = 12
 MIN_PAUSE_MINUTES = 1
@@ -58,11 +52,17 @@ MAX_PAUSE_MINUTES = 120
 # 2026-09-25 mostro que un 429 que no se reconocia como "tope" no saltaba. Un
 # rechazo 400 o una demora sin codigo NO: suelen ser problemas del pedido que el
 # otro modelo tambien tendria, y saltar los esconderia.
-TRIGGER_CODES = frozenset({"MODELO-LIMITE", "MODELO-LIMITE-USUARIO", "MODELO-OCUPADO", "MODELO-CAIDO"})
+# spec varios-proveedores REQ-005: sin credito tambien salta (a otro proveedor:
+# ver register_failure).
+TRIGGER_CODES = frozenset(
+    {"MODELO-LIMITE", "MODELO-LIMITE-USUARIO", "MODELO-OCUPADO", "MODELO-CAIDO", "MODELO-SIN-CREDITO"}
+)
 
 
 def is_gemini(model_id: str) -> bool:
-    return model_id.lower().startswith("gemini")
+    # spec varios-proveedores: el id puede venir con prefijo de proveedor
+    # ("gemini/gemini-2.5-flash", "openrouter/google/gemini-..."): se mira el nombre.
+    return model_id.rsplit("/", 1)[-1].lower().startswith("gemini")
 
 
 def resolve(model: str, catalog: dict[str, dict[str, Any]] | None) -> tuple[str, dict[str, Any] | None]:
@@ -73,6 +73,13 @@ def resolve(model: str, catalog: dict[str, dict[str, Any]] | None) -> tuple[str,
     if entry is None:
         return model, None
     return str(entry.get("id") or model), entry
+
+
+def _shown(model_id: str) -> str:
+    """spec varios-proveedores: nombre legible para los avisos ("gemini-3.8-flash (Gemini)")."""
+    from app.llm.providers import display_name  # import diferido: evita ciclo
+
+    return display_name(model_id)
 
 
 def hhmm(epoch: float) -> str:
@@ -91,10 +98,14 @@ def load_settings() -> FallbackSettings:
     """Lee la configuracion guardada desde Configuracion (REQ-001)."""
     from app.project_context import get_project_config  # import diferido: evita ciclo
 
+    from app.llm.providers import canonical  # import diferido: evita ciclo
+
     cfg = get_project_config()
     return FallbackSettings(
         enabled=bool(cfg.model_fallback_enabled),
-        order=tuple(cfg.model_fallback_order or DEFAULT_ORDER),
+        # spec varios-proveedores REQ-007: una lista vieja, sin prefijo, se lee
+        # como del proveedor principal.
+        order=tuple(canonical(m) for m in (cfg.model_fallback_order or DEFAULT_ORDER)),
         pause_minutes=int(cfg.model_fallback_pause_minutes or DEFAULT_PAUSE_MINUTES),
     )
 
@@ -222,9 +233,9 @@ class TurnModelPicker:
                 continue
             return Choice(model=model, notice=self._notice_for(model))
         if skipped_gemini is not None:
-            return Choice(model=None, error=describe_task_needs_new_message(skipped_gemini))
+            return Choice(model=None, error=describe_task_needs_new_message(_shown(skipped_gemini)))
         if earliest is not None:
-            return Choice(model=None, error=describe_all_models_paused(earliest[1], hhmm(earliest[0])))
+            return Choice(model=None, error=describe_all_models_paused(_shown(earliest[1]), hhmm(earliest[0])))
         # Nada usable (lista vacia o todos los nombres desaparecieron del
         # catalogo): se intenta con el de casa, como sin salto.
         return Choice(model=self.home)
@@ -237,9 +248,9 @@ class TurnModelPicker:
             # REQ-007: se salta igual, pero se avisa si el destino no es apto
             # para datos secretos y el que fallo si lo era.
             not_secret = self._secret_ok(failed) is not False and self._secret_ok(model) is False
-            return model_switch_notice(failed, code, model, hhmm(until), next_not_secret=not_secret)
+            return model_switch_notice(_shown(failed), code, _shown(model), hhmm(until), next_not_secret=not_secret)
         if self._pauses.pop_recovered(model):
-            return model_recovered_notice(model)
+            return model_recovered_notice(_shown(model))
         return None
 
     def mark_used(self, model: str) -> None:
@@ -260,6 +271,15 @@ class TurnModelPicker:
             # sugiere el propio mensaje del proveedor de IA.
             for candidate, entry in self._candidates:
                 if entry is not None and not entry.get("hosted_on_prem"):
+                    self._pauses.pause(candidate, self._pause_seconds)
+        if friendly.code == "MODELO-SIN-CREDITO":
+            # spec varios-proveedores REQ-005: sin credito, ningun modelo de ESE
+            # proveedor va a responder: se pausan todos y el salto va a otro.
+            from app.llm.providers import provider_of  # import diferido: evita ciclo
+
+            owner = provider_of(model)
+            for candidate, _entry in self._candidates:
+                if provider_of(candidate) == owner:
                     self._pauses.pause(candidate, self._pause_seconds)
         self._pending_failure = (model, friendly.code, until)
         return True
@@ -324,6 +344,7 @@ def status_items(
         items.append(
             {
                 "model": name,
+                "label": _shown(name),
                 "resolved": None if missing else real,
                 "missing": missing,
                 "paused_until": hhmm(until) if until else None,
@@ -341,7 +362,11 @@ def catalog_choices(catalog: dict[str, dict[str, Any]] | None) -> list[dict[str,
     models: list[dict[str, str]] = []
     for model_id in sorted(entries):
         entry = entries[model_id]
-        models.append({"value": model_id, "label": model_id, "resolved": model_id})
+        # spec varios-proveedores: "Gemini · gemini-2.5-flash (gratis)".
+        label = model_id
+        if entry.get("provider_label") and entry.get("name"):
+            label = f"{entry['provider_label']} · {entry['name']}" + (" (gratis)" if entry.get("free") else "")
+        models.append({"value": model_id, "label": label, "resolved": model_id})
         for alias in entry.get("aliases") or []:
             if "latest" in alias or "flagship" in alias:
                 aliases.append({"value": alias, "label": f"{alias} → hoy {model_id}", "resolved": model_id})

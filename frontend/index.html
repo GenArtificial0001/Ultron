@@ -873,6 +873,21 @@
           </div>
 
           <!-- spec salto-automatico-modelos REQ-001: lista de prioridad que arma el usuario -->
+          <!-- spec varios-proveedores REQ-002/003/006: proveedores con clave en el .env -->
+          <h3 class="settings-subheading">Proveedores de IA</h3>
+          <p class="settings-hint">
+            Cada proveedor se activa poniendo su clave en el archivo <code>.env</code> (por ejemplo
+            <code>GEMINI_API_KEY=…</code>): Vision ya sabe su dirección y lo detecta sin reiniciar. Acá elegís
+            qué modelos de cada uno aparecen en el selector.
+          </p>
+          <div id="cfg-providers-list"></div>
+          <p id="cfg-providers-available" class="settings-hint"></p>
+          <div class="settings-actions">
+            <button id="cfg-providers-save" class="acc-action-btn" type="button">Guardar proveedores</button>
+            <button id="cfg-providers-refresh" class="acc-action-btn secondary" type="button">Volver a leer el .env</button>
+            <span id="cfg-providers-status" class="settings-status"></span>
+          </div>
+
           <h3 class="settings-subheading">Salto automático de modelos</h3>
           <p class="settings-hint">
             Si un modelo llega a su límite de uso o el servicio no responde, Vision sigue con el siguiente de
@@ -946,14 +961,100 @@
               Leer en voz alta las respuestas de Vision y la narración de progreso
             </label>
           </div>
+          <!-- spec informe-tecnico-hablado REQ-001: prendido de fabrica -->
           <div class="settings-field">
-            <label for="cfg-tts-voice-select">Voz (español)</label>
+            <label class="settings-checkbox-label">
+              <input type="checkbox" id="cfg-tts-tech-report" />
+              Hablar informe técnico: mientras trabaja, Vision dice en una frase cada acción (el comando, el
+              archivo y para qué es, las tablas que consulta). Las claves nunca se dicen.
+            </label>
+          </div>
+          <div class="settings-field">
+            <label for="cfg-tts-voice-select">Voz del navegador (español)</label>
             <select id="cfg-tts-voice-select">
               <option value="">(mejor voz masculina disponible automáticamente)</option>
             </select>
           </div>
           <div class="settings-actions">
             <button id="cfg-tts-test-btn" class="acc-action-btn" type="button">Probar voz</button>
+          </div>
+
+          <!--
+            spec voz-fish-audio REQ-001/002/003/005/006/008: cadena de motores
+            de voz. Vacia (de fabrica) = voz del navegador. Los servicios en la
+            nube piden confirmar el envio del texto antes de entrar a la lista.
+          -->
+          <h3 class="settings-subheading">Motor de voz</h3>
+          <p class="settings-hint">
+            De fábrica Vision habla con la voz del navegador. Podés sumar voces de Fish Audio, ElevenLabs o
+            tu propia voz clonada. <strong>La primera de la lista es la voz principal</strong> (ordenala con
+            ↑ ↓); las de abajo son respaldo por si falla, y al final siempre queda la voz del navegador. Las
+            claves se cargan en Configuración &gt; Credenciales.
+          </p>
+          <ol id="cfg-voice-chain" class="fallback-list"></ol>
+          <div class="settings-field fallback-add">
+            <label for="cfg-voice-add-engine">Agregar a la lista</label>
+            <div class="fallback-add-row">
+              <select id="cfg-voice-add-engine"></select>
+              <select id="cfg-voice-add-model" aria-label="Modelo de la voz a agregar"></select>
+              <button id="cfg-voice-add" class="acc-action-btn" type="button">Agregar</button>
+            </div>
+          </div>
+          <div class="settings-field">
+            <label for="cfg-voice-fish-id">Voz de Fish Audio (ID)</label>
+            <div class="fallback-add-row">
+              <input id="cfg-voice-fish-id" type="text" placeholder="ID de la voz (el que figura en fish.audio/m/…)" />
+              <select id="cfg-voice-fish-pick" aria-label="Elegir una voz de mi cuenta de Fish Audio"><option value="">Elegir de mi cuenta…</option></select>
+            </div>
+          </div>
+          <div class="settings-field">
+            <label for="cfg-voice-elevenlabs-id">Voz de ElevenLabs (ID)</label>
+            <div class="fallback-add-row">
+              <input id="cfg-voice-elevenlabs-id" type="text" placeholder="ID de la voz" />
+              <select id="cfg-voice-elevenlabs-pick" aria-label="Elegir una voz de mi cuenta de ElevenLabs"><option value="">Elegir de mi cuenta…</option></select>
+            </div>
+          </div>
+          <div class="settings-field">
+            <label class="settings-checkbox-label">
+              <input type="checkbox" id="cfg-voice-effect" />
+              Efecto «IA» estilo Jarvis (eco corto y ecualización suave). No se aplica a la voz del navegador.
+            </label>
+          </div>
+          <div class="settings-field">
+            <label for="cfg-voice-pause">Minutos antes de volver a probar una voz sin crédito, sin clave o sin voz elegida</label>
+            <input id="cfg-voice-pause" type="number" min="1" max="240" value="30" />
+          </div>
+          <div class="settings-field">
+            <span class="settings-section-label">Envío de texto a servicios en la nube</span>
+            <label class="settings-checkbox-label">
+              <input type="checkbox" id="cfg-voice-consent-fish" />
+              Acepto que el texto que Vision lee en voz alta se envíe a Fish Audio
+            </label>
+            <label class="settings-checkbox-label">
+              <input type="checkbox" id="cfg-voice-consent-elevenlabs" />
+              Acepto que el texto que Vision lee en voz alta se envíe a ElevenLabs
+            </label>
+          </div>
+          <div class="settings-actions">
+            <button id="cfg-voice-save" class="acc-action-btn" type="button">Guardar voz</button>
+            <span id="cfg-voice-status" class="settings-status"></span>
+          </div>
+
+          <!-- spec voz-fish-audio REQ-007: clonacion local (Chatterbox) -->
+          <h3 class="settings-subheading">Clonación local de tu voz</h3>
+          <p class="settings-hint">
+            Genera la voz en esta PC a partir de una muestra tuya, sin enviar texto a ningún servicio. Se
+            instala aparte (varios GB) y, sin placa de video NVIDIA, tarda varios segundos por frase.
+          </p>
+          <p id="cfg-voice-local-state" class="settings-hint"></p>
+          <pre id="cfg-voice-local-log" class="voice-install-log hidden"></pre>
+          <div class="settings-actions">
+            <button id="cfg-voice-local-install" class="acc-action-btn" type="button">Instalar clonación local</button>
+          </div>
+          <div class="settings-field">
+            <label for="cfg-voice-sample">Tu muestra de voz: WAV o MP3 de 10 s como mínimo (ideal 1 a 2 minutos de voz clara, sin ruido de fondo)</label>
+            <input id="cfg-voice-sample" type="file" accept=".wav,.mp3,audio/wav,audio/mpeg" />
+            <p id="cfg-voice-sample-status" class="settings-hint"></p>
           </div>
           <div class="settings-field">
             <label for="cfg-mic-select">Micrófono</label>
