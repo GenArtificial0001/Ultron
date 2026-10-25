@@ -19,7 +19,7 @@ viabilidad: Alta (trabajo grande: varias sesiones)
 autonomia_estimada: 80% -- faltan decisiones de alcance (seccion «A decidir») y la prueba real del usuario
 ---
 
-# Spec: Vision-Personal 2.0 — traer las mejoras de la versión de origen (0.19.4 → 0.36.2)
+# Spec: ULTRON 2.0 — traer las mejoras de la versión de origen (0.19.4 → 0.36.2) con nombre propio
 
 > Esta spec es la única fuente de verdad para esta feature. No se escribe código hasta que el estado sea `APPROVED`.
 
@@ -87,6 +87,28 @@ personales e IA locales descargadas."
 - **REQ-006 Nada de la empresa de origen**: el guardián pasa; además, una revisión manual de la lista de archivos antes
   de cada push.
 - **REQ-007 Versión 2.0.0** con `CHANGELOG.md` que resume lo heredado (por tema, no las 74 entradas) y lo propio.
+- **REQ-008 Se llama ULTRON** (pedido del usuario, 2026-10-25: «no va a compartir carpeta de instalación llamada Vision»).
+  Todo lo visible:
+  - el lanzador `Ultron.exe` (antes `Vision.exe`) y `Iniciar-Ultron.bat`;
+  - el título de la ventana y de la pestaña, el logo, los avisos y los textos de la interfaz;
+  - el README y cómo se presenta el asistente en su prompt.
+  Los nombres internos del código (módulos, variables, `launch_vision.py`) **no cambian**, para que traer las próximas
+  mejoras de la versión de origen siga siendo un diff limpio.
+- **REQ-009 Carpeta propia `%LOCALAPPDATA%\Ultron`** (`DATA_FOLDER_NAME`), con migración en el primer arranque:
+  - si existe `%LOCALAPPDATA%\Vision-personal` y `Ultron` no tiene nada, se COPIAN el `.env`, `keys/`, el índice de
+    sesiones y las alarmas/agentes;
+  - la carpeta vieja no se borra ni se modifica;
+  - se avisa una vez en el chat qué se copió.
+  Puerto 8030 (sin cambios).
+- **REQ-010 Se lo llama «Ultron»**: el Modo Cerebro y el Modo reunión (`meeting_gate.py`) responden a «Ultron» y a
+  «Jarvis» (como hoy), y ya no a «Vision».
+- **REQ-011 Carpeta del proyecto**: `C:\Proyectos\Vision-personal` pasa a `C:\Proyectos\Ultron`. El repositorio sigue
+  siendo https://github.com/GenArtificial0001/Vision.git. Hay que actualizar la tarea programada `status-vision`, que lee
+  la ruta vieja.
+- **REQ-012 El diseño no cambia** (decisión del usuario, 2026-10-25: «mantengamos el diseño original, o sea no cambiemos nada»).
+  ULTRON usa la interfaz de la versión de origen tal cual; su tema oscuro de fábrica es «Oscuro — Rojo». Solo se renombran los
+  textos con marcas de la empresa de origen (nombres de temas, comentarios de colores) para que pase el guardián. La spec
+  `estilo-ultron` quedó cancelada.
 
 ## 5. Reglas de negocio — `90%`
 - Las mejoras futuras de la versión de origen se traen **por versión publicada**: diff del tag anterior al nuevo,
