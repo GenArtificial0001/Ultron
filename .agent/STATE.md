@@ -43,7 +43,19 @@ antes de seguir.
 - **Documentos:** README nuevo (con la tabla de 69 tools y «Conexión a LLMs»), CHANGELOG 2.0.0 y `version.py` en 2.0.0.
 - **Batería sin e2e** antes de los últimos arreglos: 4.744 ok y 9 fallos, todos corregidos y verificados por archivo.
 
-## En curso
+## Avance posterior (2026-10-25 noche)
+- **Commit `17c6e45` (2.0.0) en `ultron-2.0`**, SIN subir todavía:
+  - batería sin e2e: 4.757 ok y 0 fallos;
+  - e2e: los 51 archivos en verde; `stop_unreachable` pasa 3/3, pero se cuelga al cerrar Chromium (QA-028, infraestructura).
+- **Después del commit (sin commitear):**
+  - arreglo de rendimiento: `switches.availability_filter()`, para que `definitions()` lea los interruptores una vez por paso;
+  - 5 tests nuevos en `test_switches_wiring`;
+  - CHANGELOG actualizado;
+  - `app/llm/local_ai.py`, el módulo de `ia-local`, escrito y en el índice de git pero SIN conectar todavía a `providers.py`.
+- **Corriendo:** cobertura con orden aleatorio (`u2_cov2.txt`). Si sale verde: commit, `git branch -f dev ultron-2.0`
+  (fast-forward) y push de las dos ramas.
+
+## En curso (histórico)
 - **e2e completos:** salida en `u2_e2e.txt`. Ya corregidos en los tests:
   - `capabilities_in_lists` y `m365`: los interruptores se prenden;
   - `brain_autosend`: «ultrón» llama y «visión» ya no;

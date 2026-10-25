@@ -12,7 +12,12 @@ import pytest
 
 from app import lsp
 
-pytestmark = pytest.mark.skipif(lsp._find_pylsp_command() is None, reason="pylsp no esta instalado")
+# Arrancan el pylsp REAL varias veces (hasta 5 por test). En una PC lenta o con el antivirus revisando un entorno recien instalado,
+# cada arranque tarda ~10 s y el cliente ahora lo espera (ver lsp._INIT_TIMEOUT): el limite general de 60 s por test no alcanza.
+pytestmark = [
+    pytest.mark.skipif(lsp._find_pylsp_command() is None, reason="pylsp no esta instalado"),
+    pytest.mark.timeout(300),
+]
 
 BAD = "import os\nx = (\n"  # sintaxis rota: pylsp siempre reporta algo
 

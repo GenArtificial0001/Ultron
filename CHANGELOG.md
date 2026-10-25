@@ -52,6 +52,9 @@ su 0.36.2 (74 versiones), sin nada propio de esa empresa. El diseño de la inter
   recién instalado, `pylsp` tardó 10 s y el primer diagnóstico salía vacío siempre. Ahora espera el arranque con su propio margen.
 - **Proveedores:** cuando un proveedor no responde, el aviso dice qué hacer (si es el proxy, Configuración > Red); el texto
   crudo de la falla queda solo en el log.
+- **Rendimiento del chat:** en cada paso, armar la lista de herramientas abría la base una vez por herramienta (69 por paso) para
+  mirar los interruptores. Con la PC cargada, un turno largo pasaba minutos solo en eso. Ahora se leen una vez por paso: el test
+  de 100 pasos bajó de 194 s a 15 s.
 
 **Quitado (era solo de la versión de origen):** el SDK y el login de su gateway de IA, su índice privado de paquetes, sus skills
 internas, su flujo dev→prod y sus herramientas internas de desarrollo.

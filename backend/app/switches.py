@@ -228,6 +228,38 @@ def tool_is_available(tool_name: str) -> bool:
     return type_id in active_types() or not _type_is_configured(type_id)
 
 
+def availability_filter():
+    """Lo mismo que `tool_is_available`, pero leyendo los interruptores UNA sola vez: para filtrar una lista entera de tools.
+
+    Hallazgo de ULTRON (2026-10-25): `ToolRegistry.definitions()` se arma en CADA paso del chat y preguntaba por cada una de las 69
+    tools; cada pregunta abria la base SQLite (`get_app_setting`). Con la PC cargada eran ~9 ms por apertura: un turno de 100 pasos
+    pasaba 2 minutos solo en eso (`test_the_loop_cannot_run_forever` llego a tardar 194 s). Se decide en cada llamada (nada queda
+    cacheado entre pasos), asi que prender o apagar algo se ve en el paso siguiente, como siempre."""
+    office = is_office_enabled()
+    m365 = is_m365_enabled()
+    off = disabled_connection_keys()
+    state: dict[str, object] = {}
+    configured: dict[str, bool] = {}
+
+    def available(tool_name: str) -> bool:
+        if tool_name.startswith(OFFICE_TOOL_PREFIX):
+            return office
+        if tool_name.startswith(M365_TOOL_PREFIX):
+            return m365
+        type_id = TOOL_CONNECTION_TYPE.get(tool_name)
+        if type_id is None or not off:
+            return True
+        if "active" not in state:
+            state["active"] = active_types()
+        if type_id in state["active"]:  # type: ignore[operator]
+            return True
+        if type_id not in configured:
+            configured[type_id] = _type_is_configured(type_id)
+        return not configured[type_id]
+
+    return available
+
+
 def _type_is_configured(type_id: str) -> bool:
     """Un tipo SIN conexiones configuradas no se filtra: el comportamiento de siempre (la tool explica que falta configurar) no cambia."""
     return any(info["type"] == type_id for info in all_connection_keys().values())

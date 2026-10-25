@@ -164,7 +164,8 @@ class ToolRegistry:
         # spec interruptores-conexiones-skills REQ-001/002: las tools de una conexion APAGADA no se le mandan al modelo (ahorra tokens y evita que busque por ahi).
         from app import switches  # import diferido: `switches` importa conexiones y estas importan tools
 
-        tools = [t for t in tools if switches.tool_is_available(t.name)]
+        available = switches.availability_filter()  # los interruptores se leen UNA vez por lista, no una por tool
+        tools = [t for t in tools if available(t.name)]
         return [t.to_openai_schema() for t in tools]
 
     async def dispatch(self, name: str, raw_args: str, session: Any = None) -> str:

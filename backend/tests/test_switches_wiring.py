@@ -516,3 +516,26 @@ def test_ultron_ships_office_and_outlook_teams_off(monkeypatch):
     names = sent_tool_names()
     assert not any(n.startswith(("office_", "m365_")) for n in names)
     assert len(names) == CORE_TOOLS
+
+
+def test_building_the_tool_list_reads_the_switches_once_not_once_per_tool(monkeypatch):
+    """ULTRON (2026-10-25): armar las definiciones en cada paso abria la base una vez por tool (69 por paso)."""
+    from app.persistence import master_index
+
+    reads = []
+    real = master_index.get_app_setting
+    monkeypatch.setattr(master_index, "get_app_setting", lambda key: reads.append(key) or real(key))
+    build_registry().definitions()
+    assert len(reads) <= 4, reads  # Office, Outlook/Teams y la lista de conexiones apagadas: una vez cada uno
+
+
+@pytest.mark.parametrize("office,m365", [(True, True), (False, False), (True, False), (False, True)])
+def test_the_one_shot_filter_decides_exactly_like_the_per_tool_check(office, m365):
+    from app import switches as sw
+
+    sw.set_office_enabled(office)
+    sw.set_m365_enabled(m365)
+    available = sw.availability_filter()
+    assert [t.name for t in build_registry().all() if available(t.name)] == [
+        t.name for t in build_registry().all() if sw.tool_is_available(t.name)
+    ]
