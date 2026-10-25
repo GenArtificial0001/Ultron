@@ -15,15 +15,15 @@ const CONNECTORS = [
   { id: "oracle", kind: "connection", title: "Oracle", icon: "db", hint: "Bases Oracle (por ejemplo, Datamart). Podés cargar varias, cada una con su nombre." },
   { id: "sharepoint", kind: "connection", title: "SharePoint", icon: "site", hint: "Un sitio de SharePoint con la app de Azure que tiene acceso. Cada sitio lleva sus propias credenciales." },
   { id: "sap", kind: "connection", title: "SAP", icon: "db", hint: "Servicios de SAP (Fiori / OData). Cada conexión con su usuario." },
-  { id: "confluence", kind: "connection", title: "Confluence", icon: "doc", hint: "Tu correo y tu token PERSONAL de Confluence. Vision solo lee, nunca escribe." },
-  { id: "m365", kind: "m365", title: "Outlook y Teams", icon: "site", hint: "Tu correo, tu agenda y tus chats de Teams, con tu cuenta de la empresa. Se inicia sesión una sola vez con el botón; Vision nunca lo hace por su cuenta." },
-  { id: "office", kind: "office", title: "Office (Excel y Word)", icon: "doc", hint: "Vision lee y escribe en el Excel que ya tenés abierto, y convierte documentos de Word, Excel y PowerPoint. Nunca abre Excel ni Word por su cuenta ni guarda tus libros: eso lo decidís vos." },
-  { id: "bigquery", kind: "general", section: "bigquery", title: "BigQuery", icon: "db", hint: "Importá el archivo de clave de la cuenta de servicio (.json): Vision lo guarda cifrado y completa el proyecto solo. Cuando venza, importá el nuevo encima." },
+  { id: "confluence", kind: "connection", title: "Confluence", icon: "doc", hint: "Tu correo y tu token PERSONAL de Confluence. ULTRON solo lee, nunca escribe." },
+  { id: "m365", kind: "m365", title: "Outlook y Teams", icon: "site", hint: "Tu correo, tu agenda y tus chats de Teams, con tu cuenta de la empresa. Se inicia sesión una sola vez con el botón; ULTRON nunca lo hace por su cuenta." },
+  { id: "office", kind: "office", title: "Office (Excel y Word)", icon: "doc", hint: "ULTRON lee y escribe en el Excel que ya tenés abierto, y convierte documentos de Word, Excel y PowerPoint. Nunca abre Excel ni Word por su cuenta ni guarda tus libros: eso lo decidís vos." },
+  { id: "bigquery", kind: "general", section: "bigquery", title: "BigQuery", icon: "db", hint: "Importá el archivo de clave de la cuenta de servicio (.json): ULTRON lo guarda cifrado y completa el proyecto solo. Cuando venza, importá el nuevo encima." },
   { id: "graph", kind: "general", section: "graph", title: "Microsoft Graph", icon: "site", hint: "Graph usa las credenciales de una de tus SharePoint: elegí cuál." },
-  { id: "proveedor", kind: "general", section: "proveedor", title: "El proveedor de IA", icon: "api", hint: "Credenciales de la app del proveedor de IA. Vacío = se inicia sesión con tu usuario." },
+  { id: "ia", kind: "general", section: "ia", title: "Inteligencia artificial", icon: "api", hint: "Proveedor principal, dictado y nombre de la empresa. Los demás proveedores se activan con su clave en el .env y la IA local se detecta sola." },
   { id: "voz", kind: "general", section: "voz", title: "Voz (ElevenLabs y Fish)", icon: "api", hint: "Claves de los motores de voz en la nube. La voz se elige en Configuración > Audio (con «Elegir de mi cuenta…»)." },
   { id: "red", kind: "general", section: "red", title: "Red y proxy", icon: "net", hint: "Proxy de la empresa. Lo que ya está definido en Windows manda y no se pisa." },
-  { id: "general", kind: "general", section: "general", title: "General", icon: "gear", hint: "Puerto, modelo y carpetas de Vision." },
+  { id: "general", kind: "general", section: "general", title: "General", icon: "gear", hint: "Puerto, modelo y carpetas de ULTRON." },
 ];
 
 let _ctx = null; // utilidades de app.js
@@ -89,7 +89,7 @@ export async function refreshVault() {
 function renderRoot() {
   const head = el("div", { className: "vault-head" }, [
     el("h3", { className: "settings-subheading", text: "Gestor de conexiones" }),
-    el("p", { className: "settings-hint", text: "Todo se guarda cifrado en Vision: solo tu usuario de Windows, en esta PC, puede leerlo." }),
+    el("p", { className: "settings-hint", text: "Todo se guarda cifrado en ULTRON: solo tu usuario de Windows, en esta PC, puede leerlo." }),
   ]);
   const parts = [head];
   const legacy = _status.legacy || {};
@@ -102,7 +102,7 @@ function renderRoot() {
   if (_lastImportReport) {
     parts.push(
       el("div", { className: "vault-banner vault-banner-done", attrs: { id: "vault-import-done" } }, [
-        el("p", { text: "Importación terminada. Esto es lo que pasó a Vision (los archivos viejos no se tocaron):" }),
+        el("p", { text: "Importación terminada. Esto es lo que pasó a ULTRON (los archivos viejos no se tocaron):" }),
         renderImportReport(_lastImportReport),
       ])
     );
@@ -116,7 +116,7 @@ function renderRoot() {
 function renderImportBanner(legacy) {
   const files = [legacy.env && ".env", legacy.connections_json && "connections.json", legacy.env_enc && ".env.enc", legacy.bq_key_file && "la clave de BigQuery (.json)"].filter(Boolean).join(", ");
   const statusEl = el("div", { className: "vault-import-report" });
-  const btn = el("button", { className: "acc-action-btn", text: "Importar a Vision", attrs: { type: "button", id: "vault-import-btn" } });
+  const btn = el("button", { className: "acc-action-btn", text: "Importar a ULTRON", attrs: { type: "button", id: "vault-import-btn" } });
   btn.addEventListener("click", async () => {
     btn.disabled = true;
     statusEl.replaceChildren(el("span", { className: "settings-status", text: "Importando…" }));
@@ -145,7 +145,7 @@ function renderDeleteLegacyBanner(legacy) {
   btn.addEventListener("click", async () => {
     const confirmed = await _ctx.showConfirmModal({
       title: "Borrar los archivos viejos",
-      message: `Se borran ${files}. Vision ya no los usa: todo está guardado cifrado en Vision. Esta acción no se puede deshacer.`,
+      message: `Se borran ${files}. ULTRON ya no los usa: todo está guardado cifrado en ULTRON. Esta acción no se puede deshacer.`,
       acceptLabel: "Borrar",
     });
     if (!confirmed) return;
@@ -163,7 +163,7 @@ function renderDeleteLegacyBanner(legacy) {
     }
   });
   return el("div", { className: "vault-banner", attrs: { id: "vault-delete-legacy-banner" } }, [
-    el("p", { text: `Tus archivos viejos (${files}) siguen en esta PC, con las contraseñas en texto. Vision ya no los usa: podés borrarlos.` }),
+    el("p", { text: `Tus archivos viejos (${files}) siguen en esta PC, con las contraseñas en texto. ULTRON ya no los usa: podés borrarlos.` }),
     btn,
     statusEl,
   ]);
@@ -248,7 +248,7 @@ function renderSummary() {
     wrap.appendChild(row);
   }
   if (!_connections.length && !bq && !m365 && !office) {
-    wrap.appendChild(el("p", { className: "settings-hint", text: "Todavía no hay conexiones cargadas en Vision. Elegí un conector para empezar." }));
+    wrap.appendChild(el("p", { className: "settings-hint", text: "Todavía no hay conexiones cargadas en ULTRON. Elegí un conector para empezar." }));
     return wrap;
   }
   for (const card of _connections) {
@@ -384,7 +384,7 @@ function renderCard(card, connector, body) {
     // REQ-009: borrar pide confirmación
     const confirmed = await _ctx.showConfirmModal({
       title: `Eliminar «${card.display}»`,
-      message: "Se borran sus datos guardados en Vision. Si la necesitás de nuevo, vas a tener que volver a cargarla.",
+      message: "Se borran sus datos guardados en ULTRON. Si la necesitás de nuevo, vas a tener que volver a cargarla.",
       acceptLabel: "Eliminar",
     });
     if (!confirmed) return;
@@ -577,7 +577,7 @@ function renderConnectionForm(connector, card, onDone) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
-// Secciones de la configuración general (BigQuery, Graph, el proveedor de IA, Voz, Red, General)
+// Secciones de la configuración general (BigQuery, Graph, Inteligencia artificial, Voz, Red, General)
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
 // Outlook y Teams (spec office-outlook-teams-mcp REQ-M09/M11/M14). Decision del usuario 2026-10-17: el inicio de sesion se hace DESDE ACA con un boton; Vision no muestra avisos ni abre
@@ -655,7 +655,7 @@ async function renderM365(body, notice = "") {
   stopM365Polling();
   await loadM365Status();
   if (!_m365) {
-    body.replaceChildren(el("p", { className: "settings-hint error", text: "No pude consultar el estado de Outlook y Teams. Revisá que Vision esté andando y volvé a abrir esta ventana." }));
+    body.replaceChildren(el("p", { className: "settings-hint error", text: "No pude consultar el estado de Outlook y Teams. Revisá que ULTRON esté andando y volvé a abrir esta ventana." }));
     return;
   }
   const noticeEl = el("div", { className: "vault-notice", attrs: { role: "status" } });
@@ -670,7 +670,7 @@ async function renderM365(body, notice = "") {
   if (_m365.state === "waiting") {
     statusRow.appendChild(el("p", { className: "settings-hint", text: "Esperando que termines de entrar con tu cuenta de la empresa en la ventana del navegador que se abrió. Podés dejar esta ventana abierta." }));
   } else if (_m365.state === "connected") {
-    statusRow.appendChild(el("p", { className: "settings-hint", text: "Ya iniciaste sesión. Vision puede leer tu correo, tu agenda y tus chats de Teams cuando se lo pidas." }));
+    statusRow.appendChild(el("p", { className: "settings-hint", text: "Ya iniciaste sesión. ULTRON puede leer tu correo, tu agenda y tus chats de Teams cuando se lo pidas." }));
   } else if (_m365.state === "error" && _m365.message) {
     noticeEl.textContent = _m365.message; // frase ya escrita para una persona (nunca el error crudo)
     noticeEl.dataset.state = "error";
@@ -697,7 +697,7 @@ async function renderM365(body, notice = "") {
         label: `${enabled ? "Desactivar" : "Activar"} ${_m365.display || "Outlook y Teams"}`,
         onToggle: async (next) => {
           await m365Api("/switch", jsonBody("POST", { enabled: next }));
-          await renderM365(body, next ? "Outlook y Teams quedó activado." : "Outlook y Teams quedó desactivado: Vision no lo usa, pero tu sesión sigue guardada.");
+          await renderM365(body, next ? "Outlook y Teams quedó activado." : "Outlook y Teams quedó desactivado: ULTRON no lo usa, pero tu sesión sigue guardada.");
           await refreshVault();
         },
       })
@@ -804,7 +804,7 @@ function officeAppRow(name, item) {
 async function renderOffice(body, notice = "") {
   await loadOfficeStatus();
   if (!_office) {
-    body.replaceChildren(el("p", { className: "settings-hint error", text: "No pude consultar el estado de Office. Revisá que Vision esté andando y volvé a abrir esta ventana." }));
+    body.replaceChildren(el("p", { className: "settings-hint error", text: "No pude consultar el estado de Office. Revisá que ULTRON esté andando y volvé a abrir esta ventana." }));
     return;
   }
   const noticeEl = el("div", { className: "vault-notice", attrs: { role: "status" } });
@@ -824,7 +824,7 @@ async function renderOffice(body, notice = "") {
         label: `${enabled ? "Desactivar" : "Activar"} ${_office.display || "Office"}`,
         onToggle: async (next) => {
           await officeApi("/switch", jsonBody("POST", { enabled: next }));
-          await renderOffice(body, next ? "Office quedó activado." : "Office quedó desactivado: Vision no lo usa y no toca ningún libro ni documento.");
+          await renderOffice(body, next ? "Office quedó activado." : "Office quedó desactivado: ULTRON no lo usa y no toca ningún libro ni documento.");
           await refreshVaultSummaryOnly();
         },
       })

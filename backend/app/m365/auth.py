@@ -89,7 +89,7 @@ def discard_registration_if_address_changed(port: int) -> None:
     wanted = redirect_uri(port)
     if wanted not in [str(uri) for uri in (saved.redirect_uris or [])]:
         logger.info(
-            "Microsoft 365: el puerto de Vision cambio; se descarta el registro de cliente anterior y se registra uno nuevo"
+            "Microsoft 365: el puerto de ULTRON cambio; se descarta el registro de cliente anterior y se registra uno nuevo"
         )
         token_store.forget_client()
 
@@ -209,7 +209,7 @@ def build_provider(port: int, flow: LoginFlow, *, open_browser=webbrowser.open) 
     en `token_store`."""
     discard_registration_if_address_changed(port)
     metadata = OAuthClientMetadata(
-        client_name="Vision",
+        client_name="ULTRON",
         redirect_uris=[redirect_uri(port)],
         grant_types=["authorization_code", "refresh_token"],
         response_types=["code"],

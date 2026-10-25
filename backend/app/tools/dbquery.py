@@ -284,7 +284,7 @@ def _bigquery_risk_check(query: str, session: Any) -> str | None:
         "que puede modificar o eliminar datos/tablas de forma irreversible. La consulta NO "
         "se ejecuto.\n\n"
         f"Statement detectado:\n{statement}\n\n"
-        f"Motivo: '{pattern}' esta en la lista de operaciones de riesgo que Vision bloquea "
+        f"Motivo: '{pattern}' esta en la lista de operaciones de riesgo que ULTRON bloquea "
         "estructuralmente antes de tocar BigQuery (DROP, DELETE, TRUNCATE, UPDATE, MERGE, "
         "CREATE TABLE, CREATE OR REPLACE TABLE).\n\n"
         "Debes usar la tool `question` para pedirle confirmacion explicita al usuario, "
@@ -307,7 +307,7 @@ def _oracle_risk_check(query: str, session: Any) -> str | None:
         "que puede modificar o eliminar datos/tablas de forma irreversible. La consulta NO "
         "se ejecuto.\n\n"
         f"Statement detectado:\n{statement}\n\n"
-        f"Motivo: '{pattern}' esta en la lista de operaciones de riesgo que Vision bloquea "
+        f"Motivo: '{pattern}' esta en la lista de operaciones de riesgo que ULTRON bloquea "
         "estructuralmente antes de tocar Oracle (DROP, DELETE, TRUNCATE, UPDATE, MERGE, "
         "CREATE TABLE, CREATE OR REPLACE TABLE).\n\n"
         "Debes usar la tool `question` para pedirle confirmacion explicita al usuario, "
@@ -462,7 +462,7 @@ def _df_to_text(
             "probable que existan mas filas en la fuente real que este limite esta "
             "ocultando. Si el usuario pidio 'el detalle'/'todos los registros'/el "
             "dataset completo, reintenta la MISMA consulta SIN ese tope (o con un "
-            "numero mayor) para que Vision pueda exportar el resultado completo a CSV "
+            "numero mayor) para que ULTRON pueda exportar el resultado completo a CSV "
             "si corresponde.]"
         )
 
@@ -608,7 +608,7 @@ bigquery_query_tool = Tool(
         "consulta exacta, recien ahi se ejecuta de verdad (sin volver a pausarse por lo mismo).\n\n"
         "IMPORTANTE: si el usuario pide 'el detalle'/'todos los registros'/el dataset completo, "
         "NO le agregues tu propio LIMIT bajo (ej. LIMIT 50) solo por prudencia de tokens -- eso le "
-        "OCULTA filas reales al usuario y desactiva el export automatico a CSV. Deja que Vision "
+        "OCULTA filas reales al usuario y desactiva el export automatico a CSV. Deja que ULTRON "
         "decida el preview/export segun la configuracion real (umbral de filas), no lo decidas vos "
         "recortando la consulta de antemano."
     ),

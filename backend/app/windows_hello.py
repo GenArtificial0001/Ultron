@@ -22,7 +22,7 @@ from ctypes import wintypes
 
 logger = logging.getLogger(__name__)
 
-MESSAGE = "Vision: confirmá que sos vos para ver o cambiar tus contraseñas"
+MESSAGE = "ULTRON: confirmá que sos vos para ver o cambiar tus contraseñas"
 TIMEOUT_S = 90.0
 _POLL_S = 0.2
 _RESULTS = {0: "Verified", 1: "DeviceNotPresent", 2: "NotConfiguredForUser", 3: "DisabledByPolicy", 4: "DeviceBusy", 5: "RetriesExhausted", 6: "Canceled"}

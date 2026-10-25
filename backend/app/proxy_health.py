@@ -208,7 +208,7 @@ def _ask_windows_pac(pac_url: str, probe_url: str) -> list[str]:
         ctypes.POINTER(ProxyInfo),
     ]
     winhttp.WinHttpCloseHandle.argtypes = [ctypes.c_void_p]
-    session = winhttp.WinHttpOpen("Vision", 1, None, None, 0)  # 1 = sin proxy propio
+    session = winhttp.WinHttpOpen("ULTRON", 1, None, None, 0)  # 1 = sin proxy propio
     if not session:
         return []
     try:
@@ -329,27 +329,27 @@ class Result:
 
 _NONE_MESSAGE = (
     "No hay conexión a internet disponible. Conectá la VPN de tu empresa, si usás una y probá de nuevo desde Configuración > Red. "
-    "Vision sigue abierto y la busca solo durante unos minutos, pero el chat con inteligencia artificial no va a funcionar hasta que vuelva."
+    "ULTRON sigue abierto y la busca solo durante unos minutos, pero el chat con inteligencia artificial no va a funcionar hasta que vuelva."
 )
 
 
 def _message(action: str, old: str, new: str, persisted: bool) -> str:
     if action == "healed":
         tail = "y lo dejó guardado en Configuración > Red." if persisted else "durante esta sesión."
-        return f"La salida a internet que Vision tenía guardada ({_short(old)}) dejó de responder. Vision pasó a usar {_short(new)}, que sí responde, {tail}"
+        return f"La salida a internet que ULTRON tenía guardada ({_short(old)}) dejó de responder. ULTRON pasó a usar {_short(new)}, que sí responde, {tail}"
     if action == "chosen":
         return (
             f"La salida a internet de la empresa por su nombre ({_short(DEFAULT_PROXY)}) apunta a una dirección que no responde. "
-            f"Vision usa {_short(new)}, que sí responde, durante esta sesión."
+            f"ULTRON usa {_short(new)}, que sí responde, durante esta sesión."
         )
     if action == "direct":
         if old:
             return (
-                f"La salida a internet que Vision tenía guardada ({_short(old)}) no responde y ninguna otra respondió, "
-                "pero hay conexión directa. Vision la usa por ahora y se conserva lo guardado, por si en otra red sí sirve."
+                f"La salida a internet que ULTRON tenía guardada ({_short(old)}) no responde y ninguna otra respondió, "
+                "pero hay conexión directa. ULTRON la usa por ahora y se conserva lo guardado, por si en otra red sí sirve."
             )
         return (
-            "Ninguna salida a internet de la empresa responde, pero hay conexión directa. Vision la usa durante esta sesión."
+            "Ninguna salida a internet de la empresa responde, pero hay conexión directa. ULTRON la usa durante esta sesión."
         )
     return _NONE_MESSAGE
 

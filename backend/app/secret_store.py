@@ -22,7 +22,7 @@ from typing import Any
 
 # Entropia propia de Vision (no es un secreto: liga cada blob a Vision y a esta version del formato). Cambiarla deja ilegible todo lo guardado.
 _ENTROPY = b"Vision/gestor-conexiones/v1"
-_DESCRIPTION = "Vision"
+_DESCRIPTION = "ULTRON"
 _CRYPTPROTECT_UI_FORBIDDEN = 0x01  # nunca abrir una ventana de Windows al cifrar o descifrar: el servidor corre sin interfaz
 
 

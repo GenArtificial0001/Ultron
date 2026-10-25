@@ -89,7 +89,7 @@ def test_a_request_from_another_machine_is_refused_on_every_vault_route(method, 
 
     resp = getattr(other, method)(path, **({"json": {}} if method in ("post", "put") else {}))
 
-    assert resp.status_code == 403 and "PC donde corre Vision" in resp.json()["detail"]
+    assert resp.status_code == 403 and "PC donde corre ULTRON" in resp.json()["detail"]
 
 
 @pytest.mark.parametrize("method,path", ROUTES)
@@ -478,7 +478,7 @@ def test_the_bigquery_key_file_imported_into_vision_is_deleted_too(api, _isolate
     resp = api.delete("/api/vault/legacy-files")
 
     assert "la clave de BigQuery (.json)" in resp.json()["deleted"] and not key_file.exists()
-    assert json.loads(cs.get_general()["bq_key_json"]) == KEY, "la key sigue, cifrada, en Vision"
+    assert json.loads(cs.get_general()["bq_key_json"]) == KEY, "la key sigue, cifrada, en ULTRON"
 
 
 def test_a_bigquery_key_file_different_from_the_stored_one_is_never_deleted(api, _isolated):

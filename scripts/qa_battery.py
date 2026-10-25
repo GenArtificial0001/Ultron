@@ -431,12 +431,12 @@ def recent_mods() -> bool:
         and ok
     )
 
-    # Fix 2026-09-19 #1: dev/Iniciar-Vision.bat no abria el navegador solo
-    # (a diferencia de prod/Iniciar-Vision.bat y Vision.exe, que corren
+    # Fix 2026-09-19 #1: dev/Iniciar-Ultron.bat no abria el navegador solo
+    # (a diferencia de prod/Iniciar-Ultron.bat y Vision.exe, que corren
     # launch_vision.py). Verifica que exista el script standalone de
     # polling+open y que el .bat de dev realmente lo invoque ANTES de la
     # linea de uvicorn.
-    dev_bat = (ROOT / "Iniciar-Vision.bat").read_text(encoding="utf-8")
+    dev_bat = (ROOT / "Iniciar-Ultron.bat").read_text(encoding="utf-8")
     wait_open_script = ROOT / "backend/scripts/wait_and_open_browser.py"
     ok = (
         check(
@@ -447,7 +447,7 @@ def recent_mods() -> bool:
     )
     ok = (
         check(
-            "auto-abrir navegador: dev/Iniciar-Vision.bat lo invoca",
+            "auto-abrir navegador: dev/Iniciar-Ultron.bat lo invoca",
             "wait_and_open_browser.py" in dev_bat,
         )
         and ok
@@ -693,7 +693,7 @@ def recent_mods() -> bool:
         check(
             "REQ-109: servidor de dev sigue bindeado a 127.0.0.1 (loopback, sin exponer a la LAN)",
             "--host 127.0.0.1"
-            in (ROOT / "Iniciar-Vision.bat").read_text(encoding="utf-8"),
+            in (ROOT / "Iniciar-Ultron.bat").read_text(encoding="utf-8"),
         )
         and ok
     )

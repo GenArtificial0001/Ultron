@@ -99,7 +99,7 @@ def _make_window(root: Any, tk: Any, req: _AlertRequest) -> None:
     global _open_windows_offset
 
     win = tk.Toplevel(root)
-    win.title("Vision")
+    win.title("ULTRON")
     win.attributes("-topmost", True)
     win.resizable(False, False)
     # Pedido del usuario: nada de barra de titulo/cerrar/minimizar del SO --
@@ -152,7 +152,7 @@ def _make_window(root: Any, tk: Any, req: _AlertRequest) -> None:
         logo_label.image = logo_img  # referencia dura -- sin esto el GC se lo come
         logo_label.pack(side="right")
     except Exception:  # noqa: BLE001 -- el logo es cosmetico, nunca tira la alerta abajo
-        logger.warning("No se pudo cargar el logo de Vision en la alerta", exc_info=True)
+        logger.warning("No se pudo cargar el logo de ULTRON en la alerta", exc_info=True)
 
     icon = "⏰" if req.kind == "alarm" else "🤖"
     tk.Label(

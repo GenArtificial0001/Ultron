@@ -81,7 +81,7 @@ class OfficeUnavailable(OfficeError):
         super().__init__(
             FriendlyError(
                 "OFFICE-NO-DISPONIBLE",
-                "Esta PC no tiene lo necesario para controlar Office desde Vision (falta un componente de Windows o Office no está instalado). Avisá a soporte para que lo revisen.",
+                "Esta PC no tiene lo necesario para controlar Office desde ULTRON (falta un componente de Windows o Office no está instalado). Avisá a soporte para que lo revisen.",
             )
         )
         self.detail = detail

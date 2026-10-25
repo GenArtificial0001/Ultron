@@ -1,0 +1,59 @@
+# ESTADO ACTUAL (ULTRON)
+
+Última actualización: 2026-10-25 16:45 (Claude Code, modo de desarrollo automático autorizado por el usuario: «repara y arregla
+todo... sin mi decisión hasta llegar al objetivo planificado... sin romper nada de lo que ya funciona»).
+
+**Si una sesión se corta, retomar desde acá:** leé este archivo, después `git status` y `git log --oneline -5` en
+`C:\Proyectos\Vision-personal` (rama `ultron-2.0`). Lo que está sin commitear es trabajo a medias: verificalo con la batería
+antes de seguir.
+
+## Objetivo planificado
+1. **ULTRON 2.0** (spec `portar-desde-origen`, IN_DEVELOPMENT): las mejoras de la versión de origen 0.36.2 sobre Personal 1.1.0,
+   el renombre visible a ULTRON, la migración de carpeta, la palabra de voz y el README con «Conexión a LLMs».
+2. **Batería completa en verde** (sin e2e + e2e, cada e2e en su propio proceso) y guardián
+   `tests/test_vision_generico.py` en verde.
+3. **Commit 2.0.0 en `ultron-2.0`**, llevar `dev` a ese commit (fast-forward) y subir `ultron-2.0` y `dev` a `origin`
+   (GenArtificial0001/Ultron, alias SSH `github-ultron`). `main` solo con pedido explícito.
+4. **Spec `ia-local`** (APPROVED): detección de Ollama y LM Studio, REQ-001 a REQ-011, con tests y mutaciones, README al día. Versión 2.1.0.
+5. **REQ-011 de portar-desde-origen:** renombrar la carpeta a `C:\Proyectos\Ultron` al final, cuando no quede nada corriendo, y
+   actualizar la tarea programada `status-vision`.
+
+## Dónde está cada cosa
+- Repo: `C:\Proyectos\Vision-personal`, rama `ultron-2.0`. Remotos: `origin` = Ultron (SSH), `vision` = el repo viejo.
+  Identidad local: GenArtificial0001.
+- Punto de control commiteado: `9dc570c` (merge + limpieza + tests adaptados). Todo lo posterior está sin commitear: renombre,
+  migración, README, CHANGELOG 2.0.0 y specs.
+- Bitácora: `specs/portar-desde-origen/progress.md`.
+- Salidas de las baterías: `%TEMP%\claude\<carpeta de esta sesión>\scratchpad\u2_*.txt`.
+  Leer solo las líneas `^(FAILED|ERROR) ` y el resumen final.
+- Scripts de apoyo (en el mismo scratchpad, `scripts/`):
+  - `resolver.py`: conflictos de merge;
+  - `genericos.py`: barrido de textos de la empresa de origen;
+  - `renombrar_ultron.py`: renombre visible; nunca toca bytes ni docstrings;
+  - `prender_interruptor.py`: fixture de Office/M365 en los tests;
+  - `duplicados.py`: funciones duplicadas por el merge.
+
+## Hecho (2026-10-25)
+- **Merge y limpieza:** resueltos los 31 conflictos; sin restos de la empresa de origen (el guardián también revisa `specs/` y
+  `.agent/`); configuración de IA genérica; Office y M365 apagados de fábrica; conector de M365 configurable; proxy sin predeterminado.
+- **Arreglo del LSP:** espera el `initialize` (con test de un `pylsp` lento).
+- **Renombre visible a ULTRON:** la entropía DPAPI no se toca; `Ultron.exe`, `Iniciar-Ultron.bat`.
+- **Carpeta y migración:** `DATA_FOLDER_NAME = "Ultron"` y migración desde `Vision-personal` (`app/data_migration.py`, 8 tests).
+- **Palabra de voz:** «Ultron» (y «Jarvis»).
+- **Documentos:** README nuevo (con la tabla de 69 tools y «Conexión a LLMs»), CHANGELOG 2.0.0 y `version.py` en 2.0.0.
+- **Batería sin e2e** antes de los últimos arreglos: 4.744 ok y 9 fallos, todos corregidos y verificados por archivo.
+
+## En curso
+- **e2e completos:** salida en `u2_e2e.txt`. Ya corregidos en los tests:
+  - `capabilities_in_lists` y `m365`: los interruptores se prenden;
+  - `brain_autosend`: «ultrón» llama y «visión» ya no;
+  - `confluence`: el nombre de la conexión de prueba tenía un espacio.
+- **Pendiente de investigar:** `test_e2e_error_messages.py::test_revalidating_a_model_error_never_claims_it_was_solved`
+  (timeout de 15 s al revalidar).
+
+## Reglas que no se negocian
+- Nada de la empresa de origen en el repo, ni en `specs/` ni en `.agent/`: el guardián lo vigila.
+- No tocar la carpeta de la versión de origen (solo lectura).
+- No tocar `frontend/` mientras corren los e2e (los sirven en vivo).
+- No romper lo que funciona: cada arreglo con su test; al final, la batería completa.
+- Las barras invertidas en heredocs de bash se transforman: para reemplazos con `\`, usar el editor de archivos o un script en archivo.

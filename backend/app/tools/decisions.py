@@ -75,7 +75,7 @@ def _append_with_lock(path: Path, entry: str) -> None:
     with open(path, "ab"):
         pass
 
-    header = "# decisions.md\n\nBitácora automática de decisiones registradas por Vision.\n\n".encode()
+    header = "# decisions.md\n\nBitácora automática de decisiones registradas por ULTRON.\n\n".encode()
     data = entry.encode("utf-8")
     deadline = time.monotonic() + LOCK_TIMEOUT_S
 

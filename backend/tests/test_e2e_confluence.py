@@ -54,7 +54,7 @@ class Provider:
             index=0,
             id="call_cf",
             function=SimpleNamespace(
-                name="confluence_get_page_tree", arguments=json.dumps({"connection": "la empresa", "section": "Calidad"})
+                name="confluence_get_page_tree", arguments=json.dumps({"connection": "Empresa", "section": "Calidad"})
             ),
         )
         return iter([_chunk(tool_calls=[call]), _chunk(finish="tool_calls")])
@@ -122,7 +122,7 @@ def connections_file(tmp_path_factory):
                 "connections": [
                     {
                         "type": "confluence",
-                        "name": "la empresa",
+                        "name": "Empresa",
                         "fields": {
                             "confluence_base_url": "https://empresa.atlassian.net/wiki",
                             "confluence_space_key": "QOS",
@@ -186,9 +186,9 @@ def open_connections_tab(app):
 def test_the_connections_tab_has_a_confluence_branch_with_its_sections(app):
     open_connections_tab(app)
     app.page.click("#conn-cf-toggle")
-    app.page.wait_for_selector("#conn-cf-list > li:has-text('Confluence - la empresa')", timeout=15_000)
+    app.page.wait_for_selector("#conn-cf-list > li:has-text('Confluence - Empresa')", timeout=15_000)
 
-    app.page.click("#conn-cf-list > li:has-text('Confluence - la empresa')")
+    app.page.click("#conn-cf-list > li:has-text('Confluence - Empresa')")
 
     app.page.wait_for_selector("#conn-cf-list li:has-text('MP&L Procedures')", timeout=10_000)
     assert "Calidad" in app.page.inner_text("#conn-cf-list")
@@ -197,7 +197,7 @@ def test_the_connections_tab_has_a_confluence_branch_with_its_sections(app):
 def test_opening_a_section_loads_its_children_lazily(app):
     open_connections_tab(app)
     app.page.click("#conn-cf-toggle")
-    app.page.click("#conn-cf-list > li:has-text('Confluence - la empresa')")
+    app.page.click("#conn-cf-list > li:has-text('Confluence - Empresa')")
     app.page.wait_for_selector("#conn-cf-list li:text-is('📚 Calidad')", timeout=10_000)
 
     app.page.click("#conn-cf-list li:text-is('📚 Calidad')")
@@ -208,7 +208,7 @@ def test_opening_a_section_loads_its_children_lazily(app):
 def test_a_wiki_title_with_html_is_shown_as_text_and_never_executes(app):
     open_connections_tab(app)
     app.page.click("#conn-cf-toggle")
-    app.page.click("#conn-cf-list > li:has-text('Confluence - la empresa')")
+    app.page.click("#conn-cf-list > li:has-text('Confluence - Empresa')")
     app.page.wait_for_selector("#conn-cf-list li:text-is('📚 Calidad')", timeout=10_000)
     app.page.click("#conn-cf-list li:text-is('📚 Calidad')")
     app.page.wait_for_selector("#conn-cf-list li:has-text('onerror')", timeout=10_000)
@@ -223,7 +223,7 @@ def test_a_wiki_title_with_html_is_shown_as_text_and_never_executes(app):
 def test_no_credential_reaches_the_page(app):
     open_connections_tab(app)
     app.page.click("#conn-cf-toggle")
-    app.page.wait_for_selector("#conn-cf-list > li:has-text('Confluence - la empresa')", timeout=15_000)
+    app.page.wait_for_selector("#conn-cf-list > li:has-text('Confluence - Empresa')", timeout=15_000)
 
     html = app.page.content()
 
@@ -302,7 +302,7 @@ def test_a_click_while_vision_is_busy_does_not_queue_anything_behind_the_users_b
     _ask_for_the_tree(app)
     sent = []
     app.page.on("request", lambda r: sent.append(r.post_data) if r.url.endswith("/api/chat") and r.method == "POST" else None)
-    app.page.fill("#chat-input", f"pregunta {SLOW_MARK} para ocupar a Vision")
+    app.page.fill("#chat-input", f"pregunta {SLOW_MARK} para ocupar a ULTRON")
     app.page.click("#send-btn")
     app.page.wait_for_selector("#send-btn[data-state=active]", timeout=10_000)
     users_before = app.page.eval_on_selector_all(".msg.user", "els => els.length")
@@ -323,12 +323,12 @@ def test_expanding_a_page_asks_for_the_children_of_THAT_connection(app, connecti
     requests = []
     app.page.on("request", lambda r: requests.append(r.url) if "/api/confluence/children" in r.url else None)
     app.page.click("#conn-cf-toggle")
-    app.page.click("#conn-cf-list > li:has-text('Confluence - la empresa')")
+    app.page.click("#conn-cf-list > li:has-text('Confluence - Empresa')")
     app.page.wait_for_selector("#conn-cf-list li:text-is('📚 Calidad')", timeout=10_000)
     app.page.click("#conn-cf-list li:text-is('📚 Calidad')")
     app.page.wait_for_selector("#conn-cf-list li:text-is('📄 Hija')", timeout=10_000)
 
-    assert requests and all("connection=la empresa" in u for u in requests), requests
+    assert requests and all("connection=Empresa" in u for u in requests), requests
     assert any("id=42" in u for u in requests)
 
 
@@ -371,7 +371,7 @@ def test_after_the_connections_file_changes_the_confluence_branch_is_rebuilt(app
     original = connections_file.read_text(encoding="utf-8")
     open_connections_tab(app)
     app.page.click("#conn-cf-toggle")
-    app.page.wait_for_selector("#conn-cf-list > li:has-text('Confluence - la empresa')", timeout=15_000)
+    app.page.wait_for_selector("#conn-cf-list > li:has-text('Confluence - Empresa')", timeout=15_000)
     data = json.loads(original)
     extra = json.loads(json.dumps(data["connections"][0]))
     extra["name"] = "Segunda"

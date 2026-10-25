@@ -740,7 +740,7 @@ export function cancelSpeech() {
 // para confirmar que se escucha bien antes de una reunion real -- se
 // habla SIEMPRE (sin chequear isTtsEnabled()) porque es una accion directa
 // del usuario tocando el boton, no una narracion automatica de fondo.
-export const TEST_PHRASE = "Hola, soy Vision. Así es como voy a sonar durante tus reuniones y respuestas.";
+export const TEST_PHRASE = "Hola, soy ULTRON. Así es como voy a sonar durante tus reuniones y respuestas.";
 
 export function speakTestPhrase() {
   // spec voz-fish-audio: con motores en la cadena, se prueba la cadena

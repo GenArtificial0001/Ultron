@@ -651,7 +651,7 @@ class TestSweepFinishedRuns:
 
         assert not mi.list_running_agent_runs()
         r = last_run()
-        assert r["status"] == "done" and "Vision se reinició" in r["error"]
+        assert r["status"] == "done" and "ULTRON se reinició" in r["error"]
 
     def test_a_missing_turn_closes_the_run_as_unknown(self, tmp_master_db, store):
         self._session(store, [self._turn("t1", TURN_STATUS_DONE)])  # falta t2
@@ -659,7 +659,7 @@ class TestSweepFinishedRuns:
 
         ag._sweep_finished_runs()
 
-        assert not mi.list_running_agent_runs() and "Vision se reinició" in last_run()["error"]
+        assert not mi.list_running_agent_runs() and "ULTRON se reinició" in last_run()["error"]
 
     def test_all_done_closes_as_done(self, tmp_master_db, store):
         self._session(store, [self._turn("t1", TURN_STATUS_DONE), self._turn("t2", TURN_STATUS_DONE)])

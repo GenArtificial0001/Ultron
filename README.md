@@ -1,156 +1,204 @@
-# Vision
+# ULTRON
 
-Asistente conversacional con herramientas reales para el trabajo diario de una empresa: lee y
-escribe archivos, ejecuta comandos, consulta bases de datos (Oracle, BigQuery, SAP) y
-SharePoint/Microsoft Graph, arma tableros y documentos, programa alarmas y agentes, y conversa por
-voz. Backend Python/FastAPI y frontend web sin compilación (JavaScript puro).
+Asistente conversacional con herramientas reales para el trabajo diario: lee y escribe archivos, ejecuta comandos, consulta
+bases de datos, arma tableros y documentos, programa alarmas y agentes, y conversa por voz. Backend Python/FastAPI y frontend
+web sin compilación (JavaScript puro, todo local, sin CDN).
 
-Funciona con **Claude** (clave de Anthropic) o con cualquier servicio compatible con OpenAI
-(OpenAI, Azure OpenAI o el gateway de IA de tu empresa), y detrás del proxy de cualquier red
-corporativa. Todo se configura desde un archivo `.env`.
+Funciona con **varios proveedores de IA a la vez** (Claude, Gemini, Groq, DeepSeek, OpenRouter, OpenAI o cualquier servicio
+compatible con OpenAI) y con **IA local** en tu propia PC (Ollama o LM Studio). Se puede usar detrás del proxy de una red corporativa.
+
+> ULTRON 2.0 nace de Vision-Personal 1.1.0 más todas las mejoras de la versión de origen hasta su 0.36.2. Si venías usando
+> Vision-Personal, la primera vez que abras ULTRON copia tu configuración y tus sesiones a su carpeta nueva (ver
+> [Migración desde Vision-Personal](#migración-desde-vision-personal)).
 
 ## Qué hace
 
 | Área | Qué incluye |
 |---|---|
-| Chat con herramientas | bash, archivos (leer/escribir/editar/buscar), listas de tareas, skills bajo demanda, respuestas con fórmulas (KaTeX), gráficos y tablas |
-| Datos | Oracle, BigQuery, SharePoint/Graph y SAP (OData v2), todos opcionales |
-| Modelos | selector de modelo, parámetros de generación, **salto automático** al siguiente modelo de una lista si uno llega a su límite o se cae |
-| Voz | dictado (con un servicio de transcripción configurable), lectura en voz alta con la voz del navegador, Fish Audio, ElevenLabs o tu voz clonada (con salto automático entre ellas), Modo Cerebro y modo reunión |
-| Productividad | sesiones con historial en SQLite, alarmas y agentes programados, copiar fórmulas en texto legible (para WhatsApp o mail) |
+| Chat con herramientas | bash, archivos (leer, escribir, editar, buscar), listas de tareas, skills bajo demanda, fórmulas (KaTeX), gráficos, tableros exportables |
+| Modelos | selector agrupado por proveedor, IA local, **salto automático** al siguiente modelo (de cualquier proveedor) si uno se queda sin crédito, llega a su límite o se cae |
+| Voz | dictado (servicio configurable), lectura en voz alta (voz del navegador, Fish Audio, ElevenLabs o tu voz clonada), **Modo Cerebro** (conversación continua, Espacio para hablar) y **Modo reunión** (también escucha el audio de la PC). Se lo llama «**Ultron**» (o «Jarvis») |
+| Sesiones | historial en SQLite por carpeta de proyecto, sesiones públicas y privadas, `/update`, búsqueda, compactación con aviso |
+| Datos (opcionales, apagados de fábrica) | Oracle, BigQuery, SharePoint/Microsoft Graph, SAP (OData v2), Confluence |
+| Office y Microsoft 365 (opcionales, apagados de fábrica) | Excel y Word por COM; Outlook y Teams por un conector MCP de Microsoft 365 |
+| Productividad | alarmas y agentes programados, avisos de Windows al terminar, copiar fórmulas en texto legible |
 
 ## Requisitos
 
 - Windows 10/11 con **Python 3.12 o superior** en el PATH (`python --version`).
-- Una clave de un proveedor de IA: de Anthropic (https://console.anthropic.com) o de un servicio
-  compatible con OpenAI.
-- Opcional: credenciales de los conectores que quieras usar.
+- Al menos **una forma de hablar con un modelo**: la clave de un proveedor o una IA local instalada (ver
+  [Conexión a LLMs](#conexión-a-llms)). Sin eso ULTRON arranca, pero el chat te dice qué falta.
 
-## Arrancar
+## Instalar y arrancar
 
-**Modo desarrollo** (recarga sola con cada cambio):
+**Ultron.exe** (portable, un solo archivo): `build_exe.bat` lo compila. Al abrirlo extrae el código a
+`%LOCALAPPDATA%\Ultron\app`, prepara su entorno de Python (la primera vez tarda unos minutos) y abre
+http://127.0.0.1:8030/. La configuración vive en `%LOCALAPPDATA%\Ultron\.env`: copiá ahí `backend\.env.example`.
 
-1. Copiá `backend\.env.example` a `backend\.env` y completá al menos `LLM_API_KEY`.
-2. Doble clic en `Iniciar-Vision.bat`. La primera vez crea `backend\.venv` e instala las
-   dependencias (tarda unos minutos).
-3. Se abre http://127.0.0.1:8030/.
+**Modo desarrollo** (se recarga solo con cada cambio):
 
-**Vision.exe** (portable, un solo archivo): `build_exe.bat` lo compila. Al abrirlo, extrae el
-código a `%LOCALAPPDATA%\Vision-personal\app`, prepara su entorno y arranca. Su configuración vive
-en `%LOCALAPPDATA%\Vision-personal\.env` (copiá ahí el `.env.example`).
+1. Copiá `backend\.env.example` a `backend\.env`.
+2. Configurá al menos un LLM (sección siguiente).
+3. Doble clic en `Iniciar-Ultron.bat`. La primera vez crea `backend\.venv` e instala las dependencias.
+4. Se abre http://127.0.0.1:8030/.
 
-## Configurar Vision
+## Conexión a LLMs
 
-Todo está explicado, variable por variable, en [`backend/.env.example`](backend/.env.example). Lo
-principal:
+Es el paso más importante de la instalación: **sin un LLM conectado, ULTRON no responde**. Hay dos caminos y se pueden
+combinar (por ejemplo, Claude como principal e IA local de respaldo en el salto automático).
 
-| Qué | Variables |
-|---|---|
-| Proveedor de IA | `LLM_PROVIDER` (`anthropic` u `openai_compatible`), `LLM_API_KEY`, `LLM_BASE_URL` (solo `openai_compatible`), `LLM_MODEL`, `LLM_MODELS` |
-| Más proveedores de IA a la vez | `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY` (solo la clave: Vision sabe la dirección de cada uno) |
-| Dictado por voz | `STT_BASE_URL`, `STT_API_KEY`, `STT_MODEL` (endpoint `/audio/transcriptions` compatible con OpenAI, ej. Whisper) |
-| Voz de Vision | `FISH_API_KEY`, `ELEVENLABS_API_KEY` (y opcionalmente `FISH_VOICE_ID`, `ELEVENLABS_VOICE_ID`); el orden de las voces, el modelo y el efecto se eligen en **Configuración > Audio** |
-| Empresa | `VISION_COMPANY_NAME`: nombre que aparece en la pantalla y en la presentación del asistente |
-| Proxy corporativo | `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (localhost siempre va directo) |
-| Conectores | `ORACLE_*`, `BQ_*`, `SHAREPOINT_*`/`AZURE_*`, `SAP_*` y sus `ENABLE_*` |
+### A. Proveedores en la nube (con tu clave)
 
-Las claves también se pueden cargar desde la app, en **Configuración > Credenciales**: quedan
-cifradas en `.env.enc`, junto al `.env`. Nada de esto se versiona (ver `.gitignore`).
+Poné **solo la clave** en el `.env`. ULTRON ya conoce la dirección de cada proveedor y la toma sin reiniciar:
 
-Sin `LLM_API_KEY`, Vision arranca igual y el chat explica qué falta configurar; nunca manda un
-pedido a un servidor que no hayas configurado.
+| Proveedor | Línea del `.env` | Dónde se saca la clave | Gratis |
+|---|---|---|---|
+| Claude (Anthropic) | `ANTHROPIC_API_KEY=` | https://console.anthropic.com | no |
+| Gemini (Google) | `GEMINI_API_KEY=` | https://aistudio.google.com/apikey | sí, con límites |
+| Groq (gpt-oss, Qwen, Llama) | `GROQ_API_KEY=` | https://console.groq.com | sí, con límites |
+| DeepSeek | `DEEPSEEK_API_KEY=` | https://platform.deepseek.com | no (muy barato) |
+| OpenRouter (muchos) | `OPENROUTER_API_KEY=` | https://openrouter.ai | algunos modelos |
+| OpenAI | `OPENAI_API_KEY=` | https://platform.openai.com | no |
+| Otro compatible con OpenAI | `CUSTOM_BASE_URL=` y `CUSTOM_API_KEY=` | el de tu servicio | según el servicio |
 
-**`.env` o Credenciales:** lo que cargás en **Configuración > Credenciales** se aplica al instante.
-Si en cambio editás el `.env`, cerrá y volvé a abrir Vision para que lo tome.
+Después, en **Configuración > Modelo e inteligencia > Proveedores de IA**, marcá qué modelos querés ver en el selector. Los
+**gratuitos** piden confirmar una vez: en su plan gratis pueden usar lo que les mandás para entrenar, así que no los uses con
+datos de tu empresa. En **Salto automático de modelos** armá la lista de prioridad (arranca vacía).
 
-## Guías paso a paso
+El proveedor «principal» de siempre (`LLM_PROVIDER`, `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`) sigue funcionando, y también
+se carga desde **Configuración > Conexiones > General**, en «Inteligencia artificial».
 
-### Usar varios proveedores de IA a la vez (Claude, Gemini, Groq, DeepSeek…)
+### B. IA local en tu PC (Ollama)
 
-1. En el `.env` poné **solo la clave** de cada proveedor que quieras usar, por ejemplo
-   `GEMINI_API_KEY=…` o `GROQ_API_KEY=…` (la lista completa está en `backend/.env.example`). No hace
-   falta la dirección ni otros parámetros, y no hace falta reiniciar Vision.
-2. En **Configuración > Modelo e inteligencia > Proveedores de IA** vas a ver cada proveedor con sus
-   modelos: marcá cuáles querés en el selector y tocá **Guardar proveedores**.
-3. Los **gratuitos** (Gemini, Groq) piden confirmar una vez: en su plan gratis pueden usar lo que les
-   mandás para mejorar sus productos. No los uses con datos de tu empresa.
-4. En **Salto automático de modelos** armá la lista de prioridad (arranca vacía), por ejemplo
-   Claude → Gemini gratis → Groq. Si uno se queda sin crédito, llega a su límite o se cae, el chat
-   sigue con el siguiente en el mismo mensaje y te avisa.
+Lo que mandás **no sale de la PC**, no tiene costo por uso ni cupos. Pasos medidos en una instalación real (25/10/2026, Intel
+Core Ultra 5 238V con gráfica integrada Arc, 32 GB de RAM, sin placa de video dedicada):
 
-Dónde sacar cada clave: Gemini en https://aistudio.google.com/apikey, Groq en https://console.groq.com,
-OpenRouter en https://openrouter.ai, Claude en https://console.anthropic.com.
+1. **Bajá Ollama** de https://ollama.com/download (o la release de https://github.com/ollama/ollama/releases): `OllamaSetup.exe`,
+   unos **1,7 GB**. Está firmado por «Ollama Inc.».
+2. **Instalalo**: es por usuario, **no pide permisos de administrador** (queda en `%LOCALAPPDATA%\Programs\Ollama`), queda en la
+   bandeja y arranca con Windows.
+3. **Bajá un modelo que admita herramientas**. Con 16 GB de RAM o más y sin placa de video, `qwen3:4b` (2,5 GB, tardó 87 s):
+   ```bash
+   ollama pull qwen3:4b
+   ```
+   Con menos RAM: `qwen3:1.7b`. Con placa de video de 8 GB o más: `qwen3:8b`.
+4. **Subí el contexto y, si tu PC tiene gráfica integrada, activala.** Son dos variables de entorno de Windows. Después hay que
+   cerrar Ollama desde la bandeja y volver a abrirlo:
+   ```bash
+   setx OLLAMA_CONTEXT_LENGTH 16384
+   ```
+   ```bash
+   setx OLLAMA_IGPU_ENABLE 1
+   ```
+   - **Contexto:** Ollama arranca con 4.096 tokens. El prompt de ULTRON con sus herramientas no entra, y Ollama **recorta el
+     principio sin avisar**.
+   - **Gráfica integrada:** Ollama la detecta pero la descarta si no se lo pedís. En la PC de prueba, la respuesta en caliente
+     bajó de 24,8 s a **9,4 s** y una llamada con herramienta de 150 s a **32 s**.
+5. **Comprobá que responde**: abrí http://127.0.0.1:11434/v1/models en el navegador. Tiene que listar el modelo.
+6. **Conectalo a ULTRON**. Hasta que llegue la detección automática (spec `ia-local`, en desarrollo), se carga como «otro
+   compatible» en el `.env`:
+   ```
+   CUSTOM_BASE_URL=http://127.0.0.1:11434/v1
+   CUSTOM_API_KEY=local
+   CUSTOM_LABEL=Ollama (local)
+   ```
 
-### Activar el dictado por voz (micrófono, Modo Cerebro y modo reunión)
+**LM Studio** (https://lmstudio.ai) funciona igual: activá su servidor local (pestaña *Developer*) y usá
+`CUSTOM_BASE_URL=http://127.0.0.1:1234/v1`.
 
-Vision necesita un servicio que pase tu voz a texto; Claude no lo hace. Sin configurarlo, el
-micrófono avisa "El dictado por voz no está configurado". El audio que dictás se envía a ese servicio.
-
-**Con Groq (tiene plan gratuito):**
-
-1. Entrá a https://console.groq.com y creá la cuenta (podés entrar con Google).
-2. En el menú, **API Keys → Create API Key**, con el nombre `Vision`. Copiala: empieza con `gsk_` y se
-   muestra una sola vez.
-3. En Vision, **Configuración > Credenciales > Inteligencia artificial (proveedor y dictado)**:
-   - **Dictado: dirección** → `https://api.groq.com/openai/v1`
-   - **Dictado: clave** → la que copiaste
-   - **Dictado: modelo** → `whisper-large-v3-turbo`
-4. Tocá **Guardar** en esa sección y probá el botón del micrófono.
-
-**Con OpenAI (pago, barato):** lo mismo, con la dirección `https://api.openai.com/v1`, una clave de
-https://platform.openai.com y el modelo `whisper-1`.
-
-### Darle a Vision una voz mejor (Fish Audio, ElevenLabs o tu voz clonada)
-
-De fábrica Vision habla con la voz del navegador. Para sumar otras:
-
-1. **Creá la clave del servicio:**
-   - **Fish Audio** (https://fish.audio): en el panel, sección de desarrolladores → **API Keys** → crear.
-     Ojo: los créditos que muestra el panel son de la plataforma web; para el modelo pago (`s2.1-pro`)
-     desde Vision hace falta **crédito de API**, que se compra aparte. El modelo gratuito
-     (`s2.1-pro-free`) no lo necesita, pero puede tardar varios segundos en empezar a hablar.
-   - **ElevenLabs** (https://elevenlabs.io): **Create API Key** con **Restrict Key** activado,
-     **Text to Speech → Access**, **Voices → Read** (para elegir voces de tu cuenta), **User → Read**
-     (opcional) y todo lo demás en **No Access**. Conviene ponerle un tope de créditos.
-2. **Cargala en Vision:** **Configuración > Credenciales > Voz de Vision** (o `FISH_API_KEY` /
-   `ELEVENLABS_API_KEY` en el `.env`). Nunca la pegues en un chat.
-3. **Armá la lista en Configuración > Audio > Motor de voz:**
-   - Elegí el servicio y el modelo y tocá **Agregar**. Vision te pide confirmar que el texto que lee
-     en voz alta se le envía a ese servicio.
-   - Pegá el **ID de la voz** (en Fish es el código de la dirección `fish.audio/m/<ID>`) o elegila
-     de las voces de tu cuenta.
-   - **La primera de la lista es la voz principal**; ordenala con ↑ ↓. Las de abajo son respaldo si
-     la principal falla o se queda sin crédito, y al final siempre queda la voz del navegador.
-   - Tocá **Guardar voz** y probá cada voz con ▶.
-4. Opcional: el **Efecto «IA»** (eco corto y ecualización suave, estilo Jarvis).
-5. **Hablar informe técnico** (Configuración > Audio, prendido de fábrica): mientras trabaja, Vision
-   cuenta lo que hace. Cuando escribe código lo recorre en vivo (comentarios, título, sidebar,
-   tarjetas, gráficos, conexiones a bases), anuncia cada paso del plan y, si pasan ~15 s sin
-   novedades, dice en qué sigue. Las claves y contraseñas nunca se dicen. Solo suena si «Leer en voz
-   alta» está activo.
-
-**Tu voz clonada en esta PC:** en **Configuración > Audio > Clonación local de tu voz**, tocá
-**Instalar clonación local** (descarga varios GB; antes revisa que no cambie nada de lo que Vision ya
-usa) y subí una muestra de tu voz en WAV o MP3 (10 s como mínimo; ideal 1 a 2 minutos, sin ruido).
-Sin placa de video NVIDIA tarda varios segundos por frase.
-
-### Si algo falla
+### Si algo falla con el LLM
 
 | Qué ves | Qué hacer |
 |---|---|
-| En la página de un servicio (Groq, etc.): "no cf token" o la verificación no aparece | Es la verificación de Cloudflare ("no soy un robot"). Esperá a que termine sola antes de continuar; si no aparece, probá en una ventana de incógnito, en otro navegador o desde otra red (los datos del celular): la red de la empresa o una extensión del navegador pueden bloquearla. |
-| "El dictado por voz no está configurado" | Seguí la guía de dictado de arriba. |
-| "Fish Audio se quedó sin crédito" | Es el crédito de API (aparte del de la plataforma web): cargalo, o usá el modelo gratuito `s2.1-pro-free`. |
-| "El modelo … no aceptó este pedido" | Revisá en "Detalle técnico" el motivo; si se repite, elegí otro modelo en el selector de arriba. |
-| "La cuenta del servicio de inteligencia artificial se quedó sin crédito" | Cargá crédito en ese servicio o armá el salto automático con un proveedor gratuito (Gemini, Groq). |
-| Un proveedor dice "no respondió" en Configuración | Revisá su clave en el `.env`. Si la clave está bien, puede que la red de tu empresa bloquee ese servicio. |
+| «No hay ningún proveedor de IA con clave» | Cargá al menos una clave (A) o la IA local (B). |
+| «No se pudo consultar la lista de modelos de: …» | Revisá esa clave. Si dice algo del proxy, andá a **Configuración > Red** y tocá **Reconectar**. |
+| «<modelo> no admite herramientas» | Ese modelo solo sirve para conversar: elegí otro (en Ollama, `qwen3` o `llama3.1` admiten herramientas). |
+| La IA local tarda mucho en la primera respuesta | El motor carga el modelo en memoria (en la PC de prueba, 37 a 53 s). Las siguientes son más rápidas. Activá la gráfica integrada (paso 4). |
+| La IA local «se olvida» de lo que le pediste | El contexto está en 4.096: subilo (paso 4). |
+| «La cuenta del servicio de inteligencia artificial se quedó sin crédito» | Cargá crédito o armá el salto automático con un gratuito o con la IA local. |
+
+## Dictado y voz
+
+**Dictado** (micrófono, Modo Cerebro y Modo reunión): hace falta un servicio que pase la voz a texto. Con **Groq** (gratis con
+límites): creá una clave en https://console.groq.com y cargá en **Configuración > Conexiones > General**, en «Inteligencia
+artificial»:
+- **Dictado: dirección**: `https://api.groq.com/openai/v1`
+- **Dictado: modelo**: `whisper-large-v3-turbo`
+- **Dictado: clave**: la de Groq
+
+Con OpenAI: dirección `https://api.openai.com/v1` y modelo `whisper-1`.
+
+**Voz de ULTRON**: de fábrica habla con la voz del navegador. En **Configuración > Audio > Motor de voz** podés sumar Fish
+Audio, ElevenLabs o tu voz clonada en esta PC, en una lista de prioridad; al final siempre queda la voz del navegador. Las claves
+(`FISH_API_KEY`, `ELEVENLABS_API_KEY`) van en el `.env` o en la configuración. El **informe técnico hablado** cuenta en voz alta lo
+que ULTRON hace mientras trabaja.
+
+**Modo Cerebro**: conversación continua por voz. Con **Espacio** se habla en turnos (o se mantiene apretado para hablar si hay
+mucho ruido) y con **Esc** se apaga. Se lo llama diciendo «**Ultron**».
+
+## Configuración
+
+Todo está explicado, variable por variable, en [`backend/.env.example`](backend/.env.example), y casi todo se puede cargar desde
+la app, en **Configuración > Conexiones**: queda cifrado y se aplica sin reiniciar.
+
+| Qué | Dónde |
+|---|---|
+| Proveedores de IA y dictado | [Conexión a LLMs](#conexión-a-llms) |
+| Nombre de la empresa | `VISION_COMPANY_NAME` (aparece en la pantalla y en la presentación del asistente) |
+| Proxy corporativo | `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` o **Configuración > Red** (localhost siempre va directo). Si el proxy guardado deja de responder, ULTRON prueba la PAC de Windows y salir directo, y te avisa |
+| Conectores de datos | `ORACLE_*`, `BQ_*`, `SHAREPOINT_*`/`AZURE_*`, `SAP_*`, `CONFLUENCE_*` y sus `ENABLE_*` (todos apagados de fábrica), o conexiones con nombre en `connections.json` (ver `backend/connections.example.json`) |
+| Office (Excel y Word) | apagado de fábrica: se prende en **Configuración > Conexiones** (necesita Office instalado) |
+| Outlook y Teams | apagado de fábrica: hace falta un conector MCP de Microsoft 365. Cargá su dirección en «Outlook y Teams: dirección del conector», prendelo e iniciá sesión |
+
+Las claves nunca se versionan (ver `.gitignore`) ni vuelven a la pantalla.
+
+## Migración desde Vision-Personal
+
+ULTRON guarda todo en `%LOCALAPPDATA%\Ultron` (antes `%LOCALAPPDATA%\Vision-personal`). La primera vez que lo abrís, si la
+carpeta nueva no tiene datos propios:
+- copia el `.env`, las claves, el índice de sesiones, las alarmas y agentes y `connections.json`;
+- no copia el código extraído ni los logs viejos;
+- avisa una vez en el chat qué copió;
+- **no borra ni modifica la carpeta vieja**: la podés borrar cuando confirmes que está todo.
+
+ULTRON usa el puerto 8030, así que puede convivir con otro Vision instalado en la misma PC.
 
 ## Dónde guarda los datos
 
-- Modo desarrollo: `backend\` (`.env`, `keys\`, `logs\`, `data\`, índice de sesiones `vision.db`).
-- Vision.exe: `%LOCALAPPDATA%\Vision-personal\`.
-- `VISION_DATA_DIR` (variable de entorno) cambia esa carpeta, por ejemplo para tener dos
-  instalaciones separadas en la misma PC.
+- Ultron.exe: `%LOCALAPPDATA%\Ultron\` (`.env`, `keys\`, `logs\`, índice `vision.db`, `connections.json`).
+- Modo desarrollo: `backend\`.
+- `VISION_DATA_DIR` (variable de entorno) cambia esa carpeta.
+- El historial de cada sesión vive en la carpeta de proyecto que le asignes (`<carpeta>\db\vision.db`).
+
+## Herramientas disponibles (69 tools)
+
+| Tool | Descripción | Peligrosa (auditada) |
+|---|---|---|
+| `read` | Lee archivos, directorios, PDF, Word, Excel y PowerPoint | no |
+| `write` | Crea o sobrescribe archivos | sí |
+| `edit` | Reemplaza texto en archivos | sí |
+| `glob` | Busca archivos por patrón (sin carpetas de dependencias) | no |
+| `grep` | Busca texto en archivos (con tope de tiempo) | no |
+| `bash` | Ejecuta comandos de shell (pandas, DuckDB, Playwright disponibles) | sí |
+| `webfetch` | Trae el contenido de una URL | no |
+| `todowrite` | Arma y actualiza la lista de tareas visible | no |
+| `question` | Repregunta con opciones cliqueables | no |
+| `skill` | Carga una skill (SKILL.md) bajo demanda | no |
+| `oracle_query` | SQL contra Oracle; lo que modifica datos pide confirmación | no |
+| `bigquery_query` / `bigquery_list_tables` | SQL y listado de BigQuery, con guardas de riesgo y de costo | no |
+| `sharepoint_list_items` / `sharepoint_list_lists` | Lectura de SharePoint | no |
+| `sap_query` | OData genérico contra SAP | no |
+| `graph_search` / `graph_directory_lookup` / `graph_directory_manager` | Búsqueda y directorio en Microsoft Graph | no |
+| `render_chart` | Gráfico con Chart.js (local) | no |
+| `record_decision` | Registra una decisión en `decisions/decisions.md` | no |
+| `exportar_dashboard` | Exporta un tablero como HTML autónomo, validado en un navegador real y sin secretos | no |
+| `confluence_*` (6 tools) | Espacios, búsqueda, árbol de páginas, contenido y adjuntos de Confluence (solo lectura) | no |
+| `office_*` (4 tools) | Excel (lista libros abiertos, lee y escribe rangos) y conversión de documentos por COM | no |
+| `m365_*` (37 tools) | Outlook y Teams por un conector MCP: correo (leer, buscar, borradores; enviar siempre pide confirmación), agenda, chats, canales, OneDrive | no |
+
+Las tools «peligrosas» se ejecutan sin pedir confirmación, pero cada ejecución queda en `logs\audit.log`. Cuando un conector de
+datos devuelve más filas que el umbral (50 de fábrica), ULTRON exporta el resultado completo a un CSV en la carpeta de la sesión
+y deja el enlace en el chat.
 
 ## Tests
 
@@ -158,21 +206,26 @@ Desde `backend\`, con el entorno virtual:
 
 ```bash
 .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.venv\Scripts\python.exe -m pytest -m "not e2e"     # rapido: todo menos el navegador real
-.venv\Scripts\python.exe -m pytest -m e2e           # frontend en un Chromium real
+```
+```bash
+.venv\Scripts\python.exe -m pytest -m "not e2e"
+```
+```bash
+.venv\Scripts\python.exe -m pytest -m e2e
 ```
 
-La batería es 100 % aislada: nunca usa tus credenciales ni sale a internet (el proveedor de IA y el
-dictado son falsos). Los e2e necesitan el Chromium de Playwright
-(`python -m playwright install chromium`). No corras dos baterías e2e a la vez.
+La batería está 100 % aislada: nunca usa tus credenciales ni sale a internet (los proveedores de IA y el dictado son falsos). Los
+e2e necesitan el Chromium de Playwright (`python -m playwright install chromium`); no corras dos baterías e2e a la vez. Antes de
+subir algo, corré también `test_vision_generico.py`: frena cualquier dato de una empresa en particular.
 
 ## Estructura
 
 ```
-backend/app/        API (main.py), loop del modelo (llm/), herramientas (tools/), conectores,
-                    persistencia (SQLite), programador de alarmas y agentes
+backend/app/        API (main.py), loop del modelo y proveedores (llm/), herramientas (tools/), conectores, Microsoft 365 (m365/),
+                    Office (office/), persistencia (SQLite), voz (voice/), alarmas y agentes (scheduler/)
 backend/tests/      unit, integración y e2e
 frontend/           index.html, js/app.js (toda la UI), css/, vendor/ (librerías locales, sin CDN)
-launch_vision.py    lanzador de Vision.exe (solo librería estándar)
+launch_vision.py    lanzador de Ultron.exe (solo librería estándar)
+docs/               guía para crear tools y conexiones
 specs/              especificaciones de cada cambio
 ```

@@ -293,7 +293,7 @@ def _describe_rejected_request(text: str, status: int | None, who: str, who_cap:
     if _has_any(text, _NO_TOOLS):
         return FriendlyError(
             "MODELO-SIN-HERRAMIENTAS",
-            f"{who_cap} no sirve para chatear con Vision: no admite herramientas. "
+            f"{who_cap} no sirve para chatear con ULTRON: no admite herramientas. "
             "Reenviar el mensaje no lo arregla; elegí otro modelo en el selector de arriba.",
             status,
         )
@@ -301,7 +301,7 @@ def _describe_rejected_request(text: str, status: int | None, who: str, who_cap:
         return FriendlyError(
             "MODELO-HISTORIAL",
             f"{who_cap} no aceptó el historial de esta conversación (a veces pasa después de "
-            "usar herramientas). Para destrabarla, cerrá y volvé a abrir Vision: la conversación "
+            "usar herramientas). Para destrabarla, cerrá y volvé a abrir ULTRON: la conversación "
             "se vuelve a cargar ordenada. Mientras tanto podés seguir eligiendo otro modelo "
             "en el selector de arriba.",
             status,
@@ -316,7 +316,7 @@ def _describe_rejected_request(text: str, status: int | None, who: str, who_cap:
     return FriendlyError(
         "MODELO-RECHAZO",
         f"{who_cap} no aceptó este pedido tal como está. Volvé a enviar tu mensaje; si se repite, "
-        "elegí otro modelo en el selector de arriba o cerrá y volvé a abrir Vision.",
+        "elegí otro modelo en el selector de arriba o cerrá y volvé a abrir ULTRON.",
         status,
     )
 
@@ -333,9 +333,9 @@ def describe_model_error(exc: BaseException, model: str | None = None) -> Friend
     if "providernotconfigured" in names:  # spec vision-generico REQ-001 (app/llm/client.py)
         return FriendlyError(
             "MODELO-CONFIGURACION",
-            "Vision todavía no tiene configurado el servicio de inteligencia artificial. "
-            "Avisá a quien administra Vision: tiene que completar el proveedor y la clave en la "
-            "configuración (archivo .env) y volver a abrir Vision.",
+            "ULTRON todavía no tiene configurado el servicio de inteligencia artificial. "
+            "Avisá a quien administra ULTRON: tiene que completar el proveedor y la clave en la "
+            "configuración (archivo .env) y volver a abrir ULTRON.",
             None,
         )
     if _has_any(text, _NO_CREDIT):
@@ -360,7 +360,7 @@ def describe_model_error(exc: BaseException, model: str | None = None) -> Friend
         return FriendlyError(
             "MODELO-CORTE",
             "El proveedor de IA (el servicio de inteligencia artificial de la empresa) cortó la conexión en medio de la respuesta. "
-            "No fue un error de Vision. Volvé a enviar tu mensaje; si pasa seguido, elegí otro modelo en el selector de arriba.",
+            "No fue un error de ULTRON. Volvé a enviar tu mensaje; si pasa seguido, elegí otro modelo en el selector de arriba.",
             status,
         )
     if "proxyerror" in names or _has_any(text, _PROXY):
@@ -368,9 +368,9 @@ def describe_model_error(exc: BaseException, model: str | None = None) -> Friend
         # (Configuracion > Red > Proxy > Reconectar) elige otra viva y la guarda.
         return FriendlyError(
             "MODELO-PROXY",
-            "La salida a internet que usa Vision no responde, por eso no pude llegar al servicio de inteligencia artificial de la empresa. "
+            "La salida a internet que usa ULTRON no responde, por eso no pude llegar al servicio de inteligencia artificial de la empresa. "
             "Revisá que estés conectado a la VPN de tu empresa y tocá «Reconectar» en Configuración > Red > Proxy; "
-            "ahí Vision busca una salida que funcione y la guarda. Después volvé a enviar tu mensaje.",
+            "ahí ULTRON busca una salida que funcione y la guarda. Después volvé a enviar tu mensaje.",
             status,
         )
     if _is_network(names):
@@ -385,7 +385,7 @@ def describe_model_error(exc: BaseException, model: str | None = None) -> Friend
         return FriendlyError(
             "MODELO-SESION",
             "El servicio de inteligencia artificial no aceptó la clave configurada (puede que "
-            "haya vencido o esté mal copiada). Avisá a quien administra Vision para que la revise.",
+            "haya vencido o esté mal copiada). Avisá a quien administra ULTRON para que la revise.",
             status,
         )
     if status == 403:
@@ -432,15 +432,15 @@ def describe_transcription_error(exc: BaseException) -> FriendlyError:
     if "providernotconfigured" in names:  # spec vision-generico REQ-003
         return FriendlyError(
             "VOZ-NO-CONFIGURADA",
-            "El dictado por voz no está configurado en este Vision. Mientras tanto podés escribir "
-            "el mensaje; para activarlo, avisá a quien administra Vision.",
+            "El dictado por voz no está configurado en este ULTRON. Mientras tanto podés escribir "
+            "el mensaje; para activarlo, avisá a quien administra ULTRON.",
             None,
         )
     if status == 401 or "authenticationerror" in names:
         return FriendlyError(
             "VOZ-SESION",
             "No pude pasar tu audio a texto porque el servicio de voz no aceptó la clave "
-            "configurada. Avisá a quien administra Vision; mientras tanto podés escribir el mensaje.",
+            "configurada. Avisá a quien administra ULTRON; mientras tanto podés escribir el mensaje.",
             status,
         )
     if status == 429:
@@ -550,8 +550,8 @@ def describe_internal_error() -> FriendlyError:
     """Falla dentro de Vision (no del modelo) a mitad de un turno de chat."""
     return FriendlyError(
         "VISION-INTERNO",
-        "Vision tuvo un problema interno y no pudo terminar esta respuesta. "
-        "Volvé a enviar tu mensaje; si se repite, cerrá y volvé a abrir Vision.",
+        "ULTRON tuvo un problema interno y no pudo terminar esta respuesta. "
+        "Volvé a enviar tu mensaje; si se repite, cerrá y volvé a abrir ULTRON.",
     )
 
 

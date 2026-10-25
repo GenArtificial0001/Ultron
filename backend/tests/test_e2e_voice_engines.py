@@ -392,7 +392,7 @@ def test_brain_mode_does_not_record_while_a_voice_engine_speaks_and_listens_agai
     app.page.wait_for_timeout(1500)
     assert is_speaking(app) is True
     during = app.page.evaluate("window.__recStarts.filter(t => t >= " + str(spoke_from) + ").length")
-    assert during == 0, f"el Cerebro empezo a grabar {during} vez/veces mientras Vision hablaba (se auto-escucha)"
+    assert during == 0, f"el Cerebro empezo a grabar {during} vez/veces mientras ULTRON hablaba (se auto-escucha)"
 
     # Cuando termina de hablar (y pasa el enfriamiento de 900 ms), vuelve a escuchar el tono del micro falso.
     app.page.wait_for_function("(async () => !(await import('/js/tts.js')).isSpeaking())()", timeout=60_000)
@@ -435,5 +435,5 @@ def test_a_phrase_being_recorded_is_closed_as_soon_as_vision_starts_speaking(app
 
     app.page.wait_for_function("window.__recStops.length >= 1", timeout=3_000)
     stopped_at = app.page.evaluate("window.__recStops[0]")
-    assert stopped_at - spoke_at < 700, f"la frase siguio grabando {stopped_at - spoke_at:.0f} ms con Vision hablando"
+    assert stopped_at - spoke_at < 700, f"la frase siguio grabando {stopped_at - spoke_at:.0f} ms con ULTRON hablando"
     app.page.keyboard.press("Escape")

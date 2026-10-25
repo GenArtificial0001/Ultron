@@ -71,23 +71,23 @@ class TestGate:
         assert turns.calls == []
 
     def test_with_a_mention_the_model_answers(self, client, turns):
-        r = analyze(client, "Vision, que opinas del stock")
+        r = analyze(client, "ULTRON, que opinas del stock")
 
         assert r.json() == {"opinion": "Mi opinion."}
         assert len(turns.calls) == 1
 
     def test_a_second_mention_right_after_is_throttled(self, client, turns):
-        analyze(client, "Vision uno")
+        analyze(client, "ULTRON uno")
 
-        r = analyze(client, "Vision dos")
+        r = analyze(client, "ULTRON dos")
 
         assert r.json() == {"opinion": None} and len(turns.calls) == 1  # una rafaga no dispara dos respuestas
 
     def test_the_gate_state_is_per_session(self, client, turns):
-        analyze(client, "Vision uno")
+        analyze(client, "ULTRON uno")
         main._MEETING_GATE_STATES.pop(SID, None)  # otra reunion / otra sesion: arranca sin throttle
 
-        assert analyze(client, "Vision dos").json()["opinion"] == "Mi opinion."
+        assert analyze(client, "ULTRON dos").json()["opinion"] == "Mi opinion."
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +100,7 @@ class TestForce:
         assert r.json() == {"opinion": "Mi opinion."}
 
     def test_a_manual_click_skips_the_throttle(self, client, turns):
-        analyze(client, "Vision uno")  # arma el throttle
+        analyze(client, "ULTRON uno")  # arma el throttle
 
         assert analyze(client, "algo", force=True).json()["opinion"] == "Mi opinion."  # el click manual lo salta
 
@@ -109,7 +109,7 @@ class TestForce:
         dispararia una segunda respuesta en rafaga."""
         analyze(client, "algo sin mencion", force=True)
 
-        assert analyze(client, "Vision tres").json() == {"opinion": None}
+        assert analyze(client, "ULTRON tres").json() == {"opinion": None}
         assert len(turns.calls) == 1
 
     def test_a_manual_click_with_nothing_transcribed_answers_cheaply_without_the_model(self, client, turns):
@@ -131,7 +131,7 @@ class TestBusySession:
     def test_it_does_not_run_over_a_text_turn_that_is_in_progress(self, client, turns):
         get_session_store().get_or_create(SID).current_task = FakeTask()
 
-        r = analyze(client, "Vision, opina")
+        r = analyze(client, "ULTRON, opina")
 
         assert r.json() == {"opinion": None} and turns.calls == []  # run_turn no es reentrante sobre el mismo historial
 
@@ -139,10 +139,10 @@ class TestBusySession:
         """Descartar por sesion ocupada NO deja pasar una segunda mencion en rafaga apenas se libere: el slot del throttle ya se uso."""
         session = get_session_store().get_or_create(SID)
         session.current_task = FakeTask()
-        analyze(client, "Vision uno")
+        analyze(client, "ULTRON uno")
         session.current_task = None
 
-        assert analyze(client, "Vision dos").json() == {"opinion": None}
+        assert analyze(client, "ULTRON dos").json() == {"opinion": None}
 
 
 # ---------------------------------------------------------------------------
@@ -150,19 +150,19 @@ class TestBusySession:
 # ---------------------------------------------------------------------------
 class TestWhatTheModelIsAsked:
     def test_with_a_transcript_it_gets_all_of_it_and_the_last_phrase_highlighted(self, client, turns):
-        analyze(client, "Vision, que dijo Juan", full="Juan dijo que el presupuesto sube un diez por ciento")
+        analyze(client, "ULTRON, que dijo Juan", full="Juan dijo que el presupuesto sube un diez por ciento")
 
         _, message = turns.calls[0]
         assert "Transcripción completa de audio en vivo" in message
         assert "Juan dijo que el presupuesto sube un diez por ciento" in message
-        assert message.rstrip().endswith("Vision, que dijo Juan")  # la ultima frase va AL FINAL, resaltada
+        assert message.rstrip().endswith("ULTRON, que dijo Juan")  # la ultima frase va AL FINAL, resaltada
         assert message.index("presupuesto") < message.index("Última frase transcrita")
 
     def test_without_a_transcript_only_the_fragment_is_sent(self, client, turns):
-        analyze(client, "Vision, hola")
+        analyze(client, "ULTRON, hola")
 
         _, message = turns.calls[0]
-        assert "[Transcripción de audio en vivo, Modo reunión] Vision, hola" in message
+        assert "[Transcripción de audio en vivo, Modo reunión] ULTRON, hola" in message
         assert "Transcripción completa" not in message
 
     @pytest.mark.parametrize(
@@ -175,25 +175,25 @@ class TestWhatTheModelIsAsked:
         ],
     )
     def test_the_four_style_and_scope_instructions_are_always_included(self, client, turns, needle):
-        analyze(client, "Vision, opina", full="algo de contexto")
+        analyze(client, "ULTRON, opina", full="algo de contexto")
 
         assert needle in turns.calls[0][1]
 
     @pytest.mark.parametrize("needle", ["VOZ ALTA", "reconocimiento de voz automático", "nunca digas que no podés acceder", "Modo Cerebro"])
     def test_the_same_four_instructions_are_included_when_there_is_no_transcript_yet(self, client, turns, needle):
         """El primer fragmento de una reunion llega SIN transcripcion acumulada: usa otro armado del mensaje y tambien tiene que llevar las cuatro instrucciones."""
-        analyze(client, "Vision, hola", full="")
+        analyze(client, "ULTRON, hola", full="")
 
         assert needle in turns.calls[0][1]
 
     def test_the_instructions_come_before_the_transcript(self, client, turns):
-        analyze(client, "Vision, opina", full="ESTO ES LA TRANSCRIPCION")
+        analyze(client, "ULTRON, opina", full="ESTO ES LA TRANSCRIPCION")
 
         message = turns.calls[0][1]
         assert message.index("Instrucción de estilo") < message.index("ESTO ES LA TRANSCRIPCION")
 
     def test_the_session_id_reaches_the_turn(self, client, turns):
-        analyze(client, "Vision, hola")
+        analyze(client, "ULTRON, hola")
 
         assert turns.calls[0][0] == SID
 
@@ -209,18 +209,18 @@ class TestResult:
             {"type": "text-delta", "data": {"text": "mundo.  "}},
         ]
 
-        assert analyze(client, "Vision").json() == {"opinion": "Hola, mundo."}
+        assert analyze(client, "ULTRON").json() == {"opinion": "Hola, mundo."}
 
     def test_an_empty_answer_is_none_not_an_empty_string(self, client, turns):
         turns.events = [{"type": "text-delta", "data": {"text": "   "}}, {"type": "done", "data": {}}]
 
-        assert analyze(client, "Vision").json() == {"opinion": None}
+        assert analyze(client, "ULTRON").json() == {"opinion": None}
 
     def test_a_model_error_event_reaches_the_user_instead_of_looking_like_no_opinion(self, client, turns):
         """Bug real: un 429 por limite de gasto se tragaba en silencio y era indistinguible de 'el gate no aprobo'."""
         turns.events = [{"type": "error", "data": {"message": "El modelo alcanzó su límite de gasto."}}]
 
-        r = analyze(client, "Vision, opina")
+        r = analyze(client, "ULTRON, opina")
 
         assert r.status_code == 502
         assert "No pude responderte en la reunión" in r.json()["detail"] and "límite de gasto" in r.json()["detail"]
@@ -228,14 +228,14 @@ class TestResult:
     def test_an_error_event_without_a_message_still_gives_a_readable_error(self, client, turns):
         turns.events = [{"type": "error", "data": {}}]
 
-        r = analyze(client, "Vision")
+        r = analyze(client, "ULTRON")
 
         assert r.status_code == 502 and "Error desconocido del LLM" in r.json()["detail"]
 
     def test_a_crash_inside_the_turn_gives_a_plain_message_and_keeps_the_meeting_listening(self, client, turns):
         turns.raises = RuntimeError("boom interno con detalle tecnico")
 
-        r = analyze(client, "Vision")
+        r = analyze(client, "ULTRON")
 
         assert r.status_code == 502
         assert "La reunión sigue escuchando" in r.json()["detail"]
@@ -247,10 +247,10 @@ class TestResult:
             {"type": "error", "data": {"message": "se cortó"}},
         ]
 
-        assert analyze(client, "Vision").status_code == 502
+        assert analyze(client, "ULTRON").status_code == 502
 
 
 def test_the_gate_state_type_is_what_the_endpoint_keeps_per_session(client, turns):
-    analyze(client, "Vision")
+    analyze(client, "ULTRON")
 
     assert isinstance(main._MEETING_GATE_STATES[SID], MeetingGateState)

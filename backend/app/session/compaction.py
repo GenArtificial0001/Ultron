@@ -90,7 +90,7 @@ def _turns_to_transcript(turns: list[list[dict[str, Any]]]) -> str:
                 text = content if isinstance(content, str) else "(mensaje con imagenes)"
                 lines.append(f"Usuario: {text}")
             elif role == "assistant" and content:
-                lines.append(f"Vision: {content}")
+                lines.append(f"ULTRON: {content}")
             elif role == "tool":
                 lines.append(f"[resultado de herramienta] {str(content or '')[:200]}")
     return "\n".join(lines)

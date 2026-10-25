@@ -174,23 +174,23 @@ configureVoiceBackend({
 // sin detalle, una respuesta ilegible). El detalle técnico va a la consola.
 // -------------------------------------------------------------------------
 const OFFLINE_ERROR_MESSAGE =
-  "No hay conexión con Vision. Puede que se haya cerrado o se esté reiniciando: esperá unos segundos y volvé a intentar. Si no vuelve, abrí Vision de nuevo.";
+  "No hay conexión con ULTRON. Puede que se haya cerrado o se esté reiniciando: esperá unos segundos y volvé a intentar. Si no vuelve, abrí ULTRON de nuevo.";
 const UNEXPECTED_ERROR_MESSAGE =
-  "Ocurrió un problema inesperado. Volvé a intentar; si se repite, cerrá y volvé a abrir Vision.";
+  "Ocurrió un problema inesperado. Volvé a intentar; si se repite, cerrá y volvé a abrir ULTRON.";
 
 const HTTP_STATUS_MESSAGES = {
-  400: "Vision no pudo procesar el pedido: falta un dato o alguno no es válido. Revisalo y volvé a intentar.",
-  401: "Este navegador no tiene la clave de acceso de Vision, o no es la correcta. Cargala en Configuración > Red, en «Token de acceso».",
+  400: "ULTRON no pudo procesar el pedido: falta un dato o alguno no es válido. Revisalo y volvé a intentar.",
+  401: "Este navegador no tiene la clave de acceso de ULTRON, o no es la correcta. Cargala en Configuración > Red, en «Token de acceso».",
   403: "No tenés permiso para hacer esto. Si lo necesitás, avisá a soporte.",
   404: "No se encontró lo que buscabas: puede que se haya borrado o movido. Recargá la página y volvé a intentar.",
   408: "La operación tardó demasiado. Volvé a intentar.",
-  409: "Vision está ocupada con otra tarea en esta conversación. Esperá a que termine y volvé a intentar.",
+  409: "ULTRON está ocupada con otra tarea en esta conversación. Esperá a que termine y volvé a intentar.",
   413: "Lo que intentaste enviar es demasiado grande. Probá con un archivo o una imagen más chica.",
   422: "Falta un dato o alguno no tiene el formato esperado. Revisalo y volvé a intentar.",
   429: "Hay demasiados pedidos seguidos. Esperá unos segundos y volvé a intentar.",
-  500: "Vision tuvo un problema interno. Volvé a intentar; si se repite, cerrá y volvé a abrir Vision.",
+  500: "ULTRON tuvo un problema interno. Volvé a intentar; si se repite, cerrá y volvé a abrir ULTRON.",
   502: "Un servicio externo (la inteligencia artificial o una base de datos) no respondió bien. Volvé a intentar en unos minutos.",
-  503: "Vision o un servicio externo no está disponible en este momento. Volvé a intentar en unos minutos.",
+  503: "ULTRON o un servicio externo no está disponible en este momento. Volvé a intentar en unos minutos.",
   504: "Un servicio externo tardó demasiado en responder. Volvé a intentar en unos minutos.",
 };
 
@@ -245,7 +245,7 @@ function friendlyErrorMessage(err) {
   // en la consola para diagnosticarlo.
   console.error("Error inesperado en la interfaz:", err);
   if (err instanceof SyntaxError) {
-    return "Vision devolvió una respuesta que no se pudo leer. Volvé a intentar; si se repite, cerrá y volvé a abrir Vision.";
+    return "ULTRON devolvió una respuesta que no se pudo leer. Volvé a intentar; si se repite, cerrá y volvé a abrir ULTRON.";
   }
   return UNEXPECTED_ERROR_MESSAGE;
 }
@@ -262,7 +262,7 @@ function technicalErrorLine(err) {
 function describeMicError(err) {
   const name = err && err.name;
   if (name === "NotAllowedError" || name === "SecurityError") {
-    return "Vision no tiene permiso para usar el micrófono. Habilitalo desde el candado de la barra de direcciones y volvé a intentar.";
+    return "ULTRON no tiene permiso para usar el micrófono. Habilitalo desde el candado de la barra de direcciones y volvé a intentar.";
   }
   if (name === "NotFoundError" || name === "OverconstrainedError") {
     return "No hay ningún micrófono conectado. Conectá uno y volvé a intentar.";
@@ -898,8 +898,8 @@ function applyCompanyName(name) {
     if (el) el.textContent = subtitle;
   }
   const footer = document.getElementById("footer-company");
-  if (footer) footer.textContent = company || "Vision";
-  document.title = company ? `Vision · ${company}` : "Vision · Asistente Inteligente";
+  if (footer) footer.textContent = company || "ULTRON";
+  document.title = company ? `ULTRON · ${company}` : "ULTRON · Asistente Inteligente";
 }
 
 async function checkBackendStatus() {
@@ -931,7 +931,11 @@ async function checkBackendStatus() {
     // timestamps de archivos a mano.
     if (devVersionEl && data.version) devVersionEl.textContent = `v${data.version}`;
     applyCompanyName(data.company_name);
-    setConnStatus("online", "Vision en línea");
+    // REQ-009 (spec portar-desde-origen): la primera vez, ULTRON avisa que trajo los datos de Vision-Personal (el backend lo manda una sola vez).
+    if (data.data_migration && data.data_migration.message) {
+      appendMessage("system-note", data.data_migration.message, { persist: false });
+    }
+    setConnStatus("online", "ULTRON en línea");
   } catch (err) {
     setConnStatus("error", "Sin conexión al backend");
   }
@@ -944,7 +948,7 @@ async function checkBackendStatus() {
 const CONN_BEAT_MS = 3000;
 const CONN_BEAT_TIMEOUT_MS = 2500;
 const CONN_BEAT_FAILS_TO_RED = 2;
-const CONN_LOST_TEXT = "Sin conexión con Vision. ¿Cerraste la ventana del servidor?";
+const CONN_LOST_TEXT = "Sin conexión con ULTRON. ¿Cerraste la ventana del servidor?";
 let connBeatInFlight = false;
 let connBeatFails = 0;
 
@@ -2173,7 +2177,7 @@ function _buildCfNode(node, depth) {
   title.type = "button";
   title.className = "cf-chat-title";
   title.textContent = node.title || "(sin título)";
-  title.title = node.subtitle ? `Espacio ${node.subtitle}: pedirle a Vision que abra esta página` : "Pedirle a Vision que abra esta página";
+  title.title = node.subtitle ? `Espacio ${node.subtitle}: pedirle a ULTRON que abra esta página` : "Pedirle a ULTRON que abra esta página";
   title.addEventListener("click", () => {
     if (state.sending > 0) return; // Vision esta ocupada: el clic no encola nada a escondidas
     sendMessage(`Abrí la página de Confluence «${node.title}» (id ${node.id}) y mostrame su contenido.`);
@@ -2787,7 +2791,7 @@ async function sendMessage(text, { messageId = null, images = null, voiceConfirm
   // REQ-018 (spec fix-detener-y-progreso-visible): cualquier mensaje de esta sesion (una opcion o texto libre) contesta su pregunta
   // pendiente: la marca de la lista se va y no vuelve a aparecer al regresar.
   resolvePendingQuestion(state.sessionId);
-  if (!wasAlreadyBusy) setConnStatus("busy", "Vision está trabajando…");
+  if (!wasAlreadyBusy) setConnStatus("busy", "ULTRON está trabajando…");
 
   const msgId = messageId || crypto.randomUUID();
   appendMessage("user", text, { messageId: msgId, images, attachments: sentFiles });
@@ -2853,7 +2857,7 @@ try {
       technical: technicalErrorLine(err),
       errorKind: offline ? "offline" : "other",
     });
-    if (offline) setConnStatus("error", "Sin conexión con Vision");
+    if (offline) setConnStatus("error", "Sin conexión con ULTRON");
   } finally {
     state.sending -= 1;
     if (state.sending <= 0) {
@@ -2861,7 +2865,7 @@ try {
       hideOptimisticThinking(); // red de seguridad: nunca debe sobrevivir al fin del turno
       cancelThinkingTip(); // idem -- el tip tampoco debe sobrevivir al turno
       cancelSlowModelNotice(); // ni el aviso de modelo lento
-      if (connStatusEl.dataset.state === "busy") setConnStatus("online", "Vision en línea");
+      if (connStatusEl.dataset.state === "busy") setConnStatus("online", "ULTRON en línea");
       setSendButtonState("idle");
       // Red de seguridad: si el stream murio sin emitir 'done'/'error'
       // (caida de red, backend reiniciado a mitad de turno), el
@@ -2922,16 +2926,16 @@ const NOTIFY_ICON_URL = new URL("./assets/favicon-180.png", window.location.href
 const NOTIFY_HOW_TO_ALLOW =
   "Para habilitarlas en Edge: tocá el candado de la barra de direcciones > Permisos del sitio > Notificaciones > Permitir, y recargá la página.";
 const NOTIFY_DENIED_TEXT =
-  `Vision no puede avisarte en Windows cuando termina: el navegador tiene bloqueadas sus notificaciones. ${NOTIFY_HOW_TO_ALLOW} ` +
+  `ULTRON no puede avisarte en Windows cuando termina: el navegador tiene bloqueadas sus notificaciones. ${NOTIFY_HOW_TO_ALLOW} ` +
   "Si no querés el aviso, apagá «Avisarme cuando termine» en Configuración > Audio.";
 const NOTIFY_FAILED_TEXT =
-  "Windows no mostró el aviso de que Vision terminó: el navegador no lo permitió. Podés revisarlo en Configuración > Audio > «Avisarme cuando termine».";
+  "Windows no mostró el aviso de que ULTRON terminó: el navegador no lo permitió. Podés revisarlo en Configuración > Audio > «Avisarme cuando termine».";
 // REQ-007: lo que dice Configuración debajo del interruptor segun el permiso del navegador.
 const NOTIFY_PERMISSION_STATUS = {
   granted: "El navegador ya dio permiso: Windows muestra el aviso abajo a la derecha.",
   default: "La primera vez el navegador te va a pedir permiso para mostrar notificaciones: elegí «Permitir».",
-  denied: `El navegador tiene bloqueadas las notificaciones de Vision. ${NOTIFY_HOW_TO_ALLOW}`,
-  unsupported: "Este navegador no puede mostrar avisos de Windows. Vision funciona igual, sin el aviso.",
+  denied: `El navegador tiene bloqueadas las notificaciones de ULTRON. ${NOTIFY_HOW_TO_ALLOW}`,
+  unsupported: "Este navegador no puede mostrar avisos de Windows. ULTRON funciona igual, sin el aviso.",
 };
 
 // REQ-001: sessionId -> { turnId, todos }: la ULTIMA lista de tareas que llego de un turno de esa sesion. Se recuerda aunque la sesion no
@@ -2983,7 +2987,7 @@ function sessionNameForNotice(sessionId) {
   const saved = loadSessionsIndex()[sessionId]?.name;
   const firstUser = sessionId === state.sessionId ? chatHistory.find((m) => m.role === "user" && m.text) : null;
   const name = String(saved || (firstUser ? firstUser.text.slice(0, 40) : "") || "").replace(/\s+/g, " ").trim();
-  return name || "Vision";
+  return name || "ULTRON";
 }
 
 function clockForNotice(date) {
@@ -3083,7 +3087,7 @@ function showFinishedNotice(sessionId, tag, title, body) {
   try {
     notice = new window.Notification(title, { body, tag, requireInteraction: true, icon: NOTIFY_ICON_URL });
   } catch (err) {
-    console.warn("Windows no mostró el aviso de que Vision terminó:", err);
+    console.warn("Windows no mostró el aviso de que ULTRON terminó:", err);
     if (!_notifyFailureNoticeShown) {
       _notifyFailureNoticeShown = true;
       showNotifyNotice(NOTIFY_FAILED_TEXT);
@@ -4199,7 +4203,7 @@ function uploadAttachment(entry, file) {
           entry.meta = JSON.parse(xhr.responseText);
         } catch {
           entry.state = "error";
-          entry.error = "La respuesta de Vision no se entendió. Probá de nuevo.";
+          entry.error = "La respuesta de ULTRON no se entendió. Probá de nuevo.";
           resolve(false);
           return;
         }
@@ -4223,7 +4227,7 @@ function uploadAttachment(entry, file) {
     xhr.onerror = () => {
       entry.xhr = null;
       entry.state = "error";
-      entry.error = "Se cortó la conexión con Vision. Probá de nuevo.";
+      entry.error = "Se cortó la conexión con ULTRON. Probá de nuevo.";
       resolve(false);
     };
     xhr.onabort = () => {
@@ -5291,7 +5295,7 @@ async function askAboutHistoryOnFolderChange(sessionId, newPath) {
       ` Los ${preview.attachments} archivo${preview.attachments === 1 ? "" : "s"} adjunto${preview.attachments === 1 ? "" : "s"} no se copian: ` +
       `sus mensajes sí, y en la carpeta nueva se verán como «archivo no encontrado».`;
   }
-  message += ` Si lo dejás donde está, después de reiniciar Vision esta sesión no recordará lo anterior.`;
+  message += ` Si lo dejás donde está, después de reiniciar ULTRON esta sesión no recordará lo anterior.`;
   const answer = await showConfirmModal({
     title: "Cambiar la carpeta de la sesión",
     message,
@@ -6032,12 +6036,12 @@ clearMessagesDom();
     if (statusData.busy && state.sending === 0) {
       state.sending += 1;
       try {
-        setConnStatus("busy", "Vision sigue pensando en esta sesión…");
+        setConnStatus("busy", "ULTRON sigue pensando en esta sesión…");
         resetToolRow();
         const resp = await apiFetch(`${API_BASE}/api/chat/stream/${sessionId}`);
         // Revision F2: el stream es de ESTA sesion aunque el usuario cambie mientras llega (sin el tercer argumento quedaba de la activa).
         await renderIncomingStream(resp, statusData.active_turn_id, sessionId);
-        if (connStatusEl.dataset.state === "busy") setConnStatus("online", "Vision en línea");
+        if (connStatusEl.dataset.state === "busy") setConnStatus("online", "ULTRON en línea");
         touchCurrentSessionInIndex(sessionId);
       } finally {
         state.sending -= 1;
@@ -6860,7 +6864,7 @@ async function noticeTranscriptionProblem(modeLabel, err = null, resp = null) {
   _lastTranscriptionNoticeAt = now;
   let text = `${modeLabel}: no estoy pudiendo pasar el audio a texto, así que puede que me pierda partes de lo que se dice. Sigo intentando; si continúa, apagá y volvé a prender el modo.`;
   if (isOfflineError(err)) {
-    text = `${modeLabel}: perdí la conexión con Vision y no puedo pasar el audio a texto. ${OFFLINE_ERROR_MESSAGE}`;
+    text = `${modeLabel}: perdí la conexión con ULTRON y no puedo pasar el audio a texto. ${OFFLINE_ERROR_MESSAGE}`;
   } else if (resp) {
     text = `${modeLabel}: ${(await httpErrorFromResponse(resp)).message}`;
   }
@@ -7803,7 +7807,7 @@ async function processMeetingFragment(blob) {
   // el chat"). El regex de deteccion se mantiene SOLO para decidir el
   // feedback auditivo/barge-in inmediato (mismo `_ASSISTANT_MENTION_RE`
   // del backend, ver meeting_gate.py) -- ya no arma HTML resaltado.
-  const activatorDetected = /\b(jarvis|visi[oó]n)\b/i.test(fragmentText);
+  const activatorDetected = /\b(jarvis|ultr[oó]n)\b/i.test(fragmentText); // REQ-010 (portar-desde-origen): «Ultron» o «Jarvis»
   // Pedido explicito del usuario: sonido activador estilo Alexa/Google
   // Assistant apenas se detecta la mencion -- feedback AUDITIVO inmediato,
   // independiente de si el TTS de la respuesta esta activado o no (este
@@ -7880,7 +7884,7 @@ async function analyzeManualClick() {
     // absoluto": si por cualquier motivo el listener se dispara con el
     // modo reunion ya cerrado (ej. un doble-click justo al salir), antes
     // esto retornaba sin ningun rastro. Ahora al menos queda logueado.
-    console.warn("[Vision] click en el ojo ignorado: meetingModeActive es false");
+    console.warn("[ULTRON] click en el ojo ignorado: meetingModeActive es false");
     return;
   }
   // Mismo sonido/feedback inmediato que el activador por voz -- confirma
@@ -7924,7 +7928,7 @@ async function analyzeManualClick() {
       // pasó nada".
       appendMessage(
         "system-note",
-        "Vision no pudo responder ahora (¿hay otro turno en curso?)",
+        "ULTRON no pudo responder ahora (¿hay otro turno en curso?)",
         { persist: false }
       );
     }
@@ -7975,7 +7979,7 @@ async function startMeetingMode({ source = "mic", systemStream = null } = {}) {
     appendMessage(
       "system-note",
       isMicPermissionError(err)
-        ? "Modo reunión: Vision no tiene permiso para usar el micrófono. Habilitalo desde el candado de la barra de direcciones; la reunión queda abierta."
+        ? "Modo reunión: ULTRON no tiene permiso para usar el micrófono. Habilitalo desde el candado de la barra de direcciones; la reunión queda abierta."
         : "Modo reunión: no se pudo acceder al micrófono. La reunión queda abierta y empieza a escuchar apenas conectes uno.",
       { persist: false },
     );
@@ -8010,7 +8014,7 @@ async function startMeetingWithSystemAudio(source, systemStream) {
       appendMessage(
         "system-note",
         isMicPermissionError(err)
-          ? "Modo reunión: Vision no tiene permiso para usar el micrófono; escucha solo el audio de la PC. Habilitalo desde el candado de la barra de direcciones."
+          ? "Modo reunión: ULTRON no tiene permiso para usar el micrófono; escucha solo el audio de la PC. Habilitalo desde el candado de la barra de direcciones."
           : "Modo reunión: no se pudo acceder al micrófono; escucha solo el audio de la PC y suma tu voz apenas conectes uno.",
         { persist: false },
       );
@@ -8500,7 +8504,7 @@ function renderBrainBanner(state) {
 const BRAIN_BANNER_LEAD = {
   listening: "Modo Cerebro: te estoy escuchando.",
   processing: "Modo Cerebro: procesando…",
-  speaking: "Modo Cerebro: Vision está respondiendo.",
+  speaking: "Modo Cerebro: ULTRON está respondiendo.",
 };
 const BRAIN_BANNER_SPACE = {
   listening: " para enviar lo que dijiste",
@@ -8513,7 +8517,7 @@ const BRAIN_BANNER_PUSH = {
   paused: ["Modo Cerebro: en pausa, no te escucho.", "Mantené", " para hablar"],
   listening: ["Modo Cerebro: te estoy escuchando.", "Soltá", " para enviar lo que dijiste"],
   processing: ["Modo Cerebro: procesando…", "Mantené", " para seguir hablando"],
-  speaking: ["Modo Cerebro: Vision está respondiendo.", "Mantené", " para interrumpir y hablar"],
+  speaking: ["Modo Cerebro: ULTRON está respondiendo.", "Mantené", " para interrumpir y hablar"],
 };
 let brainBannerHintUntil = 0; // aviso breve (2 s) cuando se presiona Espacio sin haber dicho nada: no envia un mensaje vacio
 
@@ -8758,7 +8762,7 @@ async function transcribeBrainUtterance(blob) {
 
   // REQ-005: auto-envio desactivado -- se necesita decir "Vision"
   // (case-insensitive) para forzar el envio de lo dicho hasta el momento.
-  if (/\bvisi[oó]n\b/i.test(fragmentText)) {
+  if (/\bultr[oó]n\b/i.test(fragmentText)) { // REQ-010 (portar-desde-origen): ULTRON se llama «Ultron»
     sendBrainIntervention();
   }
 }
@@ -8815,7 +8819,7 @@ async function startBrainMode({ notifyMicError = true } = {}) {
       appendMessage(
         "system-note",
         isMicPermissionError(err)
-          ? "Modo Cerebro: Vision no tiene permiso para usar el micrófono. Habilitalo desde el candado de la barra de direcciones; el modo sigue encendido."
+          ? "Modo Cerebro: ULTRON no tiene permiso para usar el micrófono. Habilitalo desde el candado de la barra de direcciones; el modo sigue encendido."
           : "Modo Cerebro: no se pudo acceder al micrófono. Sigue encendido y empieza a escuchar apenas conectes uno.",
         { persist: false },
       );
@@ -9472,7 +9476,7 @@ if (cfgSttLanguageSelectEl) {
 const MIC_DEVICE_KEY = "vision.mic.deviceId";
 const MIC_LABEL_KEY = "vision.mic.label";
 const MIC_DISCONNECTED_STATUS =
-  "El micrófono elegido no está conectado. Vision usa el predeterminado y vuelve al elegido apenas lo conectes.";
+  "El micrófono elegido no está conectado. ULTRON usa el predeterminado y vuelve al elegido apenas lo conectes.";
 // true cuando el micrófono guardado no está conectado y se abrió el
 // predeterminado en su lugar -- lo lee el aviso "una sola vez" de abajo.
 let _micUsingFallback = false;
@@ -9562,7 +9566,7 @@ function noticeMicFallbackOnce() {
   _micFallbackNoticeShown = true;
   appendMessage(
     "system-note",
-    "El micrófono elegido en Configuración > Audio no está conectado: Vision escucha por el predeterminado hasta que lo vuelvas a conectar.",
+    "El micrófono elegido en Configuración > Audio no está conectado: ULTRON escucha por el predeterminado hasta que lo vuelvas a conectar.",
     { persist: false },
   );
 }
@@ -10123,7 +10127,7 @@ cfgVoiceAddEl.addEventListener("click", async () => {
     const accepted = await showConfirmModal({
       title: `Usar ${engine.label}`,
       message:
-        `Para hablar con ${engine.label}, Vision le envía el texto que lee en voz alta: las respuestas, ` +
+        `Para hablar con ${engine.label}, ULTRON le envía el texto que lee en voz alta: las respuestas, ` +
         "la narración de progreso, el Modo Cerebro y el informe técnico (comandos, nombres de archivos y " +
         `de tablas; las claves nunca). ${engine.label} es un servicio externo; no lo actives si ese texto ` +
         "puede incluir datos que no deben salir de tu empresa. ¿Confirmás?",
@@ -10137,7 +10141,7 @@ cfgVoiceAddEl.addEventListener("click", async () => {
     await showConfirmModal({
       title: "Clonación local",
       message:
-        "En una PC sin placa de video NVIDIA, tu voz clonada tarda varios segundos por frase: Vision va a " +
+        "En una PC sin placa de video NVIDIA, tu voz clonada tarda varios segundos por frase: ULTRON va a " +
         "tardar en empezar a hablar. Si querés respuestas rápidas, ponela después de una voz en la nube.",
       acceptLabel: "Entendido",
       hideCancel: true,
@@ -10258,7 +10262,7 @@ cfgVoiceLocalInstallEl.addEventListener("click", async () => {
     title: "Instalar la clonación local",
     message:
       "Se descargan varios GB (PyTorch y el modelo de voz) y puede tardar bastante. Antes reviso que la " +
-      "instalación no cambie nada de lo que Vision ya usa: si cambiaría algo, no instalo nada y te explico " +
+      "instalación no cambie nada de lo que ULTRON ya usa: si cambiaría algo, no instalo nada y te explico " +
       "por qué. ¿Seguimos?",
     acceptLabel: "Instalar",
   });
@@ -12889,7 +12893,7 @@ function renderProxySnapshot(snap) {
   cfgProxyInuseEl.textContent = snap.in_use ? proxyShortName(snap.in_use) : "Sin proxy (conexión directa o la que elija el sistema)";
   cfgProxySavedEl.textContent = snap.saved ? proxyShortName(snap.saved) : "Ninguna";
   // Distintas A PROPOSITO: Vision salio directo por ahora y conserva lo guardado por si en otra red sí sirve (no es un error)
-  if (snap.kept_saved) cfgProxySavedEl.textContent += " (se conserva: ahora no responde y Vision usa otra salida)";
+  if (snap.kept_saved) cfgProxySavedEl.textContent += " (se conserva: ahora no responde y ULTRON usa otra salida)";
   const rows = (snap.candidates || []).map((c) => {
     const row = document.createElement("div");
     row.className = "proxy-row";
@@ -12960,9 +12964,9 @@ cfgProxySaveEl.addEventListener("click", () =>
     if (!out.applied) {
       setProxyStatus("Esa dirección no responde, así que no se cambió nada. Revisá que estés conectado a la VPN de tu empresa y probá de nuevo.", "error");
     } else if (!out.saved) {
-      setProxyStatus("Listo. Vision ya usa esa salida, pero no quedó guardada: primero importá tu configuración en Conexiones.", "ok");
+      setProxyStatus("Listo. ULTRON ya usa esa salida, pero no quedó guardada: primero importá tu configuración en Conexiones.", "ok");
     } else {
-      setProxyStatus("Listo. Vision usa esa salida y la dejó guardada.", "ok");
+      setProxyStatus("Listo. ULTRON usa esa salida y la dejó guardada.", "ok");
     }
   }),
 );
@@ -14357,7 +14361,7 @@ commandModalBodyEl.appendChild(p);
   autoChk.checked = _loopAutoPref; // arranca con la preferencia del panel de accesos rapidos
   autoWrap.appendChild(autoChk);
   autoWrap.appendChild(
-    document.createTextNode(" Modo auto (Vision decide las opciones recomendadas, sin detenerse)")
+    document.createTextNode(" Modo auto (ULTRON decide las opciones recomendadas, sin detenerse)")
   );
   commandModalBodyEl.appendChild(autoWrap);
 
@@ -14668,12 +14672,12 @@ initSplashScreen();
     if (statusData.busy && state.sending === 0) {
       state.sending += 1;
       try {
-        setConnStatus("busy", "Vision sigue pensando en esta sesión…");
+        setConnStatus("busy", "ULTRON sigue pensando en esta sesión…");
         const resp = await apiFetch(`${API_BASE}/api/chat/stream/${loadSessionId}`);
         // Revision F2: el stream es de la sesion de la carga aunque el usuario cambie mientras llega (sin el tercer argumento quedaba
         // atribuido a la sesion activa de ese momento).
         await renderIncomingStream(resp, statusData.active_turn_id, loadSessionId);
-        if (connStatusEl.dataset.state === "busy") setConnStatus("online", "Vision en línea");
+        if (connStatusEl.dataset.state === "busy") setConnStatus("online", "ULTRON en línea");
         touchCurrentSessionInIndex(loadSessionId);
       } finally {
         state.sending -= 1;
@@ -14688,7 +14692,7 @@ initSplashScreen();
     if (statusData.exists === false && chatHistory.length > 0 && stillOnLoadSession()) {
       appendMessage(
         "system-orphan",
-        "⚠️ Esta sesión se perdió (el servidor se reinició). Se preserva tu historial visual, pero Vision no recuerda el contexto anterior — el próximo mensaje arranca una conversación nueva del lado del servidor.",
+        "⚠️ Esta sesión se perdió (el servidor se reinició). Se preserva tu historial visual, pero ULTRON no recuerda el contexto anterior — el próximo mensaje arranca una conversación nueva del lado del servidor.",
         { persist: false }
       );
     }
@@ -14742,11 +14746,11 @@ async function pollActiveSessionForExternalActivity() {
     if (state.sending > 0 || !statusData.busy || sessionId !== state.sessionId) return;
     state.sending += 1;
     try {
-      setConnStatus("busy", "Vision sigue pensando en esta sesión…");
+      setConnStatus("busy", "ULTRON sigue pensando en esta sesión…");
       resetToolRow();
       const resp = await apiFetch(`${API_BASE}/api/chat/stream/${sessionId}`);
       await renderIncomingStream(resp, statusData.active_turn_id, sessionId);
-      if (connStatusEl.dataset.state === "busy") setConnStatus("online", "Vision en línea");
+      if (connStatusEl.dataset.state === "busy") setConnStatus("online", "ULTRON en línea");
       touchCurrentSessionInIndex(sessionId);
     } finally {
       state.sending -= 1;
@@ -14784,7 +14788,7 @@ function setSendButtonState(newState) {
     sendOrStopBtnEl.title = "Enviar mensaje";
     sendOrStopLabelEl.textContent = "Enviar";
   } else if (newState === "active") {
-    sendOrStopBtnEl.title = "Detener a Vision";
+    sendOrStopBtnEl.title = "Detener a ULTRON";
     sendOrStopLabelEl.textContent = "Detener";
   } else {
     sendOrStopBtnEl.title = "Deteniendo… esperando que termine la herramienta en curso";
@@ -14820,13 +14824,13 @@ const STOP_UNREACHABLE_RELEASE_MS = 30_000;
 // REQ-007: cuando el boton ya volvio por otro camino pero se habia avisado «no responde», se sigue esperando a Vision solo para cerrar ese
 // aviso con «Listo…»; con un tope, para no consultar para siempre a un Vision que se cerro.
 const STOP_CONFIRM_MAX_MS = 120_000;
-const STOP_UNREACHABLE_NOTE = "Vision no responde todavía: puede estar reiniciándose. Sigo intentando…";
-const STOP_RECOVERED_NOTE = "Listo: Vision ya no está trabajando.";
+const STOP_UNREACHABLE_NOTE = "ULTRON no responde todavía: puede estar reiniciándose. Sigo intentando…";
+const STOP_RECOVERED_NOTE = "Listo: ULTRON ya no está trabajando.";
 const STOP_RELOAD_NOTE =
-  "Vision sigue sin responder después de 30 segundos. Si no vuelve en un rato, recargá la página con Ctrl+Shift+R; si tampoco carga, cerrá y volvé a abrir Vision.";
+  "ULTRON sigue sin responder después de 30 segundos. Si no vuelve en un rato, recargá la página con Ctrl+Shift+R; si tampoco carga, cerrá y volvé a abrir ULTRON.";
 // REQ-014 f (spec fix-detener-y-progreso-visible)
 const STOP_OTHER_TURN_NOTE =
-  "Esa respuesta ya había terminado y Vision ya está con el siguiente mensaje. Si querés frenarlo también, apretá Detener de nuevo.";
+  "Esa respuesta ya había terminado y ULTRON ya está con el siguiente mensaje. Si querés frenarlo también, apretá Detener de nuevo.";
 
 // REQ-007: el vigilante vigente. Uno solo: un Detener nuevo, un cambio de sesion o el fin del vigilante dejan sin efecto al anterior.
 let _stopWatch = null;
@@ -15370,10 +15374,10 @@ async function startLoop(auto = false) {
     const loopStatusResp = await apiFetch(`${API_BASE}/api/session/${state.sessionId}/status`);
     const loopStatusData = await loopStatusResp.json();
     if (loopStatusData.busy) {
-      setConnStatus("busy", "Vision está trabajando…");
+      setConnStatus("busy", "ULTRON está trabajando…");
       const streamResp = await apiFetch(`${API_BASE}/api/chat/stream/${state.sessionId}`);
       await renderIncomingStream(streamResp);
-      if (connStatusEl.dataset.state === "busy") setConnStatus("online", "Vision en línea");
+      if (connStatusEl.dataset.state === "busy") setConnStatus("online", "ULTRON en línea");
     }
   } catch (err) {
     appendMessage("error", `No se pudo iniciar el loop. ${friendlyErrorMessage(err)}`, { errorKind: isOfflineError(err) ? "offline" : "other" });
@@ -15753,14 +15757,14 @@ async function revalidateErrorMessage(msgEl, rawText, reloadBtn) {
   if (alive && connectionError) {
     msgEl.classList.remove("msg-error");
     msgEl.classList.add("msg-solved");
-    done.textContent = "✓ Vision volvió a responder. Ya podés seguir.";
+    done.textContent = "✓ ULTRON volvió a responder. Ya podés seguir.";
   } else if (alive) {
     msgEl.classList.remove("msg-solved");
-    done.textContent = `${rawText}\nVision está funcionando: volvé a enviar tu mensaje para reintentar.`;
+    done.textContent = `${rawText}\nULTRON está funcionando: volvé a enviar tu mensaje para reintentar.`;
   } else {
     msgEl.classList.add("msg-error");
     msgEl.classList.remove("msg-solved");
-    done.textContent = `${rawText}\nTodavía no hay conexión con Vision. Esperá unos segundos y probá de nuevo con ↻.`;
+    done.textContent = `${rawText}\nTodavía no hay conexión con ULTRON. Esperá unos segundos y probá de nuevo con ↻.`;
   }
   if (textEl) { textEl.replaceWith(done); } else { msgEl.insertBefore(done, msgEl.firstChild); }
 }
@@ -15838,7 +15842,7 @@ function markMessagesAfterAsStale(messageId, { removeThis = false } = {}) {
 async function attachToRelaunchedTurn(messageId) {
   let attachedSessionId = null;
   try {
-    setConnStatus("busy", "Vision está trabajando…");
+    setConnStatus("busy", "ULTRON está trabajando…");
     resetToolRow();
     attachedSessionId = state.sessionId;
     // Detener tajante: apenas se relanza el turno el boton tiene que decir «Detener». Antes quedaba en «Enviar» hasta el PRIMER evento del
@@ -15847,7 +15851,7 @@ async function attachToRelaunchedTurn(messageId) {
     const resp = await apiFetch(`${API_BASE}/api/chat/stream/${state.sessionId}`);
     await renderIncomingStream(resp, messageId);
   } finally {
-    if (connStatusEl.dataset.state === "busy") setConnStatus("online", "Vision en línea");
+    if (connStatusEl.dataset.state === "busy") setConnStatus("online", "ULTRON en línea");
     settleSendButtonAfterAttach(attachedSessionId);
   }
 }

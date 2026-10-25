@@ -39,13 +39,13 @@ def set_verifier(verifier: Callable[[], bool] | None) -> None:
 def local_page_problem(client_host: str | None, host_header_hostname: str | None, origin: str | None, sec_fetch_site: str | None, own_origin: str) -> str | None:
     """Motivo para rechazar el pedido (texto para la persona), o None si viene de la propia pagina de Vision en esta PC."""
     if (client_host or "") not in _LOCAL_HOSTS:
-        return "Las credenciales solo se pueden ver o cambiar desde la PC donde corre Vision."
+        return "Las credenciales solo se pueden ver o cambiar desde la PC donde corre ULTRON."
     if (host_header_hostname or "").lower() not in _LOCAL_HOSTS:
-        return "Las credenciales solo se pueden ver o cambiar desde la página de Vision en esta PC."
+        return "Las credenciales solo se pueden ver o cambiar desde la página de ULTRON en esta PC."
     if origin and origin.rstrip("/") != own_origin.rstrip("/"):
-        return "Otra página intentó usar las credenciales de Vision y se bloqueó."
+        return "Otra página intentó usar las credenciales de ULTRON y se bloqueó."
     if sec_fetch_site and sec_fetch_site.lower() not in _SAME_SITE_VALUES:
-        return "Otra página intentó usar las credenciales de Vision y se bloqueó."
+        return "Otra página intentó usar las credenciales de ULTRON y se bloqueó."
     return None
 
 

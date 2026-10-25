@@ -28,6 +28,26 @@ pytestmark = [
     pytest.mark.skipif(not secret_store.is_available(), reason="DPAPI solo existe en Windows"),
 ]
 
+@pytest.fixture(autouse=True)
+def _ultron_m365_on():
+    """ULTRON trae Outlook y Teams APAGADO de fabrica (spec portar-desde-origen): estos tests prueban el comportamiento con el interruptor
+    prendido, como lo deja la persona que lo activo. Los que prueban el apagado lo apagan ellos mismos."""
+    from app import switches as _sw
+
+    _sw.set_m365_enabled(True)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _ultron_office_on():
+    """ULTRON trae Office APAGADO de fabrica (spec portar-desde-origen): estos tests prueban el comportamiento con el interruptor
+    prendido, como lo deja la persona que lo activo. Los que prueban el apagado lo apagan ellos mismos."""
+    from app import switches as _sw
+
+    _sw.set_office_enabled(True)
+    yield
+
+
 MODEL = "claude-sonnet-4-6"
 ACCESS = "ACCESS-TOKEN-SECRETO-9921"
 

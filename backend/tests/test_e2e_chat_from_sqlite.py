@@ -482,7 +482,7 @@ PRESERVED = {
     "vision.stt.language": "es",
     "vision.loop.alarmType": "chime",
     "vision.accessToken": "valor-de-prueba-e2e",  # inventado: solo prueba que el token nunca se borra
-    "otra.app.clave": "no es de Vision",
+    "otra.app.clave": "no es de ULTRON",
 }
 
 

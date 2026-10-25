@@ -82,7 +82,7 @@ def test_reconnect_runs_the_full_check_and_returns_the_snapshot(monkeypatch, api
     def fake_check(persist=True):
         seen.append(persist)
         ph._STATE.update(
-            result=ph.Result("healed", "Vision pasó a usar otra salida."),
+            result=ph.Result("healed", "ULTRON pasó a usar otra salida."),
             candidates=[ph.Candidate("dns", "http://10.1.1.1:83", True, 0.02)],
         )
         return ph._STATE["result"]
@@ -94,7 +94,7 @@ def test_reconnect_runs_the_full_check_and_returns_the_snapshot(monkeypatch, api
 
     assert resp.status_code == 200 and seen == [True]
     body = resp.json()
-    assert body["action"] == "healed" and body["message"] == "Vision pasó a usar otra salida."
+    assert body["action"] == "healed" and body["message"] == "ULTRON pasó a usar otra salida."
     assert body["candidates"][0] == {"source": "dns", "url": "http://10.1.1.1:83", "alive": True, "ms": 20}
 
 

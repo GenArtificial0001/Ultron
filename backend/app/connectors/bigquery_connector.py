@@ -37,9 +37,9 @@ class BigQueryConnector:
         try:
             info = json.loads(raw)
         except ValueError as exc:
-            raise ValueError("La key de BigQuery guardada en Vision no es un archivo de clave valido: volvé a importarla en Conexiones.") from exc
+            raise ValueError("La key de BigQuery guardada en ULTRON no es un archivo de clave valido: volvé a importarla en Conexiones.") from exc
         if not isinstance(info, dict):
-            raise ValueError("La key de BigQuery guardada en Vision no es un archivo de clave valido: volvé a importarla en Conexiones.")
+            raise ValueError("La key de BigQuery guardada en ULTRON no es un archivo de clave valido: volvé a importarla en Conexiones.")
         return info
 
     def _get_credentials(self):

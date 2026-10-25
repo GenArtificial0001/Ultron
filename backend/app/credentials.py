@@ -124,7 +124,7 @@ CONNECTOR_SCHEMA: dict[str, dict[str, Any]] = {
     },
     # spec voz-fish-audio REQ-009: claves de los motores de voz en la nube.
     "voz": {
-        "label": "Voz de Vision (Fish Audio, ElevenLabs)",
+        "label": "Voz de ULTRON (Fish Audio, ElevenLabs)",
         "fields": [
             {"key": "fish_api_key", "label": "Fish Audio: clave", "type": "password", "secret": True},
             {"key": "elevenlabs_api_key", "label": "ElevenLabs: clave", "type": "password", "secret": True},
@@ -204,11 +204,11 @@ class CredentialsMovedError(CredentialsError):
 
 
 VAULT_ACTIVE_MESSAGE = (
-    "Tus credenciales ahora se guardan cifradas dentro de Vision: cargalas en Configuración > Conexiones. "
+    "Tus credenciales ahora se guardan cifradas dentro de ULTRON: cargalas en Configuración > Conexiones. "
     "Esta pestaña ya no guarda nada."
 )
 VAULT_CLEAR_MESSAGE = (
-    "Tus credenciales ahora están cifradas dentro de Vision: se cambian o se quitan en Configuración > Conexiones. "
+    "Tus credenciales ahora están cifradas dentro de ULTRON: se cambian o se quitan en Configuración > Conexiones. "
     "El archivo viejo se borra desde ahí, con «Borrar archivos viejos»."
 )
 

@@ -1,7 +1,7 @@
 """REQ-008 (spec fix-detener-y-progreso-visible): el modo desarrollo no se reinicia por instalar paquetes.
 
 Lo que vivio el usuario (2026-10-11, 22:49-22:57): el agente de Vision corrio `python -m pip install python-pptx pywin32`; la tool bash pone el
-`.venv` de Vision primero en el PATH, pip escribio `.py` dentro de `backend/.venv` y el `uvicorn --reload` de `Iniciar-Vision.bat` (que vigilaba
+`.venv` de Vision primero en el PATH, pip escribio `.py` dentro de `backend/.venv` y el `uvicorn --reload` de `Iniciar-Ultron.bat` (que vigilaba
 TODO `backend/`, su carpeta de trabajo) reinicio Vision a mitad del turno. El proceso viejo siguio con el turno sin aceptar conexiones y Detener
 quedo colgado. El filtro por defecto de uvicorn excluye `.*`, pero eso mira solo el NOMBRE del archivo (`__init__.py`), no la carpeta `.venv`.
 
@@ -24,7 +24,7 @@ from uvicorn.config import Config
 from uvicorn.supervisors.watchfilesreload import FileFilter, WatchFilesReload
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-LAUNCHER = REPO_ROOT / "Iniciar-Vision.bat"
+LAUNCHER = REPO_ROOT / "Iniciar-Ultron.bat"
 
 
 def _uvicorn_args_from_launcher() -> list[str]:
@@ -73,7 +73,7 @@ def _is_watched(config: Config, path: Path) -> bool:
 def test_the_dev_launcher_watches_only_the_vision_code():
     args = _uvicorn_args_from_launcher()
     assert "app.main:app" in args and "--reload" in args
-    assert "--reload-dir" in args, "Iniciar-Vision.bat vigila todo backend/ (incluido .venv): falta --reload-dir app"
+    assert "--reload-dir" in args, "Iniciar-Ultron.bat vigila todo backend/ (incluido .venv): falta --reload-dir app"
     dirs = [args[i + 1] for i, a in enumerate(args) if a == "--reload-dir"]
     assert [d.strip('"').replace("\\", "/").rstrip("/") for d in dirs] == ["app"]
 
@@ -87,7 +87,7 @@ def test_with_the_launcher_args_a_package_installed_in_venv_is_not_watched(tmp_p
     assert not _is_watched(config, backend / ".venv" / "Lib" / "site-packages" / "pptx" / "__init__.py")
     assert not _is_watched(config, backend / "workspace" / "transcribir.py")
     assert _is_watched(config, backend / "app" / "main.py"), (
-        "un cambio en el codigo de Vision tiene que seguir reiniciando"
+        "un cambio en el codigo de ULTRON tiene que seguir reiniciando"
     )
 
 
@@ -173,7 +173,7 @@ def test_the_real_reloader_ignores_pip_writing_in_venv_but_reloads_on_app_change
 
         ignored = _restart_paths(supervisor, pip_and_agent, 6, until_first=False)
         shown = sorted({p.resolve().relative_to(backend.resolve()).as_posix() for p in ignored})
-        assert ignored == [], f"esto reiniciaria Vision a mitad de un turno: {shown}"
+        assert ignored == [], f"esto reiniciaria ULTRON a mitad de un turno: {shown}"
 
         def edit_code(n: int) -> None:
             (backend / "app" / "main.py").write_text(f"x = {n}\n", encoding="utf-8")
@@ -199,7 +199,7 @@ def test_the_dev_launcher_limits_how_long_uvicorn_waits_for_open_connections():
     args = _uvicorn_args_from_launcher()
 
     assert "--timeout-graceful-shutdown" in args, (
-        "sin este limite, un chat abierto (stream) cuelga el reinicio de Vision"
+        "sin este limite, un chat abierto (stream) cuelga el reinicio de ULTRON"
     )
     seconds = int(args[args.index("--timeout-graceful-shutdown") + 1])
     assert 1 <= seconds <= GRACEFUL_SECONDS_MAX
@@ -319,7 +319,7 @@ def test_the_real_vision_shuts_down_quickly_with_a_chat_open_when_the_launcher_l
         took = time.monotonic() - started
 
         assert not thread.is_alive(), (
-            f"Vision no se apago en {seconds + 8} s con un chat abierto: el reinicio por --reload queda colgado"
+            f"ULTRON no se apago en {seconds + 8} s con un chat abierto: el reinicio por --reload queda colgado"
         )
         assert took < seconds + 4, (
             f"tardo {took:.1f} s: el limite del lanzador ({seconds} s) no esta cortando la conexion"
@@ -340,7 +340,7 @@ def test_control_without_the_limit_the_real_vision_does_not_shut_down_with_a_cha
         thread.join(timeout=6)
 
         assert thread.is_alive(), (
-            "sin el limite, Vision se apago solo: el diagnostico cambio y este arreglo hay que revisarlo"
+            "sin el limite, ULTRON se apago solo: el diagnostico cambio y este arreglo hay que revisarlo"
         )
     finally:
         held.close()

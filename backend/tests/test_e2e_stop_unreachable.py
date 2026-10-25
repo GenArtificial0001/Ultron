@@ -34,8 +34,8 @@ pytestmark = pytest.mark.e2e
 
 MODEL = "claude-sonnet-4-6"
 TOOL_MAX_S = 90  # tope de la herramienta si nadie la libera (el teardown siempre la libera antes)
-UNREACHABLE = "Vision no responde todavía: puede estar reiniciándose. Sigo intentando…"
-RECOVERED = "Listo: Vision ya no está trabajando."
+UNREACHABLE = "ULTRON no responde todavía: puede estar reiniciándose. Sigo intentando…"
+RECOVERED = "Listo: ULTRON ya no está trabajando."
 RELOAD_HINT = "Ctrl+Shift+R"
 
 

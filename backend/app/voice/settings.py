@@ -137,7 +137,7 @@ def update_config(changes: dict[str, Any], models_by_engine: dict[str, tuple[str
     })
     if missing:
         raise VoiceConfigError(
-            "Antes de usar un servicio de voz en la nube hay que confirmar que el texto que Vision lee "
+            "Antes de usar un servicio de voz en la nube hay que confirmar que el texto que ULTRON lee "
             "se le envía a ese servicio."
         )
     save_config(cfg)

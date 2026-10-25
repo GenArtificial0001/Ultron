@@ -528,7 +528,7 @@ def test_a_new_version_says_it_is_updating_not_that_the_install_was_incomplete(e
     extract()
 
     out = capsys.readouterr().out
-    assert "Actualizando el codigo de Vision" in out
+    assert "Actualizando el codigo de ULTRON" in out
     assert "incompleta" not in out.lower()
 
 
@@ -536,7 +536,7 @@ def test_a_first_install_says_it_is_updating_not_that_the_install_was_incomplete
     extract()
 
     out = capsys.readouterr().out
-    assert "Actualizando el codigo de Vision" in out and "incompleta" not in out.lower()
+    assert "Actualizando el codigo de ULTRON" in out and "incompleta" not in out.lower()
 
 
 # ------------------------------------------------------------------------------------------------------------------ REQ-012 (0.35.6): un antivirus o el indexador de Windows puede tener abierto un archivo recien copiado

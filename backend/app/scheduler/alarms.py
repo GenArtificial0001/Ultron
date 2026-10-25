@@ -66,7 +66,7 @@ def fire_alarm(schedule: dict[str, Any]) -> None:
     try:
         # audio silenciado: el WAV de la alerta YA es el sonido elegido por
         # el usuario -- sin esto Windows superpone su propio "ding" generico.
-        notify(title=f"⏰ {label}", body="Vision — alarma programada", audio={"silent": "true"})
+        notify(title=f"⏰ {label}", body="ULTRON — alarma programada", audio={"silent": "true"})
     except Exception:
         logger.warning("No se pudo mostrar el toast de la alarma '%s'", label, exc_info=True)
 

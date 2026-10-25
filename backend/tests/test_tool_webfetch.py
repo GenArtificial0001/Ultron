@@ -53,7 +53,7 @@ def test_scheme_is_added_when_missing(get):
 def test_request_uses_timeout_stream_and_user_agent(get):
     wf._webfetch_execute({"url": "a.com"})
     kw = get["calls"][0][1]
-    assert kw["timeout"] == wf.TIMEOUT and kw["stream"] is True and "Vision" in kw["headers"]["User-Agent"]
+    assert kw["timeout"] == wf.TIMEOUT and kw["stream"] is True and "ULTRON" in kw["headers"]["User-Agent"]
 
 
 def test_network_error_is_returned_as_text(get):

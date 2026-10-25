@@ -239,7 +239,7 @@ def test_the_notice_tells_the_person_to_connect_to_the_vpn_and_reopen(env, capsy
     launcher._warn_missing_dependencies(["pandas", "numpy"])
     text = capsys.readouterr().out
     assert "pandas" in text and "numpy" in text
-    assert "VPN de tu empresa" in text and "volve a abrir Vision" in text
+    assert "VPN de tu empresa" in text and "volve a abrir ULTRON" in text
 
 
 def test_the_probe_code_imports_each_essential_and_prints_the_failures(env, monkeypatch):

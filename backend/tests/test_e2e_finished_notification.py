@@ -424,7 +424,7 @@ def test_a_background_session_notifies_with_its_name_and_the_click_opens_it(app,
     page.wait_for_function("id => document.getElementById('meta-session-id').textContent === id", arg=sid_a, timeout=10_000)
     page.wait_for_function("t => document.getElementById('messages').innerText.includes(t)", arg=ANSWER, timeout=10_000)
     assert notifs(page)[0]["closed"], "al tocarlo, el aviso se cierra"
-    assert page.evaluate("window.__focusCalls") >= 1, "al tocarlo, Vision pasa al frente"
+    assert page.evaluate("window.__focusCalls") >= 1, "al tocarlo, ULTRON pasa al frente"
 
 
 # ---------------------------------------------------------------------------
@@ -527,7 +527,7 @@ def test_an_undecided_permission_is_asked_on_the_first_send_click_and_never_alon
     a = app_factory(permission="default", answer="granted")
     page = a.page
     page.wait_for_timeout(500)
-    assert permission_requests(page) == [], "Vision no pide permiso sola al abrir"
+    assert permission_requests(page) == [], "ULTRON no pide permiso sola al abrir"
     run_turn(a, base_url, "cerrá el inventario del CDM")
     requests = permission_requests(page)
     assert len(requests) == 1, f"se pide en el primer clic de Enviar: {requests}"
@@ -560,7 +560,7 @@ def test_a_denied_permission_is_explained_once(app_factory, base_url):
     assert notifs(page) == [], "sin permiso no se puede mostrar nada"
     assert permission_requests(page) == [], "negado no se puede volver a pedir"
     notice = denied_notice(page)
-    assert notice["visible"], "Vision tiene que decir que el navegador bloqueo los avisos"
+    assert notice["visible"], "ULTRON tiene que decir que el navegador bloqueo los avisos"
     assert all(f in notice["text"] for f in DENIED_FRAGMENTS), notice["text"]
     assert "Edge" in notice["text"]
     page.click("#notify-denied-notice-close")

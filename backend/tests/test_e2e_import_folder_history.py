@@ -54,7 +54,7 @@ def tester_is_the_current_user(monkeypatch):
 
 @pytest.fixture
 def folder(tmp_path):
-    f = tmp_path / "Presentacion Vision"
+    f = tmp_path / "Presentacion ULTRON"
     f.mkdir()
     return f
 

@@ -159,7 +159,7 @@ class WindowsCoreAudio:
 
     def __init__(self) -> None:
         if sys.platform != "win32":
-            raise AudioUnsupported("Controlar el micrófono desde Vision solo está disponible en Windows.")
+            raise AudioUnsupported("Controlar el micrófono desde ULTRON solo está disponible en Windows.")
 
     # -- enumerador -------------------------------------------------------------------------------------------------
     @staticmethod
@@ -294,7 +294,7 @@ class WindowsCoreAudio:
                     volume = self._endpoint_volume(device)
                     if volume is None:
                         raise AudioControlError(
-                            "Este micrófono no deja que Vision cambie su volumen. Usá el Panel de control de Windows."
+                            "Este micrófono no deja que ULTRON cambie su volumen. Usá el Panel de control de Windows."
                         )
                     try:
                         action(volume)

@@ -241,7 +241,7 @@ def _extra_params_for(
 
 _SENTINEL = object()
 
-SYSTEM_PROMPT_TEMPLATE = """Sos Vision, un asistente superinteligente{company_clause}. \
+SYSTEM_PROMPT_TEMPLATE = """Sos ULTRON, un asistente superinteligente{company_clause}. \
 Tenes acceso a herramientas reales: podes leer/escribir \
 archivos, ejecutar comandos, consultar Oracle/BigQuery/SharePoint/SAP, armar listas de \
 tareas, y cargar 'skills' (guias especializadas) bajo demanda.
@@ -342,8 +342,8 @@ buscar una alternativa.**
 - **Bug real corregido (2026-09-21): nunca agregues tu propio `LIMIT`/`FETCH FIRST` bajo (ej. \
 LIMIT 50) a una consulta de BigQuery/Oracle "por prudencia" cuando el usuario pidio el detalle, \
 todos los registros, o el dataset completo.** Eso le OCULTA filas reales al usuario y desactiva \
-el export automatico a CSV completo con link de descarga que Vision genera cuando el resultado \
-real supera el umbral configurado (ver `export_row_threshold` en Configuracion). Dejá que Vision \
+el export automatico a CSV completo con link de descarga que ULTRON genera cuando el resultado \
+real supera el umbral configurado (ver `export_row_threshold` en Configuracion). Dejá que ULTRON \
 decida el preview/export segun esa configuracion real -- si de verdad necesitas acotar el \
 resultado (por pedido EXPLICITO del usuario, ej. "solo los primeros 10"), ahi si es correcto usar \
 LIMIT.
@@ -399,9 +399,9 @@ Specs formales dentro de esta sesion (spec carpeta-por-sesion REQ-011):
 "quiero documentar esto como spec antes de programar"), y esta sesion tiene una carpeta de \
 proyecto asignada (ver seccion de contexto de proyecto abajo, si existe), guardala en \
 `spec/<slug-de-la-feature>/spec.md` (y `progress.md` si aplica) DENTRO de esa carpeta -- \
-mismo mecanismo/estructura que usa el propio equipo de Vision para sus specs (interview \
+mismo mecanismo/estructura que usa el propio equipo de ULTRON para sus specs (interview \
 por categorias, scoring, gate de aprobacion), pero con alcance a la carpeta de ESTA sesion \
-en vez del repositorio de Vision. Usa `write`/`read` normalmente (sin ruta absoluta): ya \
+en vez del repositorio de ULTRON. Usa `write`/`read` normalmente (sin ruta absoluta): ya \
 resuelven por defecto a la carpeta de esta sesion.
 
 Panel de navegador integrado (vista previa en vivo):
@@ -754,7 +754,7 @@ def _empty_promise_correction() -> dict[str, str]:
     return {
         "role": "system",
         "content": (
-            "[Corrección automática de Vision] Tu respuesta anterior "
+            "[Corrección automática de ULTRON] Tu respuesta anterior "
             "solo tenía texto anunciando una acción (buscar, cargar "
             "el plan, ejecutar algo), pero NO llamaste a ninguna "
             "herramienta real -- ni siquiera `todowrite`. Esto está "
@@ -1917,7 +1917,7 @@ async def _run_turn_impl(
                     "type": "system-note",
                     "data": {
                         "text": (
-                            "Vision dijo que iba a hacer algo pero no llegó a "
+                            "ULTRON dijo que iba a hacer algo pero no llegó a "
                             "hacerlo; se lo vuelvo a pedir automáticamente."
                         )
                     },
@@ -1934,7 +1934,7 @@ async def _run_turn_impl(
                     "type": "system-note",
                     "data": {
                         "text": (
-                            "Vision dijo varias veces que iba a hacer algo pero no "
+                            "ULTRON dijo varias veces que iba a hacer algo pero no "
                             "llegó a hacerlo. Volvé a enviar tu pedido, o pedilo de "
                             "forma más concreta (por ejemplo, qué dato o archivo "
                             "necesitás)."
@@ -2144,7 +2144,7 @@ async def _run_turn_impl(
             yield {
                 "type": "system-note",
                 "data": {
-                    "text": f"Vision lleva {_step} pasos seguidos trabajando en esto. "
+                    "text": f"ULTRON lleva {_step} pasos seguidos trabajando en esto. "
                     "Si parece trabado, podés frenarlo con el botón Detener."
                 },
             }

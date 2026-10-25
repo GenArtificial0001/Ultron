@@ -196,14 +196,26 @@ def test_the_pause_is_counted_from_the_last_voice_not_from_the_end_of_the_transc
     assert PAUSE_S * 1000 - 150 <= since_last_voice_ms <= PAUSE_S * 1000 + 450, since_last_voice_ms
 
 
-def test_with_autosend_off_saying_vision_still_sends(brain, provider):
+def test_with_autosend_off_saying_ultron_still_sends(brain, provider):
+    """ULTRON (spec portar-desde-origen REQ-010): la palabra que llama al asistente es «Ultron»."""
+    brain.page.evaluate("localStorage.setItem('vision.brain.autosendEnabled', 'false')")
+    provider.whisper.script[:] = [("hola ultrón", 0.0)]
+    voice(brain, True)
+    brain.page.wait_for_timeout(1000)
+    voice(brain, False)
+    chats = wait_sent(brain, 1, 10_000)
+    assert chats[0]["message"].startswith("hola ultrón")
+
+
+def test_with_autosend_off_saying_vision_no_longer_sends(brain, provider):
+    """ULTRON ya no responde a «visión» (la palabra de la version de origen)."""
     brain.page.evaluate("localStorage.setItem('vision.brain.autosendEnabled', 'false')")
     provider.whisper.script[:] = [("hola visión", 0.0)]
     voice(brain, True)
     brain.page.wait_for_timeout(1000)
     voice(brain, False)
-    chats = wait_sent(brain, 1, 10_000)
-    assert chats[0]["message"].startswith("hola visión")
+    brain.page.wait_for_timeout(3000)
+    assert sent(brain) == []
 
 
 def test_with_autosend_off_and_no_mention_nothing_is_sent(brain, provider):

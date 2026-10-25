@@ -29,10 +29,10 @@ _DECLARED_RE = re.compile(r'^__version__\s*=\s*"([^"]*)"', re.MULTILINE)
 
 # Textos honestos: no se inventa un editor ni un copyright que no existan.
 COMPANY = "la empresa - Planta Norte (uso interno)"
-PRODUCT = "Vision"
-DESCRIPTION = "Vision - asistente conversacional"
-INTERNAL_NAME = "Vision"
-ORIGINAL_FILENAME = "Vision.exe"
+PRODUCT = "ULTRON"
+DESCRIPTION = "ULTRON - asistente conversacional"
+INTERNAL_NAME = "ULTRON"
+ORIGINAL_FILENAME = "Ultron.exe"
 COPYRIGHT = "Uso interno"
 
 _TEMPLATE = """# UTF-8
@@ -110,7 +110,7 @@ def write_version_file(version: str | None, out_path: Path | str) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Genera el bloque de version del Vision.exe para PyInstaller."
+        description="Genera el bloque de version del Ultron.exe para PyInstaller."
     )
     parser.add_argument(
         "output", help="archivo de salida (se pasa a PyInstaller con --version-file)"

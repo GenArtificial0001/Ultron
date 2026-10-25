@@ -56,7 +56,7 @@ SYNTH_MIC = """
     }
     return origFetch(input, init);
   };
-  // Vision "habla": lo que lee isSpeaking() (speechSynthesis.speaking). cancel() lo apaga, como el navegador real.
+  // ULTRON "habla": lo que lee isSpeaking() (speechSynthesis.speaking). cancel() lo apaga, como el navegador real.
   window.__visionSpeaking = false;
   Object.defineProperty(window.speechSynthesis, "speaking", { get: () => window.__visionSpeaking, configurable: true });
   const realCancel = window.speechSynthesis.cancel.bind(window.speechSynthesis);
@@ -371,10 +371,10 @@ def test_space_while_vision_speaks_interrupts_it_and_goes_back_to_listening_exac
     app.page.keyboard.press("Space")
     app.page.wait_for_timeout(500)
 
-    assert app.page.evaluate("window.__cancelCalls") >= 1, "Espacio tiene que cortar la voz de Vision"
+    assert app.page.evaluate("window.__cancelCalls") >= 1, "Espacio tiene que cortar la voz de ULTRON"
     assert app.page.evaluate("window.__visionSpeaking") is False
     assert btn_state(app) != "idle", "no apaga el modo"
-    assert sent(app) == [], "interrumpir a Vision no envia nada"
+    assert sent(app) == [], "interrumpir a ULTRON no envia nada"
     assert len(app.gum()) == gum_before, "no pide un microfono nuevo (blindaje original)"
 
 
@@ -386,7 +386,7 @@ def test_space_while_vision_speaks_discards_nothing_it_did_not_before_and_does_n
     app.page.keyboard.press("Space")
     app.page.wait_for_timeout(800)
 
-    assert sent(app) == [], "mientras Vision hablaba, Espacio solo la interrumpe: no manda lo pendiente"
+    assert sent(app) == [], "mientras ULTRON hablaba, Espacio solo la interrumpe: no manda lo pendiente"
 
 
 # ------------------------------------------------------------------------------------------------------------------ REQ-007/009: Esc apaga siempre; Espacio nunca apaga

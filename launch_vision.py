@@ -66,7 +66,7 @@ import webbrowser
 from pathlib import Path
 
 # Misma carpeta de datos que app/config.py (este lanzador no puede importar `app`).
-DATA_FOLDER_NAME = "Vision-personal"
+DATA_FOLDER_NAME = "Ultron"
 
 LOCAL_HOST = "127.0.0.1"
 LOCAL_PORT = 8030  # el de siempre de Vision-personal (convive con otro Vision en 8020); con la configuracion en Vision, el puerto elegido en Configuracion > Conexiones > General (ver `_configured_port`)
@@ -169,11 +169,11 @@ def _ensure_port_free(host: str, port: int) -> None:
 
     raise RuntimeError(
         f"El puerto {port} ya esta en uso -- probablemente hay OTRA "
-        f"instancia de Vision corriendo (quiza quedo abierta de una "
+        f"instancia de ULTRON corriendo (quiza quedo abierta de una "
         f"ejecucion anterior sin cerrarse bien). Cerrala primero: "
         f"revisa el Administrador de tareas por un proceso 'python.exe' "
-        f"o 'Vision.exe', o simplemente abri http://{host}:{port}/ en el navegador "
-        f"-- si responde, Vision YA esta corriendo y no hace falta "
+        f"o 'Ultron.exe', o simplemente abri http://{host}:{port}/ en el navegador "
+        f"-- si responde, ULTRON YA esta corriendo y no hace falta "
         f"abrir otra instancia."
     )
 
@@ -222,7 +222,7 @@ def _connections_file_summary(path: Path | None = None) -> tuple[int, str | None
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as exc:
-        return 0, f"{path} no se pudo leer ({type(exc).__name__}); Vision arranca sin esas conexiones hasta que lo arregles."
+        return 0, f"{path} no se pudo leer ({type(exc).__name__}); ULTRON arranca sin esas conexiones hasta que lo arregles."
     items = data.get("connections") if isinstance(data, dict) else data
     return (len(items) if isinstance(items, list) else 0), None
 def _env_values(data_dir: Path) -> dict[str, str]:
@@ -286,7 +286,7 @@ def _check_credentials(backend_dir: Path, data_dir: Path) -> None:
         print()
         print(
             f"AVISO: todavia no hay conexiones configuradas: no existe {env_path} ni {_connections_file()}. "
-            "Vision va a arrancar; cargalas desde Vision, en Configuracion > Conexiones (quedan cifradas, "
+            "ULTRON va a arrancar; cargalas desde ULTRON, en Configuracion > Conexiones (quedan cifradas, "
             "sin ningun archivo .env)."
         )
         return
@@ -303,7 +303,7 @@ def _check_credentials(backend_dir: Path, data_dir: Path) -> None:
     if warnings:
         print()
         print(
-            "AVISO: faltan credenciales de BigQuery (Vision arranca igual). Cargalas en "
+            "AVISO: faltan credenciales de BigQuery (ULTRON arranca igual). Cargalas en "
             f"Configuracion > Credenciales o en {env_path}:"
         )
         for line in warnings:
@@ -338,8 +338,8 @@ _EXTRACT_LOCK_NAME = ".vision-extract.lock"
 _EXTRACT_LOCK_STALE_SECONDS = 600  # un candado de mas de 10 minutos es huerfano: nunca impide arrancar
 _STAGING_NAME = "app.nuevo"
 _LOCK_BUSY_MESSAGE = (
-    "Vision no puede actualizar su codigo ahora porque hay otra copia de Vision haciendolo. "
-    "Espera unos segundos y volve a abrir Vision (si no se abrio ninguna otra, cerra todas las ventanas de Vision y proba de nuevo)."
+    "ULTRON no puede actualizar su codigo ahora porque hay otra copia de ULTRON haciendolo. "
+    "Espera unos segundos y volve a abrir ULTRON (si no se abrio ninguna otra, cerra todas las ventanas de ULTRON y proba de nuevo)."
 )
 
 
@@ -532,7 +532,7 @@ def _extract_embedded_code() -> tuple[Path, Path]:
     if not embed_src.exists():
         raise RuntimeError(
             f"El ejecutable no tiene codigo embebido en '{embed_src}'. "
-            "Esto indica que Vision.exe se compilo mal (build_exe.bat "
+            "Esto indica que Ultron.exe se compilo mal (build_exe.bat "
             "deberia correr build_stage.py antes de PyInstaller). "
             "Recompila con build_exe.bat."
         )
@@ -553,19 +553,19 @@ def _extract_embedded_code() -> tuple[Path, Path]:
     # REQ-001/002: «al dia» ya no es solo «el marcador coincide y la carpeta existe»: ademas no puede faltar ni estar vacio ningun archivo del codigo.
     broken = _missing_or_empty(install_dir, embed_src) if marker_matches() else []
     if marker_matches() and not broken:
-        print("Codigo de Vision al dia en %LOCALAPPDATA%\\Vision\\app -- sin reextraer.")
+        print("Codigo de ULTRON al dia en %LOCALAPPDATA%\\Vision\\app -- sin reextraer.")
         return backend_dir, frontend_dir
 
     if marker_matches():
-        print(f"La instalacion de Vision estaba incompleta ({len(broken)} archivos faltantes o vacios): la reparo ahora.")
+        print(f"La instalacion de ULTRON estaba incompleta ({len(broken)} archivos faltantes o vacios): la reparo ahora.")
     else:
-        print("Actualizando el codigo de Vision en %LOCALAPPDATA%\\Vision\\app ...")
+        print("Actualizando el codigo de ULTRON en %LOCALAPPDATA%\\Vision\\app ...")
 
     lock = _acquire_extract_lock(install_dir.parent)
     try:
         # Otro lanzador pudo terminar justo antes de que tomara el candado: se vuelve a mirar.
         if marker_matches() and not _missing_or_empty(install_dir, embed_src):
-            print("Codigo de Vision al dia en %LOCALAPPDATA%\\Vision\\app -- sin reextraer.")
+            print("Codigo de ULTRON al dia en %LOCALAPPDATA%\\Vision\\app -- sin reextraer.")
             return backend_dir, frontend_dir
 
         # REQ-004: el marcador se borra ANTES de tocar nada y se escribe SOLO al final. Una copia interrumpida deja la carpeta sin marcador y la proxima apertura la repara sola.
@@ -576,8 +576,8 @@ def _extract_embedded_code() -> tuple[Path, Path]:
             incomplete = _missing_or_empty(staging_dir, embed_src)
             if incomplete:
                 raise RuntimeError(
-                    f"La copia del codigo de Vision quedo incompleta ({len(incomplete)} archivos). No se cambio nada de lo instalado; "
-                    "proba abrir Vision de nuevo (si se repite, revisa el espacio libre en disco)."
+                    f"La copia del codigo de ULTRON quedo incompleta ({len(incomplete)} archivos). No se cambio nada de lo instalado; "
+                    "proba abrir ULTRON de nuevo (si se repite, revisa el espacio libre en disco)."
                 )
             _swap_in_new_code(install_dir, staging_dir)
         finally:
@@ -694,10 +694,10 @@ def _warn_missing_dependencies(missing: list[str]) -> None:
     """spec lanzador-dependencias-verificadas REQ-003/005: aviso VISIBLE (no una linea perdida entre la salida de pip) que nombra lo que falta."""
     print()
     print("=" * 62)
-    print(" ATENCION: a este Vision le faltan componentes esenciales:")
+    print(" ATENCION: a este ULTRON le faltan componentes esenciales:")
     print("   " + ", ".join(missing))
     print(" Probablemente se corto la descarga (VPN o proxy de la empresa).")
-    print(" Conectate a la VPN de tu empresa y volve a abrir Vision: va a")
+    print(" Conectate a la VPN de tu empresa y volve a abrir ULTRON: va a")
     print(" reintentar la instalacion solo.")
     print("=" * 62)
     print()
@@ -726,8 +726,8 @@ def _ensure_requirements(backend_dir: Path, venv_python: Path) -> None:
     # spec lanzador-dependencias-verificadas: todo lo de aca instala con el python del `.venv`. Si no existe NO se instala nada (jamas con el del sistema) y se
     # dice por que; `_ensure_venv` ya intento crearlo antes, asi que llegar aca sin el es una falla real que la persona tiene que ver.
     if not venv_python.exists():
-        print("ADVERTENCIA: no se encontro el entorno virtual de Vision (.venv); no se instala nada fuera de el.")
-        print("Cerra Vision y volve a abrirlo: lo va a crear de nuevo.")
+        print("ADVERTENCIA: no se encontro el entorno virtual de ULTRON (.venv); no se instala nada fuera de el.")
+        print("Cerra ULTRON y volve a abrirlo: lo va a crear de nuevo.")
         return
 
     marker = venv_python.parent.parent / ".vision-deps-ok"
@@ -797,7 +797,7 @@ def _ensure_requirements(backend_dir: Path, venv_python: Path) -> None:
         print(
             "ADVERTENCIA: no se pudieron instalar/actualizar todas las "
             "dependencias (revisa tu conexion, la VPN o el proxy de tu empresa: "
-            "HTTP_PROXY/HTTPS_PROXY en el .env). Vision va a arrancar igual con lo "
+            "HTTP_PROXY/HTTPS_PROXY en el .env). ULTRON va a arrancar igual con lo "
             "que ya este instalado, pero puede fallar si falta algo esencial."
         )
         # REQ-005: ademas de la linea de arriba, se NOMBRA lo que falta de verdad (antes el primer `import pandas` explotaba mas tarde, lejos de la causa).
@@ -855,7 +855,7 @@ def _install_console_close_handler(process_holder: list[subprocess.Popen]) -> No
         if ctrl_type in (CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT):
             process = process_holder[0] if process_holder else None
             if process is not None and process.poll() is None:
-                print("\nCerrando Vision (consola cerrada por el usuario)...")
+                print("\nCerrando ULTRON (consola cerrada por el usuario)...")
                 process.terminate()
                 try:
                     process.wait(timeout=5)
@@ -903,7 +903,7 @@ def _main() -> None:
         raise RuntimeError(
             f"No se encontraron 'backend' ({backend_dir}) y/o 'frontend' "
             f"({frontend_dir}). Si estas en modo desarrollo, corre este "
-            "script desde la raiz de vision-web. Si es Vision.exe "
+            "script desde la raiz de vision-web. Si es Ultron.exe "
             "compilado, esto es un bug de compilacion -- recompila con "
             "build_exe.bat."
         )
@@ -913,12 +913,12 @@ def _main() -> None:
     _ensure_venv(backend_dir, venv_python)
     _ensure_requirements(backend_dir, venv_python)
     if _vault_active():
-        print("Configuracion: guardada cifrada en Vision (Configuracion > Conexiones). No hace falta ningun .env.")
+        print("Configuracion: guardada cifrada en ULTRON (Configuracion > Conexiones). No hace falta ningun .env.")
     else:
         _check_credentials(backend_dir, _data_dir(backend_dir))
 
     print()
-    print(f"Levantando Vision en {url} ...")
+    print(f"Levantando ULTRON en {url} ...")
     print("Cerrar esta ventana apaga el servidor.")
     print()
 
@@ -966,7 +966,7 @@ def main() -> None:
     except Exception:
         print()
         print("=" * 60)
-        print(" ERROR -- Vision no pudo arrancar")
+        print(" ERROR -- ULTRON no pudo arrancar")
         print("=" * 60)
         traceback.print_exc()
         print()

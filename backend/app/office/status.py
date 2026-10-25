@@ -60,18 +60,18 @@ def _excel_status(timeout: float) -> dict[str, str]:
     if not _has_pywin32() or not _registered(_EXCEL):
         return _item(
             "missing",
-            "Excel no está instalado en esta PC, o falta el componente que lo conecta con Vision. Avisá a soporte.",
+            "Excel no está instalado en esta PC, o falta el componente que lo conecta con ULTRON. Avisá a soporte.",
         )
     try:
         books = core.list_workbooks(timeout=timeout)
     except errors.OfficeNotRunning:
-        return _item("closed", "Excel está cerrado. Abrilo con el libro que quieras usar y Vision lo va a poder leer.")
+        return _item("closed", "Excel está cerrado. Abrilo con el libro que quieras usar y ULTRON lo va a poder leer.")
     except (errors.OfficeBusy, errors.OfficeTimeout):
         return _item("busy", "Excel está ocupado (puede tener un cuadro de diálogo abierto). Cerralo y probá de nuevo.")
     except errors.OfficeUnavailable:
         return _item(
             "missing",
-            "Excel no está instalado en esta PC, o falta el componente que lo conecta con Vision. Avisá a soporte.",
+            "Excel no está instalado en esta PC, o falta el componente que lo conecta con ULTRON. Avisá a soporte.",
         )
     except Exception as exc:  # noqa: BLE001 -- el crudo va al log (solo el tipo: el mensaje puede traer celdas), la persona ve una frase
         logger.warning("Office: no se pudo consultar Excel (%s)", errors.technical_detail(exc))
@@ -83,7 +83,7 @@ def _excel_status(timeout: float) -> dict[str, str]:
     n = len(books)
     return _item(
         "running",
-        f"Excel está abierto con {n} libro{'s' if n != 1 else ''}. Vision puede leerlo{'s' if n != 1 else ''} cuando se lo pidas.",
+        f"Excel está abierto con {n} libro{'s' if n != 1 else ''}. ULTRON puede leerlo{'s' if n != 1 else ''} cuando se lo pidas.",
     )
 
 
@@ -91,11 +91,11 @@ def _word_status() -> dict[str, str]:
     if not _has_pywin32() or not _registered(_WORD):
         return _item(
             "missing",
-            "Word no está instalado en esta PC, o falta el componente que lo conecta con Vision. Avisá a soporte.",
+            "Word no está instalado en esta PC, o falta el componente que lo conecta con ULTRON. Avisá a soporte.",
         )
     return _item(
         "installed",
-        "Word está instalado. Vision lo usa en segundo plano solo para convertir documentos; no hace falta abrirlo.",
+        "Word está instalado. ULTRON lo usa en segundo plano solo para convertir documentos; no hace falta abrirlo.",
     )
 
 
@@ -103,6 +103,6 @@ def snapshot(timeout: float = STATUS_TIMEOUT) -> dict[str, Any]:
     """`{enabled, excel: {state, message}, word: {state, message}}`. Con el interruptor apagado no se consulta nada."""
     enabled = switches.is_office_enabled()
     if not enabled:
-        off = _item("off", "Office está desactivado: Vision no lo usa.")
+        off = _item("off", "Office está desactivado: ULTRON no lo usa.")
         return {"enabled": False, "excel": dict(off), "word": dict(off)}
     return {"enabled": True, "excel": _excel_status(timeout), "word": _word_status()}

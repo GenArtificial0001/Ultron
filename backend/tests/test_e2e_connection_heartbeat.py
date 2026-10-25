@@ -26,8 +26,8 @@ from e2e_support import launch_chromium, open_app
 
 pytestmark = pytest.mark.e2e
 
-LOST_TEXT = "Sin conexión con Vision. ¿Cerraste la ventana del servidor?"
-ONLINE_TEXT = "Vision en línea"
+LOST_TEXT = "Sin conexión con ULTRON. ¿Cerraste la ventana del servidor?"
+ONLINE_TEXT = "ULTRON en línea"
 
 HIDDEN_HOOK = """
 (() => {
@@ -216,19 +216,19 @@ def test_a_single_failed_beat_does_not_turn_it_red(app):
 def test_while_working_the_beat_does_not_turn_it_green(app):
     app.page.evaluate(
         "() => { const el = document.getElementById('conn-status'); el.dataset.state = 'busy';"
-        " document.getElementById('conn-status-text').textContent = 'Vision está trabajando…'; }"
+        " document.getElementById('conn-status-text').textContent = 'ULTRON está trabajando…'; }"
     )
 
     app.page.wait_for_timeout(7_000)  # mas de 2 latidos con el servidor vivo
 
     assert conn_state(app) == "busy"
-    assert conn_text(app) == "Vision está trabajando…"
+    assert conn_text(app) == "ULTRON está trabajando…"
 
 
 def test_while_working_a_dead_server_still_turns_it_red(app, backend):
     app.page.evaluate(
         "() => { document.getElementById('conn-status').dataset.state = 'busy';"
-        " document.getElementById('conn-status-text').textContent = 'Vision está trabajando…'; }"
+        " document.getElementById('conn-status-text').textContent = 'ULTRON está trabajando…'; }"
     )
     backend.stop()
 
@@ -317,7 +317,7 @@ def test_a_chat_that_loses_the_network_still_turns_it_red_right_away(app):
 
     app.page.wait_for_function("document.getElementById('conn-status').dataset.state === 'error'", timeout=10_000)
 
-    assert conn_text(app).startswith("Sin conexión con Vision")
+    assert conn_text(app).startswith("Sin conexión con ULTRON")
 
 
 def test_the_page_does_not_throw_js_errors_while_the_server_is_gone(app, backend):

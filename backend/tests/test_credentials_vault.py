@@ -52,7 +52,7 @@ def test_with_the_configuration_in_vision_the_env_enc_is_no_longer_read(enc, mon
 
     credentials.apply_credentials_to_settings()  # lo que corre al arrancar
 
-    assert config.get_settings().fish_api_key == "Clave-Nueva-de-Vision", "la clave vieja del .env.enc ya no le gana a la de Vision"
+    assert config.get_settings().fish_api_key == "Clave-Nueva-de-Vision", "la clave vieja del .env.enc ya no le gana a la de ULTRON"
     assert not config.get_settings().bq_credentials_path.exists(), "no se vuelve a escribir la key de BigQuery en texto plano"
 
 
@@ -64,7 +64,7 @@ def test_with_the_configuration_in_vision_the_old_tab_does_not_recreate_the_env_
 
     assert resp.status_code == 409
     assert "Configuración > Conexiones" in resp.json()["detail"]
-    assert not enc.exists(), "Vision nunca vuelve a crear el .env.enc"
+    assert not enc.exists(), "ULTRON nunca vuelve a crear el .env.enc"
 
 
 def test_before_importing_the_old_tab_still_saves(enc):

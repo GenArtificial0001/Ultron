@@ -188,7 +188,7 @@ def test_a_hung_excel_is_cut_at_the_time_limit_and_the_thread_does_not_keep_visi
     release.set()
     assert elapsed < 3, "el plazo corta: no se espera a que Excel responda"
     live = [t for t in threading.enumerate() if t.name == "office-com"]
-    assert all(t.daemon for t in live), "un hilo colgado no puede impedir que Vision cierre"
+    assert all(t.daemon for t in live), "un hilo colgado no puede impedir que ULTRON cierre"
 
 
 def test_a_com_error_from_excel_is_translated_and_never_shown_raw(monkeypatch):

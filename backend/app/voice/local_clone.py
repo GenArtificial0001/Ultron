@@ -216,12 +216,12 @@ def describe_conflicts(conflicts: list[tuple[str, str, str]], python_version: tu
     listed = ", ".join(f"{name} {old} → {new}" for name, old, new in conflicts[:5])
     more = f" y {len(conflicts) - 5} más" if len(conflicts) > 5 else ""
     message = (
-        f"No instalé nada: la clonación local cambiaría paquetes que Vision ya usa ({listed}{more}) "
+        f"No instalé nada: la clonación local cambiaría paquetes que ULTRON ya usa ({listed}{more}) "
         "y podría dejar de funcionar."
     )
     if python_version < (3, 13) and any(name == "numpy" for name, _, _ in conflicts):
-        return message + " Con Python 3.13 o más no pasa: instalalo y volvé a crear el entorno de Vision."
-    return message + " Avisá a quien administra Vision."
+        return message + " Con Python 3.13 o más no pasa: instalalo y volvé a crear el entorno de ULTRON."
+    return message + " Avisá a quien administra ULTRON."
 
 
 def _run_pip(args: list[str], on_line: Callable[[str], None]) -> int:
@@ -298,7 +298,7 @@ def install_status() -> dict[str, Any]:
 def start_install() -> dict[str, Any]:
     """Arranca la instalacion en segundo plano (si no hay una en curso)."""
     if IS_FROZEN:
-        INSTALL.set("error", "La clonación local no se puede instalar en esta forma de ejecutar Vision.")
+        INSTALL.set("error", "La clonación local no se puede instalar en esta forma de ejecutar ULTRON.")
         return install_status()
     with INSTALL.lock:
         running = INSTALL.thread is not None and INSTALL.thread.is_alive()
@@ -316,7 +316,7 @@ def _install_worker() -> None:
                 INSTALL.log.append(line)
 
     try:
-        INSTALL.set("checking", "Revisando que la instalación no cambie nada de lo que Vision ya usa…")
+        INSTALL.set("checking", "Revisando que la instalación no cambie nada de lo que ULTRON ya usa…")
         with tempfile.TemporaryDirectory(prefix="vision-voz-") as tmp:
             report_path = Path(tmp) / "report.json"
             code = _run_pip(
@@ -338,7 +338,7 @@ def _install_worker() -> None:
 
         INSTALL.set("installing", "Instalando la clonación local (varios GB, puede tardar bastante)…")
         if _run_pip(["install", PACKAGE], log) != 0:
-            INSTALL.set("error", "La instalación falló. El detalle quedó en el log de Vision; volvé a intentar.")
+            INSTALL.set("error", "La instalación falló. El detalle quedó en el log de ULTRON; volvé a intentar.")
             return
         importlib.invalidate_caches()
 
@@ -352,7 +352,7 @@ def _install_worker() -> None:
         INSTALL.set("done", "Clonación local lista. Subí tu muestra de voz y agregala a la lista.")
     except Exception:  # noqa: BLE001 -- el hilo nunca debe morir en silencio
         logger.exception("Error instalando la clonacion local de voz")
-        INSTALL.set("error", "La instalación falló. El detalle quedó en el log de Vision; volvé a intentar.")
+        INSTALL.set("error", "La instalación falló. El detalle quedó en el log de ULTRON; volvé a intentar.")
     finally:
         for line in list(INSTALL.log)[-5:]:
             logger.info("voz local (pip): %s", line)

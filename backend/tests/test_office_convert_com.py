@@ -247,5 +247,5 @@ def test_a_hung_office_is_cut_at_the_time_limit_and_the_thread_does_not_keep_vis
     release.set()
     assert elapsed < 3, "el plazo corta: no se espera a que Office responda"
     assert all(t.daemon for t in threading.enumerate() if t.name == "office-convert"), (
-        "un hilo colgado no puede impedir que Vision cierre"
+        "un hilo colgado no puede impedir que ULTRON cierre"
     )

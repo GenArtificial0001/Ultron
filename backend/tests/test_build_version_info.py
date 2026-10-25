@@ -77,10 +77,10 @@ def test_it_uses_the_real_project_version_by_default(tmp_path):
     "key, value",
     [
         ("CompanyName", "la empresa - Planta Norte (uso interno)"),
-        ("ProductName", "Vision"),
-        ("FileDescription", "Vision - asistente conversacional"),
-        ("InternalName", "Vision"),
-        ("OriginalFilename", "Vision.exe"),
+        ("ProductName", "ULTRON"),
+        ("FileDescription", "ULTRON - asistente conversacional"),
+        ("InternalName", "ULTRON"),
+        ("OriginalFilename", "Ultron.exe"),
         ("LegalCopyright", "Uso interno"),
     ],
 )
@@ -119,7 +119,7 @@ def test_the_command_line_writes_the_file_and_exits_zero(tmp_path):
     out = tmp_path / "v.txt"
     proc = subprocess.run([sys.executable, str(_SCRIPT), str(out)], capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
-    assert out.is_file() and "StringStruct('ProductName', 'Vision')" in out.read_text(encoding="utf-8")
+    assert out.is_file() and "StringStruct('ProductName', 'ULTRON')" in out.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -134,10 +134,10 @@ def test_pyinstaller_parses_the_generated_file(tmp_path):
     gen.write_version_file("7.8.9", out)  # partes distintas y parche != 0: detecta una parte en la posicion equivocada
     info = versioninfo.load_version_info_from_text_file(str(out))
     strings = {k: v for table in info.kids[0].kids for k, v in ((s.name, s.val) for s in table.kids)}
-    assert strings["ProductName"] == "Vision"
+    assert strings["ProductName"] == "ULTRON"
     assert strings["FileVersion"] == "7.8.9.0"
     assert strings["ProductVersion"] == "7.8.9.0"
-    assert strings["OriginalFilename"] == "Vision.exe"
+    assert strings["OriginalFilename"] == "Ultron.exe"
     # FixedFileInfo guarda la version como dos palabras de 32 bits: MS = (mayor << 16) | menor, LS = (parche << 16) | build.
     assert (info.ffi.fileVersionMS, info.ffi.fileVersionLS) == ((7 << 16) | 8, (9 << 16) | 0)
     assert (info.ffi.productVersionMS, info.ffi.productVersionLS) == ((7 << 16) | 8, (9 << 16) | 0)

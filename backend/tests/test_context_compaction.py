@@ -64,7 +64,7 @@ def test_transcript_formats_roles_and_truncates_tool_output():
         [[_user("hola"), _assistant("que tal"), _tool("z" * 500), {"role": "user", "content": []}]]
     )
     lines = transcript.splitlines()
-    assert lines[0] == "Usuario: hola" and lines[1] == "Vision: que tal"
+    assert lines[0] == "Usuario: hola" and lines[1] == "ULTRON: que tal"
     assert lines[2].startswith("[resultado de herramienta] ") and len(lines[2]) < 260
     assert lines[3] == "Usuario: (mensaje con imagenes)"
 

@@ -309,7 +309,7 @@ def test_holding_space_while_vision_speaks_interrupts_it_and_records_without_dis
     ptt.page.keyboard.down("Space")
     level(ptt, 0.2)
     ptt.page.wait_for_function("window.__cancelCalls >= 1", timeout=3_000)
-    assert ptt.page.evaluate("window.__visionSpeaking") is False, "Espacio corta la voz de Vision"
+    assert ptt.page.evaluate("window.__visionSpeaking") is False, "Espacio corta la voz de ULTRON"
     wait_banner(ptt, "listening", timeout=3_000)
     ptt.page.wait_for_timeout(900)
     ptt.page.keyboard.up("Space")
@@ -591,7 +591,7 @@ def test_the_sensitivity_options_are_in_words_not_numbers(auto):
 
 
 # ------------------------------------------------------------------------------------------------------------------ REQ-011: solapa Audio agrupada
-GROUPS = ["Voz de Vision", "Micrófono", "Modo Cerebro", "Avisos y alarmas"]
+GROUPS = ["Voz de ULTRON", "Micrófono", "Modo Cerebro", "Avisos y alarmas"]
 
 
 def _group_of(app, element_id: str) -> str:
@@ -627,10 +627,10 @@ def test_the_audio_tab_has_the_four_groups_in_order(auto):
 @pytest.mark.parametrize(
     "element_id, group",
     [
-        ("cfg-tts-enabled", "Voz de Vision"),
-        ("cfg-tts-voice-select", "Voz de Vision"),
-        ("cfg-voice-chain", "Voz de Vision"),
-        ("cfg-voice-sample", "Voz de Vision"),
+        ("cfg-tts-enabled", "Voz de ULTRON"),
+        ("cfg-tts-voice-select", "Voz de ULTRON"),
+        ("cfg-voice-chain", "Voz de ULTRON"),
+        ("cfg-voice-sample", "Voz de ULTRON"),
         ("cfg-mic-select", "Micrófono"),
         ("cfg-winmic-block", "Micrófono"),
         ("cfg-mic-meter-fill", "Micrófono"),
@@ -752,7 +752,7 @@ def test_holding_space_while_vision_speaks_keeps_what_was_already_said_and_pendi
     level(ptt, 0.0)
 
     ptt.page.wait_for_function("window.__chat.length >= 2", timeout=30_000)  # si interrumpir la hubiera borrado, esto nunca llegaria
-    assert any("lo que quedo en cola" in c["message"] for c in sent(ptt)), "interrumpir a Vision no borra lo que dijiste"
+    assert any("lo que quedo en cola" in c["message"] for c in sent(ptt)), "interrumpir a ULTRON no borra lo que dijiste"
 
 
 def test_in_push_mode_a_finished_turn_sends_the_queued_text_right_away_not_after_the_autosend_pause(browser, base_url, provider):

@@ -22,7 +22,7 @@ const MESSAGES = {
 };
 
 const HINT_SYSTEM =
-  "Al empezar, el navegador te va a pedir qué compartir: elegí «Pantalla completa» y tildá «Compartir también el audio del sistema». Vision no graba ni guarda la pantalla ni el audio: solo lo transcribe para el resumen. Las voces de los demás también se transcriben.";
+  "Al empezar, el navegador te va a pedir qué compartir: elegí «Pantalla completa» y tildá «Compartir también el audio del sistema». ULTRON no graba ni guarda la pantalla ni el audio: solo lo transcribe para el resumen. Las voces de los demás también se transcriben.";
 
 let _ctx = null; // { readPreference, savePreference } de app.js
 let _open = false; // hay una ventana abierta o una captura en curso: un 2do pedido se ignora

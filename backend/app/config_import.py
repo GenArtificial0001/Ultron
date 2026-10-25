@@ -265,7 +265,7 @@ def _delete_bq_key_file(key_path: Path, deleted: list[str], problems: list[str])
     except (OSError, ValueError):
         same = False
     if not same:
-        problems.append("El archivo de clave de BigQuery no es igual al guardado en Vision: no se borró. Si es una clave nueva, importala en la tarjeta de BigQuery.")
+        problems.append("El archivo de clave de BigQuery no es igual al guardado en ULTRON: no se borró. Si es una clave nueva, importala en la tarjeta de BigQuery.")
         return
     try:
         key_path.unlink()

@@ -252,7 +252,7 @@ def _describe(name: str, args: dict[str, Any]) -> str:
         shown = ", ".join(_trust_entries(args)) or "(nada)"
         return (
             f"Confiar en estos remitentes durante toda esta sesion: {cut(shown)}. Sus correos van a aparecer en lo que el modelo lee, y el filtro que hoy solo deja pasar "
-            "@empresa.com ya no los va a frenar (no se puede deshacer desde Vision)"
+            "@empresa.com ya no los va a frenar (no se puede deshacer desde ULTRON)"
         )
     if name == "send_email_to_self":
         # Este paso solo trae un `draft_token`: lo que se envia se mostro en el paso anterior. Si se llega aca sin haberlo preparado, no hay asunto ni cuerpo que mostrar.
@@ -329,7 +329,7 @@ def check(tool: str, args: dict[str, Any], session: Any) -> str | None:
             risky = True
         elif name == "trust_senders":
             # Abre el filtro anti-engano del conector: ni con Auto pasa sola. Sin texto ajeno leido es una pregunta normal, sin alarma.
-            reason = "Esta accion hace que Vision vea correos de remitentes que hoy el filtro frena, y todavia no la autorizaste."
+            reason = "Esta accion hace que ULTRON vea correos de remitentes que hoy el filtro frena, y todavia no la autorizaste."
     else:
         reason = "Esta accion escribe en tu Outlook o en Teams y todavia no la autorizaste."
 

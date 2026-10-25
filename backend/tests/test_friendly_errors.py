@@ -69,7 +69,7 @@ PEER_CLOSED = "peer closed connection without sending complete message body (inc
 # respuesta, no de Vision»).
 CORTE_TEXT = (
     "El proveedor de IA (el servicio de inteligencia artificial de la empresa) cortó la conexión en medio de la respuesta. "
-    "No fue un error de Vision. Volvé a enviar tu mensaje; si pasa seguido, elegí otro modelo en el selector de arriba."
+    "No fue un error de ULTRON. Volvé a enviar tu mensaje; si pasa seguido, elegí otro modelo en el selector de arriba."
 )
 
 
@@ -164,7 +164,7 @@ def test_a_cut_mid_answer_says_it_came_from_proveedor_and_not_from_vision() -> N
 
     assert friendly.code == "MODELO-CORTE"
     assert friendly.message == CORTE_TEXT
-    assert "El proveedor de IA" in friendly.message and "No fue un error de Vision." in friendly.message
+    assert "El proveedor de IA" in friendly.message and "No fue un error de ULTRON." in friendly.message
     assert friendly.technical(model="claude-sonnet-5-5", when="11:07:15") == "MODELO-CORTE · claude-sonnet-5-5 · 11:07:15"
 
 
@@ -183,7 +183,7 @@ def test_spend_limit_without_window_still_gives_a_wait_hint() -> None:
 def test_gemini_history_rejection_tells_how_to_unblock_the_conversation() -> None:
     msg = describe_model_error(status_error(openai.BadRequestError, 400, GEMINI_400), "gemini-3.1-pro").message
     assert "gemini-3.1-pro" in msg
-    assert "volvé a abrir Vision" in msg  # recargar desde disco destraba (replay real 2026-09-24: 200)
+    assert "volvé a abrir ULTRON" in msg  # recargar desde disco destraba (replay real 2026-09-24: 200)
     assert "otro modelo" in msg
 
 

@@ -66,6 +66,9 @@ def _reset(world, monkeypatch):
     world.alive = set()
     world.dns = []
     ph.reset_for_tests()
+    # ULTRON viene sin proxy predeterminado; estos e2e (heredados) prueban la pantalla con una empresa que SI tiene uno.
+    monkeypatch.setattr(ph, "DEFAULT_PROXY", "http://proxy.empresa.com:83")
+    monkeypatch.setattr(ph, "_FALLBACK_NO_PROXY", ".empresa.com,empresa.com,19.0.0.0/8,10.0.0.0/8")
     monkeypatch.delenv("HTTPS_PROXY", raising=False)
     monkeypatch.delenv("HTTP_PROXY", raising=False)
     yield

@@ -49,7 +49,8 @@ RESOURCE_ROOT = (
 # exe.bat, ejecucion 100% congelada en un solo proceso).
 # Carpeta de datos propia (spec vision-generico): distinta de la de otras
 # instalaciones de Vision en la misma PC, para no compartir `.env` ni sesiones.
-DATA_FOLDER_NAME = "Vision-personal"
+# ULTRON 2.0 (spec portar-desde-origen REQ-009): `Ultron`; la primera vez copia lo de `Vision-personal` (ver `app/data_migration.py`).
+DATA_FOLDER_NAME = "Ultron"
 
 _DEV_MODE = os.environ.get("VISION_DEV_MODE") == "1"
 BASE_DIR = (
@@ -62,6 +63,13 @@ BASE_DIR = (
         / DATA_FOLDER_NAME
     )
 )
+
+# REQ-009 (spec portar-desde-origen): antes de crear nada, traer los datos de Vision-Personal si es la primera vez. Solo en la
+# instalacion real (ni en modo desarrollo ni con VISION_DATA_DIR, que usan los tests).
+if not (_DEV_MODE and not IS_FROZEN) and not os.environ.get("VISION_DATA_DIR"):
+    from app import data_migration  # import diferido: solo libreria estandar, no importa la configuracion
+
+    data_migration.migrate(BASE_DIR.parent / data_migration.PREVIOUS_FOLDER_NAME, BASE_DIR)
 
 # Toda ruta usada para escritura debe existir antes de que otros módulos la
 # evalúen durante sus imports.

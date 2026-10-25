@@ -3,6 +3,59 @@
 Formato: una entrada por versión, lo más nuevo arriba. Subir `__version__` en
 `backend/app/version.py` y registrar acá cada vez que se toca `backend/app/` o `frontend/`.
 
+## 2.0.0 (2026-10-25) — ULTRON
+
+**Vision-Personal pasa a llamarse ULTRON** (spec `portar-desde-origen`) y trae todas las mejoras de la versión de origen hasta
+su 0.36.2 (74 versiones), sin nada propio de esa empresa. El diseño de la interfaz no cambia.
+
+**Lo propio de ULTRON**
+- **Nombre:** ULTRON en todo lo visible: `Ultron.exe`, `Iniciar-Ultron.bat`, títulos, avisos y la presentación del
+  asistente. Se lo llama por voz con «**Ultron**» (o «Jarvis»), ya no con «Vision».
+- **Carpeta propia:** `%LOCALAPPDATA%\Ultron`. La primera vez copia lo de `%LOCALAPPDATA%\Vision-personal` (el `.env`, las
+  claves, las sesiones, las alarmas y `connections.json`), sin tocar la carpeta vieja, y avisa una vez en el chat. Puerto 8030.
+- **Apagados de fábrica:** Outlook y Teams, y Office. Se prenden en Configuración > Conexiones.
+- **Outlook y Teams:** la dirección del conector MCP de Microsoft 365 se configura (antes era fija).
+- **Configuración:** el proveedor de IA principal, el dictado y el nombre de la empresa se cargan desde Configuración >
+  Conexiones > General, en «Inteligencia artificial». La configuración queda cifrada, sin necesidad de `.env`.
+- **Proxy:** sin proxy predeterminado de fábrica. La autocuración prueba lo guardado, su DNS, la PAC de Windows y salir directo.
+- **README:** sección **«Conexión a LLMs»** con los proveedores y la IA local (Ollama), con pasos y tiempos medidos.
+
+**Heredado de la versión de origen (por tema)**
+- **Conexiones:** gestor de conexiones cifrado dentro de la app (sin `.env` obligatorio), conexiones con nombre (varias del
+  mismo tipo), interruptor por conexión, «Probar» antes de guardar, Confluence (solo lectura) y SharePoint con listas completas.
+- **Chat y sesiones:**
+  - historial en SQLite que sobrevive a reinicios;
+  - Detener inmediato y cola de mensajes, con barra de progreso real («Escribiendo archivo… N KB»);
+  - aviso de contexto largo con un chip de uso, y aviso de compactación automática;
+  - índice de sesiones resiliente (copia diaria y re-escaneo) y borrado seguro con rastro;
+  - al cambiar de carpeta, pregunta si copia el historial, y se puede importar el historial de una carpeta;
+  - sesiones públicas y privadas, y `/update` con lo nuevo de las públicas de otros;
+  - aviso al eliminar una sesión que otros usan.
+- **Archivos:** adjuntar PDF, Word, Excel y PowerPoint (también las imágenes de adentro), con lectura de PDF escaneados.
+- **Modelos:** ventana de contexto real por modelo cuando el proveedor la informa, aviso claro cuando un modelo no admite
+  herramientas, y reintento automático cuando el proveedor corta una respuesta a la mitad.
+- **Voz:**
+  - Modo Cerebro con Espacio como botón de turnos o para mantener y hablar, sensibilidad del micrófono y cartel de estado;
+  - Modo reunión que escucha el audio de la PC sin silenciarlo (en mono, para que el dictado lo acepte);
+  - control del micrófono de Windows (silenciado y volumen);
+  - informe técnico hablado con nivel resumido o detallado.
+- **Office por COM:** leer y escribir el Excel que tenés abierto y convertir documentos.
+- **Microsoft 365 por MCP:** correo, agenda, chats y canales de Teams y OneDrive; enviar siempre pide confirmación.
+- **Robustez:**
+  - lanzador que no deja la instalación a medias (y la repara), con dependencias verificadas;
+  - LSP que se recupera solo, `grep` que no se cuelga y tiempos de herramientas seguros;
+  - errores con estilo de nota del sistema en rojo y luz de conexión en vivo;
+  - aviso de Windows al terminar y metadatos de versión en el `.exe`.
+
+**Arreglos propios de esta versión**
+- **LSP:** el cliente esperaba la respuesta de `initialize` solo 5 s. En una PC lenta, o con el antivirus revisando un entorno
+  recién instalado, `pylsp` tardó 10 s y el primer diagnóstico salía vacío siempre. Ahora espera el arranque con su propio margen.
+- **Proveedores:** cuando un proveedor no responde, el aviso dice qué hacer (si es el proxy, Configuración > Red); el texto
+  crudo de la falla queda solo en el log.
+
+**Quitado (era solo de la versión de origen):** el SDK y el login de su gateway de IA, su índice privado de paquetes, sus skills
+internas, su flujo dev→prod y sus herramientas internas de desarrollo.
+
 ## 1.1.0 (2026-09-27)
 
 **Voz de Vision con motores intercambiables** (spec `voz-fish-audio`) y **varios proveedores de IA a la vez**

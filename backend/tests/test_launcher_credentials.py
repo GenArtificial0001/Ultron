@@ -37,7 +37,7 @@ def _no_real_connections_file(monkeypatch, tmp_path):
 
 @pytest.fixture
 def dirs(tmp_path):
-    data_dir = tmp_path / "Vision-personal"
+    data_dir = tmp_path / "Ultron"
     backend_dir = data_dir / "app" / "backend"  # donde el .exe extrae el codigo
     backend_dir.mkdir(parents=True)
     return backend_dir, data_dir
@@ -48,7 +48,7 @@ def test_data_dir_follows_the_same_rule_as_the_app(monkeypatch, tmp_path):
     monkeypatch.delenv("VISION_DEV_MODE", raising=False)
     monkeypatch.delenv("VISION_DATA_DIR", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "Local"))
-    assert launcher._data_dir(backend_dir) == tmp_path / "Local" / "Vision-personal"  # .exe
+    assert launcher._data_dir(backend_dir) == tmp_path / "Local" / "Ultron"  # .exe
     monkeypatch.setenv("VISION_DATA_DIR", str(tmp_path / "otra"))
     assert launcher._data_dir(backend_dir) == (tmp_path / "otra").resolve()
     monkeypatch.setenv("VISION_DEV_MODE", "1")

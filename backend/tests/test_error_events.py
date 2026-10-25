@@ -156,7 +156,7 @@ def test_model_rejection_reaches_the_chat_in_plain_language(monkeypatch, caplog)
     assert error["type"] == "error"
     data = error["data"]
     assert data["code"] == "MODELO-HISTORIAL"
-    assert MODEL in data["message"] and "volvé a abrir Vision" in data["message"]
+    assert MODEL in data["message"] and "volvé a abrir ULTRON" in data["message"]
     assert RAW not in data["message"] and "HTTP" not in data["message"]
     # El codigo, el HTTP y la hora van aparte, en "Detalle tecnico".
     assert data["technical"].startswith(f"MODELO-HISTORIAL · HTTP 400 · {MODEL} · ")

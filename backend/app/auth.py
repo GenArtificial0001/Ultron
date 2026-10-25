@@ -73,7 +73,7 @@ class AccessTokenMiddleware(BaseHTTPMiddleware):
                 status_code=401,
                 content={
                     "detail": (
-                        "Este navegador no tiene la clave de acceso de Vision, o no es la "
+                        "Este navegador no tiene la clave de acceso de ULTRON, o no es la "
                         "correcta. Cargala en Configuración > Servidor, en «Token de acceso»."
                     )
                 },
@@ -101,8 +101,8 @@ class OpaqueOriginMiddleware(BaseHTTPMiddleware):
                 content={
                     "detail": (
                         "Esta vista previa está aislada y no puede usar las funciones de "
-                        "Vision. Desactivá el modo «Aislado» del Navegador Integrado si "
-                        "necesitás que se comunique con Vision."
+                        "ULTRON. Desactivá el modo «Aislado» del Navegador Integrado si "
+                        "necesitás que se comunique con ULTRON."
                     )
                 },
             )

@@ -28,7 +28,7 @@ pytestmark = pytest.mark.e2e
 
 MODEL = "claude-sonnet-4-6"
 SPEND_429 = f"Error code: 429 - Too much spend: model {MODEL} is limited to $50 per 600 seconds. RAW-PROVEEDOR"
-OFFLINE = "No hay conexión con Vision."
+OFFLINE = "No hay conexión con ULTRON."
 # Lo que NUNCA debe aparecer en el texto principal de un error.
 JARGON = re.compile(r"HTTP|\b[45]\d\d\b|Failed to fetch|TypeError|RAW-PROVEEDOR|Error code|undefined|\[object", re.I)
 
@@ -114,7 +114,7 @@ def last_error(app) -> dict:
 def revalidate_last_error(app) -> str:
     app.page.locator(".msg.error .btn-reset").last.click()
     app.page.wait_for_function(
-        "() => [...document.querySelectorAll('.msg.error .msg-text')].at(-1).textContent.includes('Vision')"
+        "() => [...document.querySelectorAll('.msg.error .msg-text')].at(-1).textContent.includes('ULTRON')"
     )
     app.page.wait_for_function("() => !document.querySelector('.msg.error .btn-reset.copied')")
     return app.page.evaluate("() => [...document.querySelectorAll('.msg.error .msg-text')].at(-1).textContent")
@@ -162,11 +162,11 @@ def test_lost_connection_is_explained_and_revalidation_confirms_recovery(app):
     assert not JARGON.search(error["text"]), error["text"]
     assert error["kind"] == "offline"
     assert error["technical"].startswith("TypeError")  # el detalle crudo, plegado
-    assert app.page.text_content("#conn-status-text") == "Sin conexión con Vision"
+    assert app.page.text_content("#conn-status-text") == "Sin conexión con ULTRON"
 
     # El backend sigue vivo (solo se corto /api/chat): revalidar lo confirma.
     text = revalidate_last_error(app)
-    assert text == "✓ Vision volvió a responder. Ya podés seguir."
+    assert text == "✓ ULTRON volvió a responder. Ya podés seguir."
     assert last_error(app)["solved"] is True
 
 
@@ -178,7 +178,7 @@ def test_server_error_without_detail_is_explained(app):
     send(app)
 
     error = last_error(app)
-    assert error["text"].startswith("Vision tuvo un problema interno.")
+    assert error["text"].startswith("ULTRON tuvo un problema interno.")
     assert not JARGON.search(error["text"]), error["text"]
     assert error["technical"] == "HTTP 500"
 
@@ -217,7 +217,7 @@ def test_dictation_without_mic_permission_is_explained(app):
     app.page.evaluate("window.__gumFail = 'NotAllowedError'")
     app.page.click("#voice-mic-btn")
 
-    app.wait_note("Vision no tiene permiso para usar el micrófono.")
+    app.wait_note("ULTRON no tiene permiso para usar el micrófono.")
     assert app.page.get_attribute("#voice-mic-btn", "data-listening") == "false"
 
 
@@ -225,7 +225,7 @@ def test_brain_mode_without_mic_permission_does_not_promise_to_wait_for_a_mic(ap
     app.page.evaluate("window.__gumFail = 'NotAllowedError'")
     app.page.click("#brain-btn")
 
-    app.wait_note("Modo Cerebro: Vision no tiene permiso para usar el micrófono.")
+    app.wait_note("Modo Cerebro: ULTRON no tiene permiso para usar el micrófono.")
     assert not any("apenas conectes uno" in n for n in app.notes())
     app.page.keyboard.press("Escape")
 
@@ -252,7 +252,7 @@ def test_failed_model_settings_save_is_not_reported_as_saved(app):
     app.page.wait_for_function("() => document.querySelector('#cfg-model-status').classList.contains('error')")
     status = app.page.text_content("#cfg-model-status")
     assert "Guardado" not in status
-    assert status.startswith("Vision tuvo un problema interno.")
+    assert status.startswith("ULTRON tuvo un problema interno.")
 
 
 def test_connector_listing_error_is_shown_instead_of_an_empty_list(app):

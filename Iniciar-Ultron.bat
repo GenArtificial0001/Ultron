@@ -49,7 +49,7 @@ if /i "%REQ_HASH%"=="%OLD_HASH%" (
     )
     if errorlevel 1 (
         echo ADVERTENCIA: no se pudieron instalar/actualizar todas las dependencias
-        echo ^(revisa tu conexion, la VPN o el proxy de tu empresa^). Vision va a
+        echo ^(revisa tu conexion, la VPN o el proxy de tu empresa^). ULTRON va a
         echo arrancar igual con lo que ya este instalado.
     ) else (
         > ".venv\.vision-deps-ok" echo %REQ_HASH%
@@ -57,7 +57,7 @@ if /i "%REQ_HASH%"=="%OLD_HASH%" (
 )
 
 echo.
-echo Levantando Vision en http://127.0.0.1:8030/ ...
+echo Levantando ULTRON en http://127.0.0.1:8030/ ...
 echo Cerrar esta ventana apaga el servidor.
 echo.
 

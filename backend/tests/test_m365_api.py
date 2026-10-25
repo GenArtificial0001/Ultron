@@ -138,7 +138,7 @@ def test_the_rejection_message_is_for_a_person(api):
     resp = api.post("/api/m365/logout", headers={"Origin": "https://sitio-ajeno.com"})
 
     detail = resp.json()["detail"]
-    assert "Vision" in detail and "Traceback" not in detail and "403" not in detail
+    assert "ULTRON" in detail and "Traceback" not in detail and "403" not in detail
 
 
 # ---------------------------------------------------------------------------------------------------------------------

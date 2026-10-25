@@ -652,14 +652,14 @@ def _sweep_finished_runs() -> None:
             # no hay forma de saber el resultado real -- se cierra igual
             # para no dejarlo 'running' para siempre.
             mi.finish_agent_run(
-                run["id"], "done", "No se sabe cómo terminó: Vision se reinició mientras corría."
+                run["id"], "done", "No se sabe cómo terminó: ULTRON se reinició mientras corría."
             )
             continue
 
         turns = [session.turns.get(tid) for tid in turn_ids]
         if any(t is None for t in turns):
             mi.finish_agent_run(
-                run["id"], "done", "No se sabe cómo terminó: Vision se reinició mientras corría."
+                run["id"], "done", "No se sabe cómo terminó: ULTRON se reinició mientras corría."
             )
             continue
 

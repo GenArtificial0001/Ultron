@@ -61,7 +61,7 @@ def _silent_provider(url: str) -> OAuthClientProvider:
     return auth.VisionOAuthProvider(
         server_url=url,
         client_metadata=OAuthClientMetadata(
-            client_name="Vision",
+            client_name="ULTRON",
             redirect_uris=[redirect],
             grant_types=["authorization_code", "refresh_token"],
             response_types=["code"],

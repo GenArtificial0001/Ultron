@@ -131,7 +131,8 @@ from app import browser_workspace, credentials, lsp
 from app import commands as commands_module
 from app import project_context as pc
 from app.auth import AccessTokenMiddleware, OpaqueOriginMiddleware
-from app.config import RESOURCE_ROOT, get_settings
+from app import data_migration
+from app.config import BASE_DIR, RESOURCE_ROOT, get_settings
 from app.connectors.sharepoint_connector import (
     SharePointConnectionError,
     SharePointConnector,
@@ -199,7 +200,7 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
-app = FastAPI(title="Vision API", version=__version__)
+app = FastAPI(title="ULTRON API", version=__version__)
 
 app.add_middleware(
     CORSMiddleware,
@@ -505,7 +506,7 @@ def voice_speak(req: VoiceSpeakRequest) -> dict:
             raise HTTPException(400, detail="Ese motor de voz no existe.")
         # REQ-002: ni siquiera la prueba sale a la nube sin consentimiento.
         if engine.cloud and not voice_load_config().consent.get(req.engine):
-            raise HTTPException(400, detail=f"Primero confirmá que el texto que Vision lee se envía a {engine.label}.")
+            raise HTTPException(400, detail=f"Primero confirmá que el texto que ULTRON lee se envía a {engine.label}.")
         only = {"engine": req.engine, "model": req.model or engine.models[0]}
     try:
         result = voice_service.speak(text, only=only)
@@ -624,7 +625,7 @@ def _audio_guard(request: Request) -> None:
     if problem:
         raise HTTPException(
             status_code=403,
-            detail="El audio de esta PC solo se puede cambiar desde la página de Vision en esta misma PC.",
+            detail="El audio de esta PC solo se puede cambiar desde la página de ULTRON en esta misma PC.",
         )
 
 
@@ -702,7 +703,7 @@ def _proxy_guard(request: Request) -> None:
     if problem:
         raise HTTPException(
             status_code=403,
-            detail="La salida a internet solo se puede cambiar desde la página de Vision en esta misma PC.",
+            detail="La salida a internet solo se puede cambiar desde la página de ULTRON en esta misma PC.",
         )
 
 
@@ -786,7 +787,7 @@ def _office_guard(request: Request) -> None:
     )
     if problem:
         raise HTTPException(
-            status_code=403, detail="Office solo se puede ver y cambiar desde la página de Vision en esta misma PC."
+            status_code=403, detail="Office solo se puede ver y cambiar desde la página de ULTRON en esta misma PC."
         )
 
 
@@ -882,7 +883,7 @@ def _m365_guard(request: Request, *, from_empresa_redirect: bool = False) -> Non
     if problem:
         raise HTTPException(
             status_code=403,
-            detail="Outlook y Teams solo se pueden conectar desde la página de Vision en esta misma PC.",
+            detail="Outlook y Teams solo se pueden conectar desde la página de ULTRON en esta misma PC.",
         )
 
 
@@ -944,7 +945,7 @@ async def m365_logout(request: Request) -> dict:
 
 
 _M365_CALLBACK_PAGE = (
-    '<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Vision</title>'
+    '<!doctype html><html lang="es"><head><meta charset="utf-8"><title>ULTRON</title>'
     "<style>body{{font-family:Segoe UI,Arial,sans-serif;background:#10131a;color:#e8eaf0;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}}"
     "main{{max-width:30rem;padding:2rem;text-align:center}}h1{{font-size:1.25rem;margin:0 0 .75rem}}p{{margin:0;color:#aab0bf}}</style></head>"
     "<body><main><h1>{title}</h1><p>{text}</p></main></body></html>"
@@ -969,15 +970,15 @@ def m365_callback(request: Request, code: str = "", state: str = "", error: str 
         if service.deliver_error(state=state, reason=error):
             return _m365_callback_page(
                 "No se pudo iniciar sesión",
-                "No se autorizó el acceso. Podés cerrar esta pestaña y volver a tocar «Iniciar sesión» en Vision.",
+                "No se autorizó el acceso. Podés cerrar esta pestaña y volver a tocar «Iniciar sesión» en ULTRON.",
             )
     elif code and service.deliver_callback(code=code, state=state):
         return _m365_callback_page(
-            "Listo, ya podés volver a Vision", "Iniciaste sesión en Outlook y Teams. Podés cerrar esta pestaña."
+            "Listo, ya podés volver a ULTRON", "Iniciaste sesión en Outlook y Teams. Podés cerrar esta pestaña."
         )
     return _m365_callback_page(
         "Este aviso no corresponde a ningún inicio de sesión",
-        "No se cambió nada. Si querés conectarte, volvé a Vision y tocá «Iniciar sesión». Podés cerrar esta pestaña.",
+        "No se cambió nada. Si querés conectarte, volvé a ULTRON y tocá «Iniciar sesión». Podés cerrar esta pestaña.",
     )
 
 
@@ -1208,7 +1209,7 @@ async def meeting_analyze(req: MeetingAnalyzeRequest) -> dict:
             502,
             detail=(
                 "No pude preparar mi respuesta en la reunión por un problema interno de "
-                "Vision. La reunión sigue escuchando; si se repite, cerrá y volvé a abrir Vision."
+                "ULTRON. La reunión sigue escuchando; si se repite, cerrá y volvé a abrir ULTRON."
             ),
         ) from None
 
@@ -1259,11 +1260,11 @@ async def meeting_summarize(req: MeetingSummarizeRequest) -> dict:
     if session.is_busy:
         raise HTTPException(
             409,
-            detail="Vision está terminando otra respuesta en esta conversación. Esperá a que termine y probá de nuevo.",
+            detail="ULTRON está terminando otra respuesta en esta conversación. Esperá a que termine y probá de nuevo.",
         )
 
     summarize_prompt = (
-        "Se terminó una reunión (Modo reunión de Vision). A continuación está la "
+        "Se terminó una reunión (Modo reunión de ULTRON). A continuación está la "
         "transcripción completa de audio capturada en vivo (puede tener errores de "
         "transcripción, ruido, o partes cortadas). Generá un RESUMEN ESTRUCTURADO en "
         "formato Markdown con estas 3 secciones, en este orden exacto: "
@@ -1289,8 +1290,8 @@ async def meeting_summarize(req: MeetingSummarizeRequest) -> dict:
         raise HTTPException(
             502,
             detail=(
-                "No pude armar el resumen de la reunión por un problema interno de Vision. "
-                "Probá de nuevo; si se repite, cerrá y volvé a abrir Vision."
+                "No pude armar el resumen de la reunión por un problema interno de ULTRON. "
+                "Probá de nuevo; si se repite, cerrá y volvé a abrir ULTRON."
             ),
         ) from None
 
@@ -1324,6 +1325,8 @@ def status() -> dict:
         "version": __version__,
         # spec vision-generico REQ-005: nombre de la empresa en la pantalla.
         "company_name": settings.vision_company_name,
+        # REQ-009 (spec portar-desde-origen): que se copio de Vision-Personal, UNA sola vez (despues ya no viene).
+        "data_migration": data_migration.take_notice(BASE_DIR),
         # spec salto-automatico-modelos: con el salto activo, el selector de
         # modelos ofrece "Automatico (segun tu lista de prioridad)".
         "model_fallback_enabled": model_fallback.load_settings().enabled,
@@ -2145,12 +2148,12 @@ def clear_conversation_endpoint(session_id: str) -> dict:
     if session is None:
         raise HTTPException(
             404,
-            detail="Esta conversación ya no está abierta en Vision (puede que se haya reiniciado). Recargá la página.",
+            detail="Esta conversación ya no está abierta en ULTRON (puede que se haya reiniciado). Recargá la página.",
         )
     if session.is_busy:
         raise HTTPException(
             409,
-            detail="Vision todavía está respondiendo en esta conversación. Frenala con el botón Detener y después limpiala.",
+            detail="ULTRON todavía está respondiendo en esta conversación. Frenala con el botón Detener y después limpiala.",
         )
 
     session.messages = []
@@ -2318,7 +2321,7 @@ async def edit_message_endpoint(session_id: str, message_id: str, req: EditMessa
     if session is None:
         raise HTTPException(
             status_code=404,
-            detail="Esta conversación ya no está abierta en Vision (puede que se haya reiniciado). Recargá la página.",
+            detail="Esta conversación ya no está abierta en ULTRON (puede que se haya reiniciado). Recargá la página.",
         )
 
     # Caso 1: turno activo ahora mismo (REQ-004)
@@ -2452,7 +2455,7 @@ def _truncate_closed_history(session, session_id: str, message_id: str, start: i
         # No deberia pasar (el turno activo sale por su propio caso): ante la duda no se toca nada antes que romper lo que corre.
         raise HTTPException(
             status_code=409,
-            detail=f"Ese mensaje es parte de lo que Vision está respondiendo ahora. Frenala con el botón Detener y después {after_stop}.",
+            detail=f"Ese mensaje es parte de lo que ULTRON está respondiendo ahora. Frenala con el botón Detener y después {after_stop}.",
         )
     del session.messages[start:running_start]
     persistence_service.truncate_from_message(session_id, message_id, until_message_id=running_turn_id)
@@ -2497,7 +2500,7 @@ def delete_response_endpoint(session_id: str, message_id: str) -> dict:
     if session is None:
         raise HTTPException(
             status_code=404,
-            detail="Esta conversación ya no está abierta en Vision (puede que se haya reiniciado). Recargá la página.",
+            detail="Esta conversación ya no está abierta en ULTRON (puede que se haya reiniciado). Recargá la página.",
         )
 
     # REQ-006 (reglas de negocio): no se puede borrar el turno activo
@@ -2588,7 +2591,7 @@ def reorder_queue_endpoint(session_id: str, req: ReorderQueueRequest) -> dict:
     if session is None:
         raise HTTPException(
             status_code=404,
-            detail="Esta conversación ya no está abierta en Vision (puede que se haya reiniciado). Recargá la página.",
+            detail="Esta conversación ya no está abierta en ULTRON (puede que se haya reiniciado). Recargá la página.",
         )
     ok = session.reorder_queue(req.message_id, req.new_position)
     if not ok:
@@ -3703,7 +3706,7 @@ def _confluence_for_request(connection: str | None):
     """(conector, conexion) de Confluence para un endpoint. La conexion se elige SOLO por nombre contra el registro; 404 con los nombres validos si no existe."""
     settings = get_settings()
     if not getattr(settings, "enable_confluence", True):
-        raise HTTPException(status_code=400, detail="Confluence está desactivado en esta instalación de Vision.")
+        raise HTTPException(status_code=400, detail="Confluence está desactivado en esta instalación de ULTRON.")
     try:
         conn = switches.resolve_enabled("confluence", connection or None)
     except switches.DisabledConnectionError as exc:
@@ -3894,7 +3897,7 @@ def _vault_require_imported() -> None:
     if not config_store.is_active() and any(config_import.legacy_sources().values()):
         raise HTTPException(
             status_code=409,
-            detail="Primero importá lo que tenés en el .env (botón «Importar a Vision»): si no, tus conexiones de ahora dejarían de verse.",
+            detail="Primero importá lo que tenés en el .env (botón «Importar a ULTRON»): si no, tus conexiones de ahora dejarían de verse.",
         )
 
 
@@ -3993,7 +3996,7 @@ def vault_delete_legacy_files(request: Request) -> dict:
     if not config_store.is_active():
         raise HTTPException(
             status_code=409,
-            detail="Primero importá tus archivos a Vision: si los borrás antes, perdés esas conexiones.",
+            detail="Primero importá tus archivos a ULTRON: si los borrás antes, perdés esas conexiones.",
         )
     return config_import.delete_legacy_files()
 
@@ -4529,7 +4532,7 @@ async def list_bigquery_datasets_for_config() -> dict:
     if not settings.enable_bigquery:
         raise HTTPException(
             status_code=400,
-            detail="BigQuery no está activado en esta instalación de Vision. Si lo necesitás, avisá a soporte.",
+            detail="BigQuery no está activado en esta instalación de ULTRON. Si lo necesitás, avisá a soporte.",
         )
     try:
         datasets = await asyncio.wait_for(
@@ -4551,7 +4554,7 @@ async def list_bigquery_tables_for_config(dataset_id: str) -> dict:
     if not settings.enable_bigquery:
         raise HTTPException(
             status_code=400,
-            detail="BigQuery no está activado en esta instalación de Vision. Si lo necesitás, avisá a soporte.",
+            detail="BigQuery no está activado en esta instalación de ULTRON. Si lo necesitás, avisá a soporte.",
         )
     try:
         tables = await asyncio.wait_for(
@@ -4578,7 +4581,7 @@ async def list_sharepoint_lists_for_config(name: str | None = None) -> dict:
     if not settings.enable_sharepoint:
         raise HTTPException(
             status_code=400,
-            detail="SharePoint no está activado en esta instalación de Vision. Si lo necesitás, avisá a soporte.",
+            detail="SharePoint no está activado en esta instalación de ULTRON. Si lo necesitás, avisá a soporte.",
         )
     try:
         lists = await asyncio.wait_for(
@@ -4853,13 +4856,13 @@ async def fs_native_picker(initial_path: str = "", mode: str = "folder") -> dict
                     # leerlo en su lugar (sin filtro de ejecutables, a diferencia de "file").
                     selected = filedialog.askopenfilename(
                         initialdir=initial_path or str(Path.home()),
-                        title="Elegir archivo a adjuntar - Vision",
+                        title="Elegir archivo a adjuntar - ULTRON",
                         filetypes=[("Todos los archivos", "*.*")],
                     )
                 elif mode == "file":
                     selected = filedialog.askopenfilename(
                         initialdir=initial_path or str(Path.home()),
-                        title="Elegir archivo a ejecutar - Vision",
+                        title="Elegir archivo a ejecutar - ULTRON",
                         filetypes=[
                             ("Ejecutables/Scripts", "*.exe;*.bat;*.cmd;*.ps1;*.com"),
                             ("Todos los archivos", "*.*"),
@@ -4868,7 +4871,7 @@ async def fs_native_picker(initial_path: str = "", mode: str = "folder") -> dict
                 else:
                     selected = filedialog.askdirectory(
                         initialdir=initial_path or str(Path.home()),
-                        title="Elegir carpeta de proyecto - Vision",
+                        title="Elegir carpeta de proyecto - ULTRON",
                     )
             finally:
                 root.destroy()
@@ -5398,7 +5401,7 @@ def _browser_waiting_page():
             "color:#666d78;display:flex;align-items:center;justify-content:center;"
             "height:100vh;margin:0'>"
             "Aún no hay ningún archivo HTML en esta sesión.<br>"
-            "Pedile a Vision que genere un dashboard o proyecto para previsualizar acá."
+            "Pedile a ULTRON que genere un dashboard o proyecto para previsualizar acá."
             "</body></html>"
         ),
         media_type="text/html; charset=utf-8",

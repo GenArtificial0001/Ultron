@@ -36,7 +36,7 @@ PEER_CLOSED = "peer closed connection without sending complete message body (inc
 RETRY_LOG = "Corte del proveedor de IA a mitad de la respuesta; reintento 1"
 CORTE_TEXT = (
     "El proveedor de IA (el servicio de inteligencia artificial de la empresa) cortó la conexión en medio de la respuesta. "
-    "No fue un error de Vision. Volvé a enviar tu mensaje; si pasa seguido, elegí otro modelo en el selector de arriba."
+    "No fue un error de ULTRON. Volvé a enviar tu mensaje; si pasa seguido, elegí otro modelo en el selector de arriba."
 )
 TODOS_ARGS = json.dumps({"todos": [{"content": "paso 1", "status": "in_progress", "priority": "high"}]})
 

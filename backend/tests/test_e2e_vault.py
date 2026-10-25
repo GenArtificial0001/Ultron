@@ -126,7 +126,7 @@ def test_after_importing_the_old_files_can_be_deleted_after_confirming(app, lega
     app.page.wait_for_function("document.getElementById('vault-delete-legacy-banner') === null", timeout=15_000)
 
     assert not (legacy_dir / ".env").exists(), "el .env ya no existe"
-    assert [c.name for c in cs.list_stored()] == ["Datamart"], "lo importado sigue en Vision"
+    assert [c.name for c in cs.list_stored()] == ["Datamart"], "lo importado sigue en ULTRON"
 
 
 def test_cancelling_keeps_the_old_files(app, legacy_dir):
@@ -152,7 +152,7 @@ def test_saving_a_general_section_keeps_the_confirmation_visible(app):
     """Revision 2026-10-09: guardar una seccion general volvia a dibujar la ventana y el aviso «Guardado.» desaparecia en el acto
     (el usuario no veia confirmacion; tambien hacia intermitente a `save_section`). La ventana redibujada lo conserva."""
     open_connections_tab(app)
-    open_connector(app, "proveedor")
+    open_connector(app, "ia")
     app.page.fill("#vault-field-llm_base_url", "cliente-visible")
     app.page.click("#vault-modal #vault-save-btn")
 
@@ -162,9 +162,9 @@ def test_saving_a_general_section_keeps_the_confirmation_visible(app):
     assert notice.inner_text() == "Guardado." and notice.get_attribute("data-state") == "ok"
 
 
-def test_proveedor_credentials_are_saved_from_the_screen(app):
+def test_ai_credentials_are_saved_from_the_screen(app):
     open_connections_tab(app)
-    open_connector(app, "proveedor")
+    open_connector(app, "ia")
     app.page.fill("#vault-field-llm_base_url", "cliente-123")
     app.page.fill("#vault-field-llm_api_key", "clave-de-prueba")
     save_section(app)
@@ -437,7 +437,7 @@ def test_the_saved_notice_and_the_badges_are_readable_in_every_theme(app, theme)
     set_theme(app, theme)
     open_connections_tab(app)
     assert_readable(app, "#vault-root .vault-badge")
-    open_connector(app, "proveedor")
+    open_connector(app, "ia")
     app.page.fill("#vault-field-llm_base_url", "cliente-contraste")
     app.page.click("#vault-modal #vault-save-btn")
     app.page.wait_for_selector("#vault-modal .vault-notice[data-state=ok]", timeout=15_000)

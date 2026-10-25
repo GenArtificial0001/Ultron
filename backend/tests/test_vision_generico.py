@@ -83,7 +83,7 @@ def test_missing_configuration_reaches_the_chat_in_plain_language(llm):
         get_client()
     friendly = describe_model_error(info.value)
     assert friendly.code == "MODELO-CONFIGURACION"
-    assert friendly.message.startswith("Vision todavía no tiene configurado el servicio de inteligencia artificial.")
+    assert friendly.message.startswith("ULTRON todavía no tiene configurado el servicio de inteligencia artificial.")
 
 
 def test_client_is_reused_until_the_configuration_changes(llm):
@@ -240,7 +240,7 @@ def test_company_name_reaches_the_status_and_the_prompt(monkeypatch):
     monkeypatch.setattr(loop_module, "build_project_context_prompt", lambda session_id: "")
     monkeypatch.setattr(loop_module, "get_or_create_browser_dir", lambda session_id: "C:/tmp/browser")
     prompt = loop_module._build_system_prompt("sesion-x")
-    assert prompt.startswith("Sos Vision, un asistente superinteligente para Acme Logistica.")
+    assert prompt.startswith("Sos ULTRON, un asistente superinteligente para Acme Logistica.")
 
 
 def test_without_company_name_the_prompt_has_no_placeholder(monkeypatch):
@@ -251,7 +251,7 @@ def test_without_company_name_the_prompt_has_no_placeholder(monkeypatch):
     monkeypatch.setattr(loop_module, "build_project_context_prompt", lambda session_id: "")
     monkeypatch.setattr(loop_module, "get_or_create_browser_dir", lambda session_id: "C:/tmp/browser")
     prompt = loop_module._build_system_prompt("sesion-x")
-    assert prompt.startswith("Sos Vision, un asistente superinteligente. ")
+    assert prompt.startswith("Sos ULTRON, un asistente superinteligente. ")
     assert "{company_clause}" not in prompt
 
 

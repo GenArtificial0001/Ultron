@@ -31,11 +31,10 @@ from __future__ import annotations
 import re
 import time
 
-# Patron: "jarvis" O "vision"/"visión" en cualquier posicion, en cualquier
-# capitalizacion (VISION/Vision/vision, con o sin tilde) -- unica condicion
-# para aprobar. Ya NO se exige ninguna señal adicional de pregunta/opinion
-# (ver docstring del modulo para el porque de este cambio).
-_ASSISTANT_MENTION_RE = re.compile(r"\bjarvis\b|\bvisi[oó]n\b", re.IGNORECASE)
+# Patron: "jarvis" O "ultron"/"ultrón" en cualquier posicion, en cualquier capitalizacion -- unica condicion para aprobar. Ya NO se
+# exige ninguna señal adicional de pregunta/opinion (ver docstring del modulo para el porque de este cambio).
+# ULTRON (spec portar-desde-origen REQ-010): se lo llama «Ultron» (o «Jarvis»); ya no responde a «Vision».
+_ASSISTANT_MENTION_RE = re.compile(r"\bjarvis\b|\bultr[oó]n\b", re.IGNORECASE)
 
 # REQ-004: throttle anti-rafaga -- espaciado minimo entre intervenciones
 # aprobadas por el gate (independiente por sesion, ver MeetingGateState).

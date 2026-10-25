@@ -146,12 +146,12 @@ def assistant_texts(db_path) -> list[str]:
 # REQ-002: lo que queda en la base despues de un turno
 # ---------------------------------------------------------------------------------------------------------------------
 def test_a_plain_answer_leaves_the_user_message_and_the_full_answer(db_path):
-    events, _ = run([text_chunks("Hola, ", "soy Vision.")], user_message="quien sos")
+    events, _ = run([text_chunks("Hola, ", "soy ULTRON.")], user_message="quien sos")
 
     assert events[-1]["type"] == "done"
     saved = parts(db_path)
     assert ("user", "text", {"text": "quien sos"}) in [(r, t, {"text": d.get("text")}) for r, t, d in saved]
-    assert assistant_texts(db_path) == ["Hola, soy Vision."], "el texto final completo (los deltas no se guardan sueltos)"
+    assert assistant_texts(db_path) == ["Hola, soy ULTRON."], "el texto final completo (los deltas no se guardan sueltos)"
 
 
 def test_a_tool_call_is_saved_complete_with_its_result(db_path):

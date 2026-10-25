@@ -201,7 +201,7 @@ class TestSafety:
 
     def test_a_microphone_without_volume_control_gives_a_plain_message_not_a_crash(self, fake):
         fake.fail_with = AudioControlError(
-            "Este micrófono no deja que Vision cambie su volumen. Usá el Panel de control de Windows."
+            "Este micrófono no deja que ULTRON cambie su volumen. Usá el Panel de control de Windows."
         )
 
         with pytest.raises(AudioControlError, match="Panel de control"):

@@ -197,7 +197,7 @@ class TestAQuestionAndItsAnswer:
 
     def test_a_follow_up_question_carries_the_previous_question_and_answer(self, client, model, sid):
         fake = model.use(
-            [says("[[TIPO: conversacional]]Soy Vision."), says("[[TIPO: conversacional]]Te ayudo con stock.")]
+            [says("[[TIPO: conversacional]]Soy ULTRON."), says("[[TIPO: conversacional]]Te ayudo con stock.")]
         )
 
         ask(client, sid, "¿quién sos?")
@@ -206,7 +206,7 @@ class TestAQuestionAndItsAnswer:
         second = fake.requests[1]
         assert user_messages(second) == ["¿quién sos?", "¿en qué me ayudás?"]
         assistant = [m["content"] for m in second["messages"] if m["role"] == "assistant"]
-        assert len(assistant) == 1 and "Soy Vision." in assistant[0]  # el modelo ve su propia respuesta anterior
+        assert len(assistant) == 1 and "Soy ULTRON." in assistant[0]  # el modelo ve su propia respuesta anterior
         assert [m["role"] for m in second["messages"]].count("system") == 1  # el system prompt NO se repite
 
     def test_two_sessions_never_share_history(self, client, model):

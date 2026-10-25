@@ -87,7 +87,7 @@ def test_the_windows_certificate_factory_is_still_the_one_in_use(fake_connector,
     monkeypatch.setattr(auth, "http_client_factory", spy)
     asyncio.run(client.list_tools(url=fake_connector))
 
-    assert seen, "el cliente no uso la fabrica httpx de Vision"
+    assert seen, "el cliente no uso la fabrica httpx de ULTRON"
 
 
 def test_the_httpx_client_built_for_mcp_validates_with_the_system_certificates():

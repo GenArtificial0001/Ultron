@@ -155,14 +155,14 @@ def last_user_text(request: dict) -> str:
 # ---------------------------------------------------------------------------------------------------------------------
 class TestNormalTurn:
     def test_a_plain_answer_ends_with_done_and_leaves_the_text_in_the_history(self):
-        events, session, client = run([text("Hola, soy Vision.")])
+        events, session, client = run([text("Hola, soy ULTRON.")])
 
         assert types(events)[-1] == "done"
         assert any(
             e["type"] == "text-delta" and "Hola" in e["data"].get("text", "") for e in events
-        ) or "Hola, soy Vision." in str(events)
+        ) or "Hola, soy ULTRON." in str(events)
         assert client.completions.calls == 1
-        assert session.messages[-1]["role"] == "assistant" and "Hola, soy Vision." in str(
+        assert session.messages[-1]["role"] == "assistant" and "Hola, soy ULTRON." in str(
             session.messages[-1]["content"]
         )
 

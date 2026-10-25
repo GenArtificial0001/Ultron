@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value TEXT NOT NULL DEFAULT ''
 );
 -- spec programador-alarmas (pedido del usuario 2026-09: persistir en el DB
--- GLOBAL de Vision, no por-sesion): los programados viven a nivel Vision --
+-- GLOBAL de ULTRON, no por-sesion): los programados viven a nivel ULTRON --
 -- validos sin importar la sesion activa. Sin FK a session (es global) --
 -- eso es lo que hace que una tarea 'a las 8h' suene esté la sesion que esté.
 CREATE TABLE IF NOT EXISTS schedules (
@@ -136,7 +136,7 @@ CREATE TABLE IF NOT EXISTS secure_settings (
     value_blob BLOB NOT NULL,
     updated_at REAL NOT NULL
 );
--- spec indice-resiliente-y-borrado-seguro (0.35.7), SOLO tablas nuevas (aditivo: una version vieja de Vision que lea este archivo
+-- spec indice-resiliente-y-borrado-seguro (0.35.7), SOLO tablas nuevas (aditivo: una version vieja de ULTRON que lea este archivo
 -- las ignora). `known_folders`: carpetas que alguna vez recibieron una sesion; sobreviven a que se borre la sesion y le dicen al
 -- re-escaneo donde buscar sesiones huerfanas. `deleted_sessions`: lapida de lo que el usuario (o la purga) borro, para que el
 -- re-escaneo NUNCA resucite una sesion borrada a proposito.

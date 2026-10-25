@@ -29,7 +29,7 @@ def _webfetch_execute(args: dict, session: Any = None) -> str:
         resp = requests.get(
             url,
             timeout=TIMEOUT,
-            headers={"User-Agent": "Mozilla/5.0 (Vision-Agent)"},
+            headers={"User-Agent": "Mozilla/5.0 (ULTRON-Agent)"},
             stream=True,
         )
     except requests.RequestException as exc:

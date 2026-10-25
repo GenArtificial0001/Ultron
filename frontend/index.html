@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Vision · Asistente Inteligente</title>
+  <title>ULTRON · Asistente Inteligente</title>
   <!-- Favicon: la "V" de Vision sobre azul (spec vision-generico REQ-005,
        assets/logo.svg; los PNG y el .ico se generan de ese diseño). El .ico multi-size
        cubre navegadores viejos y el atajo de escritorio de Windows; el PNG de
@@ -239,7 +239,7 @@
           <span class="stripe stripe-1"></span>
           <span class="stripe stripe-2"></span>
         </span>
-        <span class="footer-label" id="footer-company">Vision</span>
+        <span class="footer-label" id="footer-company">ULTRON</span>
       </div>
 
       <!-- REQ-016 (spec fix-detener-y-progreso-visible, D2): aca estaba el medidor «Caché local» con «Liberar caché». Se quito:
@@ -551,7 +551,7 @@
         <div class="chat-input-wrap">
           <textarea
             id="chat-input"
-            placeholder="Escribile a Vision... ('/' para skills, Shift+Enter para nueva linea, Ctrl+V para pegar imagenes o archivos)"
+            placeholder="Escribile a ULTRON... ('/' para skills, Shift+Enter para nueva linea, Ctrl+V para pegar imagenes o archivos)"
             rows="2"
           ></textarea>
           <button type="button" id="composer-expand-btn" class="composer-expand-btn" title="Ampliar compositor">↕</button>
@@ -640,7 +640,7 @@
               <span class="quick-panel-item-label">Silenciar voz</span>
               <span id="quick-panel-mute-toggle" class="quick-panel-toggle" data-checked="false" aria-hidden="true"><span class="quick-panel-toggle-knob"></span></span>
             </button>
-            <button type="button" id="quick-panel-autosend-btn" class="quick-panel-item" title="Auto-envío: si esta desactivado, Vision espera a que digas 'visión' para enviar lo dicho">
+            <button type="button" id="quick-panel-autosend-btn" class="quick-panel-item" title="Auto-envío: si esta desactivado, ULTRON espera a que digas 'visión' para enviar lo dicho">
               <span class="quick-panel-item-icon">
                 <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                   <path d="M9 4.5a3 3 0 0 0-3 3v.2A3 3 0 0 0 4.5 10.5v.3a3 3 0 0 0-1 5.4 3 3 0 0 0 2.8 3.8H9a2 2 0 0 0 2-2V6.5a2 2 0 0 0-2-2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -672,7 +672,7 @@
               <span class="quick-panel-item-label">Loop de Tareas</span>
               <span id="quick-panel-looprun-toggle" class="quick-panel-toggle" data-checked="false" aria-hidden="true"><span class="quick-panel-toggle-knob"></span></span>
             </button>
-            <button type="button" id="quick-panel-loopauto-btn" class="quick-panel-item" title="Auto-Confirmación: en el Loop de Tareas, Vision decide las opciones (Recomendada); pausa si hay (Riesgo) o ninguna recomendada">
+            <button type="button" id="quick-panel-loopauto-btn" class="quick-panel-item" title="Auto-Confirmación: en el Loop de Tareas, ULTRON decide las opciones (Recomendada); pausa si hay (Riesgo) o ninguna recomendada">
               <span class="quick-panel-item-icon">
                 <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                   <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.6"/>
@@ -707,7 +707,7 @@
             </button>
             <!-- spec interruptores-conexiones-skills REQ-008: apartado «Conexiones» del panel rapido -- lista TODAS las conexiones configuradas (activas y
                  desactivadas) con su interruptor. Mismo patron de submenu in-place que Skills y Comandos. -->
-            <button type="button" id="quick-panel-connections-btn" class="quick-panel-item" title="Conexiones: activá o desactivá por dónde busca Vision">
+            <button type="button" id="quick-panel-connections-btn" class="quick-panel-item" title="Conexiones: activá o desactivá por dónde busca ULTRON">
               <span class="quick-panel-item-icon">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a3.5 3.5 0 0 0 5 0l2.3-2.3a3.5 3.5 0 0 0-5-5L10.8 8.2"/><path d="M14 10a3.5 3.5 0 0 0-5 0l-2.3 2.3a3.5 3.5 0 0 0 5 5L13.2 15.8"/></svg>
               </span>
@@ -755,7 +755,7 @@
           <span class="quick-browser-title">Navegador Integrado — vista previa en vivo</span>
           <span id="quick-browser-url" class="quick-browser-url" title="Hacé click para copiar la dirección"></span>
           <div class="quick-browser-window-cntrls">
-            <button type="button" id="quick-browser-isolate-btn" class="quick-browser-cntrl-btn" aria-pressed="false" title="Aislar la vista previa: el dashboard no podrá usar localStorage ni llamar a la API de Vision" aria-label="Aislar vista previa">🛡</button>
+            <button type="button" id="quick-browser-isolate-btn" class="quick-browser-cntrl-btn" aria-pressed="false" title="Aislar la vista previa: el dashboard no podrá usar localStorage ni llamar a la API de ULTRON" aria-label="Aislar vista previa">🛡</button>
             <button type="button" id="quick-browser-reset-btn" class="quick-browser-cntrl-btn" title="Restablecer posición y tamaño" aria-label="Restablecer posición y tamaño">⟲</button>
             <button type="button" id="quick-browser-open-btn" class="quick-browser-cntrl-btn" title="Abrir en pestaña del navegador" aria-label="Abrir en navegador">
               <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 13L13 3M7 3h6v6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -767,7 +767,7 @@
             <button type="button" id="quick-browser-close-btn" class="quick-browser-cntrl-btn quick-browser-cntrl-btn-close" title="Cerrar" aria-label="Cerrar">✕</button>
           </div>
         </div>
-        <iframe id="quick-browser-iframe" class="quick-browser-iframe" title="Vista previa generada por Vision"></iframe>
+        <iframe id="quick-browser-iframe" class="quick-browser-iframe" title="Vista previa generada por ULTRON"></iframe>
         <div id="quick-browser-resize-handle" class="quick-browser-resize-handle" title="Arrastrar para cambiar el tamaño" aria-hidden="true"></div>
       </div>
 
@@ -1022,7 +1022,7 @@
       <header class="dashboard-header">
         <div>
           <span class="dashboard-eyebrow">CONFIGURACIÓN</span>
-          <h2 id="settings-title">Vision</h2>
+          <h2 id="settings-title">ULTRON</h2>
         </div>
         <button id="settings-close" class="dashboard-close" type="button" title="Cerrar configuración">✕</button>
       </header>
@@ -1030,13 +1030,13 @@
       <nav class="settings-tabs" role="tablist">
         <button class="settings-tab active" type="button" data-tab="model" role="tab" title="Modelo, temperatura, razonamiento">Modelo e inteligencia</button>
         <button class="settings-tab" type="button" data-tab="appearance" role="tab" title="Tema visual claro/oscuro">Apariencia</button>
-        <button class="settings-tab" type="button" data-tab="audio" role="tab" title="Voz de Vision (TTS), micrófono y medidor de nivel">Audio</button>
+        <button class="settings-tab" type="button" data-tab="audio" role="tab" title="Voz de ULTRON (TTS), micrófono y medidor de nivel">Audio</button>
         <button class="settings-tab" type="button" data-tab="skills" role="tab" title="Carpeta/repo donde viven las skills">Skills</button>
         <button class="settings-tab" type="button" data-tab="commands" role="tab" title="Comandos propios del menú &quot;/&quot;">Comandos</button>
         <button class="settings-tab" type="button" data-tab="agentes" role="tab" title="Automatizaciones programadas: comandos, skills, archivos o alarmas/recordatorios">Agentes</button>
-        <button class="settings-tab" type="button" data-tab="credentials" role="tab" title="Claves de BigQuery y de la voz de Vision, cifradas en disco">Credenciales</button>
+        <button class="settings-tab" type="button" data-tab="credentials" role="tab" title="Claves de BigQuery y de la voz de ULTRON, cifradas en disco">Credenciales</button>
         <button class="settings-tab" type="button" data-tab="connections" role="tab" title="Estado de cada conector, exploracion de datasets/tablas y umbral de consulta pesada">Conexiones</button>
-        <button class="settings-tab" type="button" data-tab="server" role="tab" title="Configuracion avanzada de red: direccion del servidor de Vision y salida a internet (proxy)">Red</button>
+        <button class="settings-tab" type="button" data-tab="server" role="tab" title="Configuracion avanzada de red: direccion del servidor de ULTRON y salida a internet (proxy)">Red</button>
       </nav>
 
       <div class="dashboard-body settings-body">
@@ -1063,7 +1063,7 @@
           <h3 class="settings-subheading">Proveedores de IA</h3>
           <p class="settings-hint">
             Cada proveedor se activa poniendo su clave en el archivo <code>.env</code> (por ejemplo
-            <code>GEMINI_API_KEY=…</code>): Vision ya sabe su dirección y lo detecta sin reiniciar. Acá elegís
+            <code>GEMINI_API_KEY=…</code>): ULTRON ya sabe su dirección y lo detecta sin reiniciar. Acá elegís
             qué modelos de cada uno aparecen en el selector.
           </p>
           <div id="cfg-providers-list"></div>
@@ -1076,7 +1076,7 @@
 
           <h3 class="settings-subheading">Salto automático de modelos</h3>
           <p class="settings-hint">
-            Si un modelo llega a su límite de uso o el servicio no responde, Vision sigue con el siguiente de
+            Si un modelo llega a su límite de uso o el servicio no responde, ULTRON sigue con el siguiente de
             esta lista y, pasada la pausa, vuelve a probar el anterior. Con esto activo, el selector de
             modelos ofrece «Automático».
           </p>
@@ -1141,19 +1141,19 @@
           revisado en spec.md): la Web Speech API no lo soporta.
         -->
         <section class="settings-pane hidden" data-pane="audio">
-          <h3 class="settings-subheading settings-group-title">Voz de Vision (salida)</h3>
-          <p class="settings-hint">Cómo habla Vision: la voz, el informe técnico hablado y los motores de voz.</p>
+          <h3 class="settings-subheading settings-group-title">Voz de ULTRON (salida)</h3>
+          <p class="settings-hint">Cómo habla ULTRON: la voz, el informe técnico hablado y los motores de voz.</p>
 <div class="settings-field">
             <label class="settings-checkbox-label">
               <input type="checkbox" id="cfg-tts-enabled" />
-              Leer en voz alta las respuestas de Vision y la narración de progreso
+              Leer en voz alta las respuestas de ULTRON y la narración de progreso
             </label>
           </div>
           <!-- spec informe-tecnico-hablado REQ-001: prendido de fabrica -->
           <div class="settings-field">
             <label class="settings-checkbox-label">
               <input type="checkbox" id="cfg-tts-tech-report" />
-              Hablar informe técnico: mientras trabaja, Vision dice en una frase cada acción (el comando, el
+              Hablar informe técnico: mientras trabaja, ULTRON dice en una frase cada acción (el comando, el
               archivo y para qué es, las tablas que consulta). Las claves nunca se dicen.
             </label>
           </div>
@@ -1182,7 +1182,7 @@
           -->
           <h3 class="settings-subheading">Motor de voz</h3>
           <p class="settings-hint">
-            De fábrica Vision habla con la voz del navegador. Podés sumar voces de Fish Audio, ElevenLabs o
+            De fábrica ULTRON habla con la voz del navegador. Podés sumar voces de Fish Audio, ElevenLabs o
             tu propia voz clonada. <strong>La primera de la lista es la voz principal</strong> (ordenala con
             ↑ ↓); las de abajo son respaldo por si falla, y al final siempre queda la voz del navegador. Las
             claves se cargan en Configuración &gt; Credenciales.
@@ -1224,11 +1224,11 @@
             <span class="settings-section-label">Envío de texto a servicios en la nube</span>
             <label class="settings-checkbox-label">
               <input type="checkbox" id="cfg-voice-consent-fish" />
-              Acepto que el texto que Vision lee en voz alta se envíe a Fish Audio
+              Acepto que el texto que ULTRON lee en voz alta se envíe a Fish Audio
             </label>
             <label class="settings-checkbox-label">
               <input type="checkbox" id="cfg-voice-consent-elevenlabs" />
-              Acepto que el texto que Vision lee en voz alta se envíe a ElevenLabs
+              Acepto que el texto que ULTRON lee en voz alta se envíe a ElevenLabs
             </label>
           </div>
           <div class="settings-actions">
@@ -1253,7 +1253,7 @@
             <p id="cfg-voice-sample-status" class="settings-hint"></p>
           </div>
           <h3 class="settings-subheading settings-group-title">Micrófono (entrada)</h3>
-          <p class="settings-hint">Qué micrófono usa Vision, su volumen en Windows, cuánto se mueve el nivel y en qué idioma te transcribe.</p>
+          <p class="settings-hint">Qué micrófono usa ULTRON, su volumen en Windows, cuánto se mueve el nivel y en qué idioma te transcribe.</p>
           <div class="settings-field">
             <label for="cfg-mic-select">Micrófono</label>
             <select id="cfg-mic-select">
@@ -1326,7 +1326,7 @@
               <input id="cfg-meeting-ask" type="checkbox" checked />
               <span>Preguntar al empezar la reunión</span>
             </label>
-            <p class="settings-hint">El audio de la PC lo pide el navegador cada vez: elegí «Pantalla completa» y tildá «Compartir también el audio del sistema». Vision no guarda audio ni pantalla.</p>
+            <p class="settings-hint">El audio de la PC lo pide el navegador cada vez: elegí «Pantalla completa» y tildá «Compartir también el audio del sistema». ULTRON no guarda audio ni pantalla.</p>
           </div>
           <h3 class="settings-subheading settings-group-title">Modo Cerebro</h3>
           <p class="settings-hint">La conversación por voz continua: cuándo envía lo que dijiste y cómo te escucha.</p>
@@ -1341,7 +1341,7 @@
           <div class="settings-field">
             <label class="settings-checkbox-label">
               <input type="checkbox" id="cfg-brain-autosend-enabled" checked />
-              Auto-envío en Modo Cerebro (sin necesidad de decir "Vision")
+              Auto-envío en Modo Cerebro (sin necesidad de decir "ULTRON")
             </label>
           </div>
 <div class="settings-field" id="cfg-brain-autosend-pause-field">
@@ -1361,7 +1361,7 @@
           <div class="settings-field">
             <label class="settings-checkbox-label">
               <input type="checkbox" id="cfg-brain-space-interrupt-enabled" checked />
-              Interrumpir a Vision con la barra espaciadora en Modo Cerebro
+              Interrumpir a ULTRON con la barra espaciadora en Modo Cerebro
             </label>
           </div>
           <!-- spec cerebro-hablar-con-espacio-y-audio-agrupado REQ-001/002/012: como escucha el Modo Cerebro. De fabrica «Automatico» (lo de siempre). -->
@@ -1382,7 +1382,7 @@
               <option value="normal" selected>Normal (recomendado)</option>
               <option value="quiet">Silencioso: auriculares o hablando bajito</option>
             </select>
-            <p class="settings-hint">Cuánto volumen hace falta para que Vision crea que estás hablando. Si hay ruido y nunca termina de enviar, subí hacia «Muy ruidoso»; si no te escucha cuando hablás bajito, bajá hacia «Silencioso». La marca del medidor de nivel (en Micrófono) muestra dónde cae el umbral.</p>
+            <p class="settings-hint">Cuánto volumen hace falta para que ULTRON crea que estás hablando. Si hay ruido y nunca termina de enviar, subí hacia «Muy ruidoso»; si no te escucha cuando hablás bajito, bajá hacia «Silencioso». La marca del medidor de nivel (en Micrófono) muestra dónde cae el umbral.</p>
             <p id="cfg-brain-sensitivity-note" class="settings-hint" role="status" aria-live="polite"></p>
           </div>
           <h3 class="settings-subheading settings-group-title">Avisos y alarmas</h3>
@@ -1399,7 +1399,7 @@
               <input type="checkbox" id="cfg-notify-finish" checked />
               Avisarme cuando termine
             </label>
-            <p class="settings-hint">Cuando Vision termina lo que pediste con todas las tareas completadas, Windows muestra un aviso abajo a la derecha con el nombre de la sesión, la hora y el comienzo de la respuesta. Al tocarlo se abre esa sesión.</p>
+            <p class="settings-hint">Cuando ULTRON termina lo que pediste con todas las tareas completadas, Windows muestra un aviso abajo a la derecha con el nombre de la sesión, la hora y el comienzo de la respuesta. Al tocarlo se abre esa sesión.</p>
             <p class="settings-hint">Windows puede mostrar este aviso también en la pantalla bloqueada.</p>
             <p class="settings-hint">Suena el sonido de notificación de Windows. Se cambia en Windows: Configuración &gt; Sistema &gt; Sonido &gt; Más opciones de sonido &gt; Notificación.</p>
             <p class="settings-hint" id="cfg-notify-finish-permission" role="status" aria-live="polite"></p>
@@ -1462,7 +1462,7 @@
             <button id="cfg-skills-save" class="acc-action-btn" type="button">Guardar ruta</button>
             <span id="cfg-skills-status" class="settings-status"></span>
           </div>
-          <p class="settings-hint">Las skills descubiertas acá se combinan con las skills globales del usuario y aparecen en el menú "/" del chat. Apuntá esta carpeta a una ruta ya sincronizada localmente (ej. por el cliente de OneDrive/SharePoint) si querés compartir skills entre equipos -- Vision solo lee/escribe subcarpetas con SKILL.md, sin depender de ningún repo Git.</p>
+          <p class="settings-hint">Las skills descubiertas acá se combinan con las skills globales del usuario y aparecen en el menú "/" del chat. Apuntá esta carpeta a una ruta ya sincronizada localmente (ej. por el cliente de OneDrive/SharePoint) si querés compartir skills entre equipos -- ULTRON solo lee/escribe subcarpetas con SKILL.md, sin depender de ningún repo Git.</p>
 
           <!-- REQ-008 (spec agentes-huerfanos-y-gestion-skills): listado
                de las skills GLOBALES encontradas en la carpeta de arriba
@@ -1874,7 +1874,7 @@
             <button id="cfg-server-save" class="acc-action-btn" type="button">Guardar y reconectar</button>
             <span id="cfg-server-status" class="settings-status"></span>
           </div>
-          <p class="settings-hint">Por defecto, Vision usa la misma dirección con la que abriste esta página. Solo necesitás cambiar esto si querés apuntar a otra notebook/servidor distinto.</p>
+          <p class="settings-hint">Por defecto, ULTRON usa la misma dirección con la que abriste esta página. Solo necesitás cambiar esto si querés apuntar a otra notebook/servidor distinto.</p>
          </div>
 
           <!--
@@ -1898,7 +1898,7 @@
          -->
          <div data-section="proxy">
           <h3 class="settings-subheading">Proxy (salida a internet)</h3>
-          <p class="settings-hint">Es la salida a internet que usa Vision (por ejemplo, para el chat con inteligencia artificial). Al abrir Vision se verifica sola y, si la guardada dejó de responder, se cambia por otra que sí responde. Es el mismo dato que Conexiones &gt; Red y proxy.</p>
+          <p class="settings-hint">Es la salida a internet que usa ULTRON (por ejemplo, para el chat con inteligencia artificial). Al abrir ULTRON se verifica sola y, si la guardada dejó de responder, se cambia por otra que sí responde. Es el mismo dato que Conexiones &gt; Red y proxy.</p>
           <dl class="proxy-summary">
             <div><dt>En uso ahora</dt><dd id="cfg-proxy-inuse">—</dd></div>
             <div><dt>Guardada</dt><dd id="cfg-proxy-saved">—</dd></div>
