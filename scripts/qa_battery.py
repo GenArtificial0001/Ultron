@@ -221,7 +221,7 @@ def py_compile() -> bool:
     return ok
 
 
-def tool_registry(expect: int = 21) -> bool:
+def tool_registry(expect: int = 69) -> bool:  # 22 + 6 de Confluence (spec conexiones-con-nombre, Fase B) + 28 de Outlook y Teams (spec office-outlook-teams-mcp) + 4 de Office por COM (spec office-com-automatizacion) + 9 de OneDrive, canales y trust_senders (spec m365-archivos-canales-confianza)
     code = (
         "import sys; sys.path.insert(0, 'backend'); "
         "from app.tools import build_registry; "

@@ -80,3 +80,30 @@ class AccessTokenMiddleware(BaseHTTPMiddleware):
             )
 
         return await call_next(request)
+
+
+class OpaqueOriginMiddleware(BaseHTTPMiddleware):
+    """REQ-006 (spec navegador-integrado-ventana): rechaza con 403 toda
+    request a ``/api/*`` que llegue con ``Origin: null``.
+
+    Un iframe con ``sandbox`` SIN ``allow-same-origin`` (el modo "Aislado" del
+    Navegador Integrado) tiene origen opaco y el navegador manda ese header.
+    Aunque el CORS de Vision es ``*``, un dashboard aislado NO debe poder
+    llamar a la API (``POST /api/chat`` corre ``bash`` sin confirmacion).
+    Ningun cliente legitimo de Vision manda ``Origin: null`` (el frontend
+    comparte origen y curl/tests no mandan Origin), por eso el rechazo puede
+    estar siempre activo: lo que habilita el aislamiento es solo el sandbox."""
+
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path.startswith("/api/") and request.headers.get("origin") == "null":
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": (
+                        "Esta vista previa está aislada y no puede usar las funciones de "
+                        "Vision. Desactivá el modo «Aislado» del Navegador Integrado si "
+                        "necesitás que se comunique con Vision."
+                    )
+                },
+            )
+        return await call_next(request)

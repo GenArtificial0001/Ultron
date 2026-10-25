@@ -22,14 +22,17 @@ memoria), cae a `settings.workspace_path` como ultimo recurso."""
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
+import time
 from pathlib import Path
 
 import pandas as pd
 
+from app import attachment_readers as readers
 from app.config import get_settings
 from app.lsp import diagnose_python_file
-from app.tools.base import Tool
+from app.tools.base import Tool, emit_from_thread
 
 # Extensiones de datos tabulares que `read` parsea con pandas en vez de
 # decodificar como texto plano -- REQ real (usuario 2026-09-16): antes,
@@ -62,8 +65,10 @@ def _read_tabular(p: Path, offset: int, limit: int, sheet: str | int | None) -> 
         elif suffix == ".parquet":
             df = pd.read_parquet(p)
         else:
-            sep = "\t" if suffix == ".tsv" else ","
-            df = pd.read_csv(p, sep=sep)
+            # QA-033 / REQ-005 c: codificacion (UTF-8 -> cp1252) y separador
+            # (, ; tab |) detectados. Un CSV UTF-8 con coma da las mismas
+            # opciones que antes (sep=",", utf-8): no cambia lo que ya andaba.
+            df = pd.read_csv(p, **readers.csv_read_options(p, suffix))
     except Exception as exc:
         return f"Error parseando '{p.name}' como archivo de datos: {exc}"
 
@@ -73,19 +78,32 @@ def _read_tabular(p: Path, offset: int, limit: int, sheet: str | int | None) -> 
 
     lines = [f"Archivo: {p.name} ({n_rows} filas x {n_cols} columnas)"]
     if sheet_names is not None:
-        lines.append(
-            f"Hojas: {', '.join(sheet_names)} (mostrando: '{active_sheet}' -- "
-            "pasar `sheet` para elegir otra)"
-        )
+        lines.append(f"Hojas: {', '.join(sheet_names)} (mostrando: '{active_sheet}' -- pasar `sheet` para elegir otra)")
     lines.append("Columnas: " + ", ".join(f"{c} ({df[c].dtype})" for c in df.columns))
-    lines.append(
-        f"Filas {start + 1}-{min(start + limit, n_rows)} de {n_rows}:"
-        if n_rows
-        else "(sin filas)"
-    )
+    lines.append(f"Filas {start + 1}-{min(start + limit, n_rows)} de {n_rows}:" if n_rows else "(sin filas)")
     if not preview.empty:
         lines.append(preview.to_markdown(index=False))
     return "\n".join(lines)
+
+
+def _scanned_transcriber(session, on_progress):
+    """REQ-006: arma la funcion que transcribe paginas escaneadas con el modelo
+    activo de la sesion. Sin sesion/modelo conocido no transcribe (avisa)."""
+    from app import pdf_vision
+
+    catalog: dict = {}
+    try:
+        from app.main import _MODELS_CACHE  # import diferido: evita ciclo
+
+        catalog = _MODELS_CACHE.get("by_id") or {}
+    except Exception:  # noqa: BLE001 -- sin catalogo se sigue: bloqueara con mensaje claro
+        catalog = {}
+    return pdf_vision.make_transcriber(
+        model=getattr(session, "active_model", None),
+        catalog=catalog,
+        complete=pdf_vision.complete_with_proveedor,
+        on_progress=on_progress,
+    )
 
 
 def _base_dir_for_session(session) -> Path:
@@ -139,8 +157,44 @@ def _read_execute(args: dict, session=None) -> str:
     if p.suffix.lower() in _TABULAR_EXTS:
         return _read_tabular(p, offset, limit, args.get("sheet"))
 
+    # REQ-005 (spec adjuntar-archivos-chat): formatos nuevos.
+    suffix = p.suffix.lower()
+    if suffix == ".pdf":
+        # REQ-008 b: % real de parseo (pagina k de N) fuera de banda.
+        def _progress(pct: int) -> None:
+            emit_from_thread(
+                session,
+                "progress-estimate",
+                {"operation": "read", "label": f"Leyendo {p.name}…", "pct": pct},
+            )
+
+        # REQ-006: las paginas sin texto (escaneadas) se transcriben con el modelo
+        # ACTIVO del turno si soporta imagenes; si no, `read` avisa sin inventar texto.
+        from app import document_images  # import diferido: evita ciclo
+
+        return readers.read_pdf(
+            p,
+            args.get("pages"),
+            offset,
+            limit,
+            on_progress=_progress,
+            transcribe_pages=_scanned_transcriber(session, _progress),
+            images=document_images.build_context(session, p, args, _progress),
+        )
+    if suffix == ".docx":
+        from app import document_images  # import diferido: evita ciclo
+
+        return readers.read_docx(p, offset, limit, images=document_images.build_context(session, p, args))
+    unsupported = readers.unsupported_notice(p)
+    if unsupported:
+        return unsupported
+    if readers.looks_binary(p):
+        return readers.binary_notice(p)
+
     try:
-        text = p.read_text(encoding="utf-8", errors="replace")
+        # QA-033 / REQ-005 d: UTF-8 -> cp1252. Un archivo UTF-8 se lee igual
+        # que antes; uno en ANSI ya no sale con U+FFFD en cada tilde.
+        text = readers.read_text_auto(p)
     except Exception as exc:
         return f"Error leyendo archivo: {exc}"
 
@@ -148,9 +202,7 @@ def _read_execute(args: dict, session=None) -> str:
     start = max(offset - 1, 0)
     chunk = all_lines[start : start + limit]
     numbered = [f"{start + i + 1}: {line}" for i, line in enumerate(chunk)]
-    return (
-        "\n".join(numbered) if numbered else "(archivo vacio o offset fuera de rango)"
-    )
+    return "\n".join(numbered) if numbered else "(archivo vacio o offset fuera de rango)"
 
 
 read_tool = Tool(
@@ -162,7 +214,9 @@ read_tool = Tool(
         "parsean con pandas y devuelven un resumen (hojas, columnas con su tipo y "
         "un preview de filas) en vez del binario crudo -- NO hace falta pedirle al "
         "usuario que los exporte a CSV. En un Excel con varias hojas, usar 'sheet' "
-        "para elegir cual leer (por defecto, la primera)."
+        "para elegir cual leer (por defecto, la primera). Tambien lee .pdf (texto por "
+        "pagina, usar 'pages' para un rango) y .docx (parrafos y tablas en orden); un "
+        "archivo binario devuelve un aviso explicito en vez de basura."
     ),
     parameters={
         "type": "object",
@@ -186,6 +240,23 @@ read_tool = Tool(
                 "description": (
                     "Solo para Excel: nombre de la hoja a leer. Por defecto se lee la "
                     "primera; el resultado lista siempre todas las hojas disponibles."
+                ),
+            },
+            "pages": {
+                "type": "string",
+                "description": (
+                    'Solo para PDF: paginas a leer, desde 1 (ej. "3", "1-5", "2,4-6"). '
+                    "Por defecto se leen las primeras 20. En un Word con imágenes, y con images=true, elige "
+                    "NÚMEROS DE IMAGEN (ej. \"11-20\") porque un Word no tiene páginas fijas."
+                ),
+            },
+            "images": {
+                "type": "boolean",
+                "description": (
+                    "Solo para PDF y Word: leer también las IMÁGENES del documento con el modelo activo (visión). Gasta tokens "
+                    "(≈1.600 por imagen, hasta 10 por llamada): usar images=true SOLO si el usuario lo pidió o lo confirmó. Sin "
+                    "este parámetro no se leen imágenes y, si hay, el resultado trae un aviso con cuántas son y cuánto costarían; "
+                    "si el aviso te indica preguntar, preguntale al usuario con la tool question antes de volver a llamar."
                 ),
             },
         },
@@ -318,11 +389,7 @@ async def _edit_execute(args: dict, session=None) -> str:
             "identificar una unica coincidencia, o pasa replace_all=true."
         )
 
-    new_text = (
-        text.replace(old_string, new_string)
-        if replace_all
-        else text.replace(old_string, new_string, 1)
-    )
+    new_text = text.replace(old_string, new_string) if replace_all else text.replace(old_string, new_string, 1)
     p.write_text(new_text, encoding="utf-8")
     result = f"Archivo editado: {p} ({count if replace_all else 1} reemplazo(s))."
     diagnostics = await diagnose_python_file(p)
@@ -365,19 +432,49 @@ def _glob_execute(args: dict, session=None) -> str:
     if not base.exists():
         return f"Error: no existe el directorio base '{base}'."
 
-    matches = sorted(
-        base.glob(pattern),
-        key=lambda p: p.stat().st_mtime if p.exists() else 0,
-        reverse=True,
-    )
-    if not matches:
-        return "(sin resultados)"
-    return "\n".join(str(m) for m in matches[:200])
+    # BL-011 (misma regla que grep, spec grep-no-se-cuelga): los resultados que caen DENTRO de una carpeta de dependencias/cache
+    # se descartan ANTES de ordenar y de aplicar el tope de 200. Medido en este repo: `**/*.py` devolvia 200 resultados y 91 eran de
+    # `.venv/site-packages`, con lo que el codigo del proyecto quedaba fuera de la lista. Se mira cada parte de la ruta RELATIVA a la base:
+    # si la base misma es `.venv` (o esta dentro de una), se busca ahi normalmente. `Path.glob` no permite podar durante el recorrido,
+    # asi que se filtra el resultado (el recorrido de esas carpetas sigue costando; lo que se evita es ordenarlas y gastar el tope).
+    skipped_dirs: set[str] = set()
+    kept: list[Path] = []
+    for match in base.glob(pattern):
+        try:
+            parts = match.relative_to(base).parts
+        except ValueError:
+            kept.append(match)
+            continue
+        heavy = GREP_SKIP_DIRS.intersection(parts)
+        if heavy:
+            skipped_dirs.update(heavy)
+        else:
+            kept.append(match)
+
+    def _mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:  # el archivo se borro entre el listado y el orden: no debe romper la busqueda
+            return 0.0
+
+    matches = sorted(kept, key=_mtime, reverse=True)
+    body = "\n".join(str(m) for m in matches[:200]) if matches else "(sin resultados)"
+    if skipped_dirs:  # un "(sin resultados)" no puede significar "no mire"
+        body += (
+            "\n\n[NOTA] No se listo nada dentro de las carpetas de dependencias/cache: "
+            + ", ".join(sorted(skipped_dirs))
+            + ". Si necesitas buscar ahi, pasa esa carpeta en `path`."
+        )
+    return body
 
 
 glob_tool = Tool(
     name="glob",
-    description="Busca archivos por patron glob (ej. '**/*.py') dentro de un directorio base.",
+    description=(
+        "Busca archivos por patron glob (ej. '**/*.py') dentro de un directorio base, los mas recientes primero (maximo 200). "
+        "No lista lo que esta dentro de carpetas de dependencias/cache (node_modules, .venv, .git, __pycache__, site-packages...): "
+        "si algo se omitio, el resultado lo avisa. Para buscar dentro de una de ellas, pasala en `path`."
+    ),
     parameters={
         "type": "object",
         "properties": {
@@ -396,6 +493,56 @@ glob_tool = Tool(
 # --------------------------------------------------------------------------
 # grep
 # --------------------------------------------------------------------------
+# grep-no-se-cuelga: carpetas de dependencias/cache que NUNCA contienen lo que el usuario escribio. Se compara el
+# nombre exacto de la carpeta (no "contiene"), asi `mi_venv_de_prueba` o `git_notes` se siguen buscando.
+GREP_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        ".venv",
+        "venv",
+        "node_modules",
+        "__pycache__",
+        "site-packages",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+    }
+)
+GREP_MAX_FILE_BYTES = 5 * 1024 * 1024  # un archivo mas grande no es codigo: es un log o un volcado
+GREP_BINARY_PROBE_BYTES = 8192  # mismo criterio que git: un NUL en los primeros 8 KB = binario
+GREP_TIME_BUDGET_S = 60.0
+GREP_MAX_RESULTS = 300
+
+
+def _grep_now() -> float:
+    """Reloj de grep (separado para simular el paso del tiempo en los tests sin esperar de verdad)."""
+    return time.monotonic()
+
+
+def _grep_is_binary(path: Path) -> bool:
+    try:
+        with path.open("rb") as fh:
+            return b"\x00" in fh.read(GREP_BINARY_PROBE_BYTES)
+    except OSError:
+        return True  # ilegible: se trata como "no buscable" (antes tambien se saltaba, via el except de read_text)
+
+
+def _grep_walk(base: Path, skipped_dirs: set[str]):
+    """Recorre `base` en orden alfabetico sin entrar a `GREP_SKIP_DIRS` (REQ-001). Que `base` MISMA sea una de esas
+    carpetas no importa: solo se podan las de ADENTRO (REQ-002), asi buscar a proposito en `.venv` funciona."""
+    for dirpath, dirnames, filenames in os.walk(base):
+        kept = []
+        for name in sorted(dirnames):
+            if name in GREP_SKIP_DIRS:
+                skipped_dirs.add(name)
+            else:
+                kept.append(name)
+        dirnames[:] = kept
+        for name in sorted(filenames):
+            yield Path(dirpath) / name
+
+
 def _grep_execute(args: dict, session=None) -> str:
     pattern = args.get("pattern", "")
     path = args.get("path", "")
@@ -413,29 +560,76 @@ def _grep_execute(args: dict, session=None) -> str:
         return f"Error: patron regex invalido: {exc}"
 
     results: list[str] = []
-    for file_path in base.rglob("*"):
-        if not file_path.is_file():
-            continue
+    skipped_dirs: set[str] = set()
+    skipped_big: list[str] = []
+    checked = 0
+    cut_reason = ""
+    started = _grep_now()
+
+    for file_path in _grep_walk(base, skipped_dirs):
+        # REQ-007: Detener corta la busqueda (la tool corre en un hilo y antes no miraba el boton).
+        if getattr(session, "stop_requested", False):
+            cut_reason = "stop"
+            break
+        # REQ-006: tope de tiempo; devuelve lo encontrado hasta ahi.
+        if _grep_now() - started > GREP_TIME_BUDGET_S:
+            cut_reason = "time"
+            break
         if not fnmatch.fnmatch(file_path.name, include):
+            continue
+        try:
+            size = file_path.stat().st_size
+        except OSError:
+            continue
+        if size > GREP_MAX_FILE_BYTES:  # REQ-004 + REQ-005: se omite pero se cuenta
+            skipped_big.append(file_path.name)
+            continue
+        if _grep_is_binary(file_path):  # REQ-003
             continue
         try:
             text = file_path.read_text(encoding="utf-8", errors="ignore")
         except Exception:  # noqa: S112 -- best-effort: un archivo ilegible no debe frenar el grep del resto
             continue
+        checked += 1
         for lineno, line in enumerate(text.splitlines(), start=1):
             if regex.search(line):
                 results.append(f"{file_path}:{lineno}: {line.strip()[:300]}")
-                if len(results) >= 300:
+                if len(results) >= GREP_MAX_RESULTS:
                     break
-        if len(results) >= 300:
+        if len(results) >= GREP_MAX_RESULTS:
             break
 
-    return "\n".join(results) if results else "(sin coincidencias)"
+    body = "\n".join(results) if results else "(sin coincidencias)"
+    notes: list[str] = []
+    if cut_reason == "stop":
+        notes.append(f"Busqueda detenida por el usuario: se revisaron {checked} archivos antes de cortar.")
+    elif cut_reason == "time":
+        notes.append(
+            f"Busqueda cortada a los {GREP_TIME_BUDGET_S:.0f} s: se revisaron {checked} archivos y puede haber mas "
+            "coincidencias. Acota con `path` (una subcarpeta) o con `include` (ej. '*.py')."
+        )
+    if skipped_dirs:  # REQ-005: un "(sin coincidencias)" no puede significar "no mire"
+        notes.append(
+            "No se busco dentro de las carpetas de dependencias/cache: "
+            + ", ".join(sorted(skipped_dirs))
+            + ". Si necesitas buscar ahi, pasa esa carpeta en `path`."
+        )
+    if skipped_big:
+        shown = ", ".join(skipped_big[:5]) + (f" y {len(skipped_big) - 5} mas" if len(skipped_big) > 5 else "")
+        notes.append(
+            f"Se omitieron {len(skipped_big)} archivo(s) de mas de {GREP_MAX_FILE_BYTES // (1024 * 1024)} MB: {shown}."
+        )
+    return body + ("\n\n[NOTA] " + " ".join(notes) if notes else "")
 
 
 grep_tool = Tool(
     name="grep",
-    description="Busca un patron regex dentro del contenido de archivos de un directorio.",
+    description=(
+        "Busca un patron regex dentro del contenido de archivos de un directorio. No entra a carpetas de "
+        "dependencias/cache (node_modules, .venv, .git, __pycache__, site-packages...), ni a binarios ni a "
+        "archivos de mas de 5 MB, y corta a los 60 s devolviendo lo encontrado: si algo se omitio, el "
+        "resultado lo avisa. Para buscar dentro de una carpeta omitida, pasala en `path`."
+    ),
     parameters={
         "type": "object",
         "properties": {

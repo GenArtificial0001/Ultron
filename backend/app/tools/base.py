@@ -30,6 +30,7 @@ import inspect
 import json
 import logging
 import time
+import contextvars
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -46,6 +47,58 @@ logger = logging.getLogger(__name__)
 # `question` para reflejar estado en el stream SSE del frontend. Las tools
 # que no necesitan estado de sesion simplemente ignoran el 2do parametro.
 ToolExecute = Callable[[dict[str, Any], Any], "str | Awaitable[str]"]
+
+# REQ-008 b (spec adjuntar-archivos-chat): una tool sync corre en un hilo aparte
+# (`asyncio.to_thread`), pero `session.push_event` usa un `asyncio.Queue` que NO
+# es thread-safe. `dispatch` guarda aca el event loop del turno ANTES de salir al
+# hilo (`to_thread` copia el contexto), y `emit_from_thread` agenda el push en
+# ESE loop con `call_soon_threadsafe`. Asi `read` puede informar el % real de
+# parseo (pagina k de N) sin corromper la cola de eventos SSE.
+_TURN_LOOP: contextvars.ContextVar[asyncio.AbstractEventLoop | None] = contextvars.ContextVar(
+    "vision_turn_loop", default=None
+)
+
+
+# REQ-004 (spec fix-detener-y-progreso-visible): id de la tool-call que se esta ejecutando. Lo fija el bucle de tool-calling
+# (`llm/loop.py`, `_dispatch_or_intercept`) alrededor de CADA dispatch: cada tool-call corre en su propia tarea de asyncio, asi que dos
+# llamadas en paralelo no se pisan, y `asyncio.to_thread` copia el contexto al hilo de la tool. Lo usa `bash` para atribuir su salida
+# en vivo (`tool-output`) a SU tool-call sin cambiar la firma publica `execute(args, session)` de las tools. None = llamada directa.
+CURRENT_TOOL_CALL_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "vision_current_tool_call_id", default=None
+)
+
+# REQ-006 (spec fix-detener-y-progreso-visible): bandera que `dispatch` arma para CADA ejecucion. Si la tool avisa que la cortaron
+# (bash por timeout o Detener, ver `mark_duration_cut`), su duracion NO se registra en tool_timings: no es lo que tarda esa operacion,
+# es lo que tardo hasta que la cortaron (caso real: 106 948 ms de un bash interrumpido inflaron la estimacion de todos los demas).
+_DURATION_CUT: contextvars.ContextVar[list[bool] | None] = contextvars.ContextVar(
+    "vision_duration_cut", default=None
+)
+
+
+def mark_duration_cut() -> None:
+    """La tool en curso se corto (timeout, Detener): su duracion no cuenta para estimar. No-op fuera de `dispatch`."""
+    holder = _DURATION_CUT.get()
+    if holder is not None:
+        holder[0] = True
+
+
+def _stopped_by_user(session: Any) -> bool:
+    """Detener REAL (no la edicion del mensaje en curso, que tambien marca stop_requested pero deja terminar a las tools)."""
+    return bool(getattr(session, "stop_requested", False)) and (
+        getattr(session, "edit_pending_text", None) is None
+    )
+
+
+def emit_from_thread(session: Any, event_type: str, data: dict[str, Any]) -> None:
+    """Empuja un evento SSE desde el hilo de una tool. No-op si no hay loop del
+    turno (ej. tests que llaman a la tool directo) o si la sesion no existe."""
+    loop = _TURN_LOOP.get()
+    if session is None or loop is None or loop.is_closed():
+        return
+    try:
+        loop.call_soon_threadsafe(session.push_event, event_type, data)
+    except RuntimeError:  # el loop se cerro entre el chequeo y el agendado
+        logger.debug("No se pudo emitir '%s' desde el hilo de la tool", event_type)
 
 
 @dataclass
@@ -108,6 +161,10 @@ class ToolRegistry:
         tools = self._tools.values()
         if exclude_dangerous:
             tools = [t for t in tools if not t.dangerous]
+        # spec interruptores-conexiones-skills REQ-001/002: las tools de una conexion APAGADA no se le mandan al modelo (ahorra tokens y evita que busque por ahi).
+        from app import switches  # import diferido: `switches` importa conexiones y estas importan tools
+
+        tools = [t for t in tools if switches.tool_is_available(t.name)]
         return [t.to_openai_schema() for t in tools]
 
     async def dispatch(self, name: str, raw_args: str, session: Any = None) -> str:
@@ -118,6 +175,15 @@ class ToolRegistry:
         tool = self.get(name)
         if tool is None:
             return f"Error: tool '{name}' no existe en el registro."
+
+        # REQ-003 (defensa en profundidad): un modelo con una conversacion vieja puede pedir una tool que ya no se le ofrece. Se rechaza ANTES de ejecutar nada.
+        from app import switches
+
+        if not switches.tool_is_available(name):
+            return (
+                f"Error: la herramienta '{name}' esta desactivada porque su conexion esta apagada. "
+                "Pedile al usuario que la active en Configuracion > Conexiones (o en el panel rapido)."
+            )
 
         try:
             args: dict[str, Any] = json.loads(raw_args) if raw_args else {}
@@ -133,6 +199,10 @@ class ToolRegistry:
         # estimacion (una tool que suele fallar rapido no deberia inflar
         # el presupuesto de las que funcionan lento).
         start = time.monotonic()
+        _TURN_LOOP.set(asyncio.get_running_loop())  # ver emit_from_thread
+        cut = [False]  # REQ-006: la tool la marca con mark_duration_cut() si la cortaron
+        _DURATION_CUT.set(cut)
+        cancelled = False
         try:
             # Bug de rendimiento real (investigacion 2026-09, "Vision tarda
             # mucho"): la mayoria de las tools (oracle_query, bigquery_*,
@@ -154,12 +224,19 @@ class ToolRegistry:
             else:
                 result = tool.execute(args, session)
             return str(result)
+        except asyncio.CancelledError:
+            cancelled = True  # REQ-006: tarea cancelada (p. ej. Vision apagandose a mitad de la tool)
+            raise
         except Exception as exc:  # el modelo debe ver cualquier error
             logger.exception("Error ejecutando tool '%s'", name)
             return f"Error ejecutando '{name}': {exc}"
         finally:
-            elapsed_ms = (time.monotonic() - start) * 1000
-            await asyncio.to_thread(record_duration, name, elapsed_ms)
+            # REQ-006 (spec fix-detener-y-progreso-visible): una ejecucion CORTADA (Detener, tarea cancelada, o la propia tool avisa
+            # timeout/Detener) no es una duracion real y no se registra. Una que termina normal -- aunque sea con error -- si (como antes).
+            # Con la tarea cancelada tampoco se hace el `await`: no hay que seguir trabajando sobre una tarea que se esta cancelando.
+            if not (cancelled or cut[0] or _stopped_by_user(session)):
+                elapsed_ms = (time.monotonic() - start) * 1000
+                await asyncio.to_thread(record_duration, name, elapsed_ms)
 
 
 def _audit(tool_name: str, args: dict[str, Any]) -> None:

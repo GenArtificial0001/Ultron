@@ -29,4 +29,4 @@ proveedor de IA, el dictado, el proxy y el nombre de la empresa salen del .env."
 
 from __future__ import annotations
 
-__version__ = "1.1.0"
+__version__ = "0.36.2"

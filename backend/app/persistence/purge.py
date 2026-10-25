@@ -17,8 +17,8 @@ import asyncio
 import logging
 import time
 
-from app.persistence import db, master_index
-from app.persistence.service import current_windows_user
+from app.persistence import db, index_recovery, master_index
+from app.persistence.service import current_windows_user, log_session_deleted, session_summary
 from app.persistence.transcript import export_session_to_file
 
 logger = logging.getLogger(__name__)
@@ -49,8 +49,10 @@ def _purge_one_project_folder(project_path: str) -> int:
                     session_id,
                 )
                 continue
+            summary = session_summary(session_id, project_path)  # REQ-001: antes de borrar, despues no hay nada que contar
             db.delete_session(db_path, session_id)
             master_index.delete_session(session_id)
+            log_session_deleted(session_id, {**summary, "title": summary["title"] or candidate.get("title") or ""})
             purged += 1
             logger.info(
                 "Sesion '%s' purgada por inactividad (>%s dias); respaldo en %s",
@@ -85,6 +87,13 @@ async def run_purge_loop() -> None:
     cada PURGE_INTERVAL_SECONDS. Se lanza una sola vez desde el startup
     de FastAPI (ver app/main.py)."""
     while True:
+        # spec indice-resiliente-y-borrado-seguro REQ-008: primero la copia del indice y el re-escaneo (asi la purga trabaja
+        # sobre un indice completo y siempre queda un respaldo de ANTES), cada paso aislado: uno que falla no frena a los otros.
+        for step in (index_recovery.backup_index, index_recovery.rescan_index):
+            try:
+                await asyncio.to_thread(step)
+            except Exception:
+                logger.warning("Fallo un paso de recuperacion del indice (%s)", step.__name__, exc_info=True)
         try:
             await asyncio.to_thread(purge_once)
         except Exception:

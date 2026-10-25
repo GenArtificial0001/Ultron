@@ -104,6 +104,18 @@ _TOOL_HISTORY = (
     "tool_result",
 )
 _IMAGE = ("image_url", "image", "mime type")
+# spec modelo-sin-herramientas-aviso: el modelo elegido no admite el argumento de herramientas (caso real 2026-10-22: `glm-ocr`,
+# «This model does not support tools argument»). Vision siempre manda sus herramientas, asi que reenviar no sirve: hay que cambiar de
+# modelo. Se evalua ANTES de `_TOOL_HISTORY` (su texto contiene «tools») y despues de «conversacion larga» y «filtro».
+_NO_TOOLS = (
+    "does not support tools",
+    "does not support function calling",
+    "does not support function-calling",
+    "tools is not supported",
+    "tools are not supported",
+    "tool use is not supported",
+    "tool_choice is not supported",
+)
 _QUOTA = ("too much spend", "spend limit")
 # Bug real (2026-09-27): con la cuenta de Anthropic sin credito, la API responde
 # 400 "Your credit balance is too low to access the Anthropic API" y Vision lo
@@ -152,8 +164,12 @@ _NETWORK = (
     "dpy-6005",
 )
 _TIMEOUT = ("timed out", "timeout", "time out", "tardo demasiado")
-# Falla del login ANTES de llamar al modelo (proveedores con OAuth, ej. un
-# gateway corporativo detras de Azure AD / MSAL).
+# Pedido del usuario 2026-10-09: el proxy de internet de la empresa no llega a los servidores internos de la empresa (SAP
+# wms.empresa.com, el repositorio de paquetes): responde 503 al pedir el tunel. Es lo primero que se mira, aunque el texto
+# tambien traiga "timed out" o "connection": la solucion es otra.
+_PROXY = ("unable to connect to proxy", "tunnel connection failed", "proxyerror")
+# Falla del login del proveedor de IA ANTES de llamar al modelo (sdk-proveedor/MSAL, ver
+# skill skill-interna troubleshooting "401 / access token errors").
 _TOKEN_FETCH = (
     "error retrieving the token",
     "failed to refresh access token",
@@ -200,6 +216,19 @@ def _is_network(names: set[str]) -> bool:
     return bool(names & _NETWORK_TYPES)
 
 
+# REQ-001 (spec fix-corte-proveedor): el OTRO lado cerro la conexion a mitad de la respuesta. Caso real 2026-10-14 (log de DEV): el proveedor de IA
+# empezo a responder (200 OK, en streaming) y 2 min 30 s despues llego `httpx2.RemoteProtocolError: peer closed connection without sending
+# complete message body`. El SDK de OpenAI no envuelve los errores de lectura del stream (si los de ANTES de responder, como
+# APIConnectionError): llega la excepcion cruda del transporte, que ningun tipo de arriba reconocia y caia en MODELO-DESCONOCIDO.
+# ReadError es el mismo corte visto como «conexion reiniciada» (WinError 10054: gateway, proxy o VPN); IncompleteRead, el de la libreria
+# estandar. Va DESPUES del timeout: una lectura que tarda de mas (ReadTimeout) sigue siendo MODELO-DEMORA.
+_CUT_TYPES = {"remoteprotocolerror", "readerror", "incompleteread"}
+
+
+def _is_cut(names: set[str]) -> bool:
+    return bool(names & _CUT_TYPES)
+
+
 def _model_label(model: str | None) -> str:
     return f"el modelo {model}" if model else "el modelo elegido"
 
@@ -207,6 +236,89 @@ def _model_label(model: str | None) -> str:
 def _minutes_text(seconds: int) -> str:
     minutes = max(1, math.ceil(seconds / 60))
     return "1 minuto" if minutes == 1 else f"{minutes} minutos"
+
+
+def _describe_rate_limit(text: str, who_bare: str, status: int | None) -> FriendlyError:
+    """HTTP 429. Con senal de tope de gasto: limite del USUARIO (vale para todos los modelos pagos) o POR MODELO, con el tiempo de
+    espera que dice el proveedor; sin ella, simple exceso de pedidos seguidos. `text` ya viene en minusculas."""
+    if _has_any(text, _QUOTA):
+        window = _SPEND_WINDOW_RE.search(text)
+        wait = f"unos {_minutes_text(int(window.group(1)))}" if window else "unos minutos"
+        if not _PER_MODEL_SPEND_RE.search(text):
+            return FriendlyError(
+                "MODELO-LIMITE-USUARIO",
+                "Llegaste al tope de consumo del proveedor de IA por un rato: es por usuario y vale para "
+                "todos los modelos pagos. Para seguir ahora, elegí un modelo gratuito de la empresa "
+                f"(por ejemplo DeepSeek) en el selector de arriba; o esperá {wait}.",
+                status,
+            )
+        return FriendlyError(
+            "MODELO-LIMITE",
+            f"Llegaste al límite de uso del {who_bare} por un rato (El proveedor de IA pone un tope de consumo "
+            f"por modelo). Para seguir ahora, elegí otro modelo en el selector de arriba; "
+            f"o esperá {wait} y volvé a intentar con este.",
+            status,
+        )
+    return FriendlyError(
+        "MODELO-OCUPADO",
+        "El servicio de inteligencia artificial recibió demasiados pedidos seguidos. "
+        "Esperá unos segundos y volvé a enviar tu mensaje.",
+        status,
+    )
+
+
+def _conversation_too_long(who: str, status: int | None) -> FriendlyError:
+    """spec aviso-contexto-largo REQ-003: la conversacion no entra en la ventana del modelo. Mismo codigo y mismo texto para un 400/413/422 y para
+    el error SIN codigo HTTP que llega por el streaming (caso real 2026-10-23: `openai.APIError: prompt is too long: 1015295 tokens > 1000000`)."""
+    return FriendlyError(
+        "MODELO-CONVERSACION-LARGA",
+        f"Esta conversación ya es demasiado larga para {who}. "
+        "Escribí /compact para resumirla y seguir, /clear para borrarla toda, o empezá una conversación nueva.",
+        status,
+    )
+
+
+def _describe_rejected_request(text: str, status: int | None, who: str, who_cap: str) -> FriendlyError:
+    """HTTP 400/413/422: el modelo no acepto el pedido. El orden importa y es el de siempre: conversacion demasiado larga, filtro de
+    contenido, modelo sin herramientas, historial de herramientas, imagen y, si nada coincide, rechazo generico. `text` ya viene en minusculas."""
+    if _has_any(text, _CONTEXT_TOO_LONG) or status == 413:
+        return _conversation_too_long(who, status)
+    if _has_any(text, _CONTENT_FILTER):
+        return FriendlyError(
+            "MODELO-FILTRO",
+            f"{who_cap} no quiso responder este pedido por sus reglas de seguridad. "
+            "Probá pedirlo con otras palabras.",
+            status,
+        )
+    if _has_any(text, _NO_TOOLS):
+        return FriendlyError(
+            "MODELO-SIN-HERRAMIENTAS",
+            f"{who_cap} no sirve para chatear con Vision: no admite herramientas. "
+            "Reenviar el mensaje no lo arregla; elegí otro modelo en el selector de arriba.",
+            status,
+        )
+    if _has_any(text, _TOOL_HISTORY):
+        return FriendlyError(
+            "MODELO-HISTORIAL",
+            f"{who_cap} no aceptó el historial de esta conversación (a veces pasa después de "
+            "usar herramientas). Para destrabarla, cerrá y volvé a abrir Vision: la conversación "
+            "se vuelve a cargar ordenada. Mientras tanto podés seguir eligiendo otro modelo "
+            "en el selector de arriba.",
+            status,
+        )
+    if _has_any(text, _IMAGE):
+        return FriendlyError(
+            "MODELO-IMAGEN",
+            f"{who_cap} no pudo leer una de las imágenes adjuntas. Probá con otra imagen "
+            "(JPG o PNG) o elegí otro modelo en el selector de arriba.",
+            status,
+        )
+    return FriendlyError(
+        "MODELO-RECHAZO",
+        f"{who_cap} no aceptó este pedido tal como está. Volvé a enviar tu mensaje; si se repite, "
+        "elegí otro modelo en el selector de arriba o cerrá y volvé a abrir Vision.",
+        status,
+    )
 
 
 def describe_model_error(exc: BaseException, model: str | None = None) -> FriendlyError:
@@ -242,6 +354,25 @@ def describe_model_error(exc: BaseException, model: str | None = None) -> Friend
             "Volvé a enviar tu mensaje; si pasa seguido, elegí otro modelo en el selector de arriba.",
             status,
         )
+    if _is_cut(names):
+        # REQ-001 (spec fix-corte-proveedor): pedido del usuario, «aclara esto al usuario: el corte vino del otro lado (El proveedor de IA) a mitad de
+        # respuesta, no de Vision». Texto EXACTO de la spec; «El proveedor de IA» no es jerga para el guardian (el usuario lo nombra asi).
+        return FriendlyError(
+            "MODELO-CORTE",
+            "El proveedor de IA (el servicio de inteligencia artificial de la empresa) cortó la conexión en medio de la respuesta. "
+            "No fue un error de Vision. Volvé a enviar tu mensaje; si pasa seguido, elegí otro modelo en el selector de arriba.",
+            status,
+        )
+    if "proxyerror" in names or _has_any(text, _PROXY):
+        # spec proxy-autoheal REQ-006 (incidente 2026-10-18): la salida a internet guardada dejo de responder. No es «revisa la VPN» a secas: la pantalla que la cura
+        # (Configuracion > Red > Proxy > Reconectar) elige otra viva y la guarda.
+        return FriendlyError(
+            "MODELO-PROXY",
+            "La salida a internet que usa Vision no responde, por eso no pude llegar al servicio de inteligencia artificial de la empresa. "
+            "Revisá que estés conectado a la VPN de tu empresa y tocá «Reconectar» en Configuración > Red > Proxy; "
+            "ahí Vision busca una salida que funcione y la guarda. Después volvé a enviar tu mensaje.",
+            status,
+        )
     if _is_network(names):
         return FriendlyError(
             "MODELO-SIN-CONEXION",
@@ -272,67 +403,9 @@ def describe_model_error(exc: BaseException, model: str | None = None) -> Friend
             status,
         )
     if status == 429:
-        if _has_any(text, _QUOTA):
-            window = _SPEND_WINDOW_RE.search(text)
-            wait = f"unos {_minutes_text(int(window.group(1)))}" if window else "unos minutos"
-            if not _PER_MODEL_SPEND_RE.search(text):
-                return FriendlyError(
-                    "MODELO-LIMITE-USUARIO",
-                    "Llegaste al tope de consumo del servicio de inteligencia artificial por un rato. "
-                    f"Esperá {wait} y volvé a enviar tu mensaje, o elegí otro modelo en el selector "
-                    "de arriba.",
-                    status,
-                )
-            return FriendlyError(
-                "MODELO-LIMITE",
-                f"Llegaste al límite de uso del {who_bare} por un rato (el servicio pone un tope de "
-                f"consumo por modelo). Para seguir ahora, elegí otro modelo en el selector de arriba; "
-                f"o esperá {wait} y volvé a intentar con este.",
-                status,
-            )
-        return FriendlyError(
-            "MODELO-OCUPADO",
-            "El servicio de inteligencia artificial recibió demasiados pedidos seguidos. "
-            "Esperá unos segundos y volvé a enviar tu mensaje.",
-            status,
-        )
+        return _describe_rate_limit(text, who_bare, status)
     if status in (400, 413, 422):
-        if _has_any(text, _CONTEXT_TOO_LONG) or status == 413:
-            return FriendlyError(
-                "MODELO-CONVERSACION-LARGA",
-                f"Esta conversación ya es demasiado larga para {who}. "
-                "Escribí /compact para resumirla y seguir, o empezá una conversación nueva.",
-                status,
-            )
-        if _has_any(text, _CONTENT_FILTER):
-            return FriendlyError(
-                "MODELO-FILTRO",
-                f"{who_cap} no quiso responder este pedido por sus reglas de seguridad. "
-                "Probá pedirlo con otras palabras.",
-                status,
-            )
-        if _has_any(text, _TOOL_HISTORY):
-            return FriendlyError(
-                "MODELO-HISTORIAL",
-                f"{who_cap} no aceptó el historial de esta conversación (a veces pasa después de "
-                "usar herramientas). Para destrabarla, cerrá y volvé a abrir Vision: la conversación "
-                "se vuelve a cargar ordenada. Mientras tanto podés seguir eligiendo otro modelo "
-                "en el selector de arriba.",
-                status,
-            )
-        if _has_any(text, _IMAGE):
-            return FriendlyError(
-                "MODELO-IMAGEN",
-                f"{who_cap} no pudo leer una de las imágenes adjuntas. Probá con otra imagen "
-                "(JPG o PNG) o elegí otro modelo en el selector de arriba.",
-                status,
-            )
-        return FriendlyError(
-            "MODELO-RECHAZO",
-            f"{who_cap} no aceptó este pedido tal como está. Volvé a enviar tu mensaje; si se repite, "
-            "elegí otro modelo en el selector de arriba o cerrá y volvé a abrir Vision.",
-            status,
-        )
+        return _describe_rejected_request(text, status, who, who_cap)
     if status is not None and status >= 500:
         return FriendlyError(
             "MODELO-CAIDO",
@@ -340,6 +413,9 @@ def describe_model_error(exc: BaseException, model: str | None = None) -> Friend
             "Esperá un minuto y volvé a enviar tu mensaje, o elegí otro modelo en el selector de arriba.",
             status,
         )
+    if status is None and _has_any(text, _CONTEXT_TOO_LONG):
+        # spec aviso-contexto-largo REQ-003: el SDK no pone codigo HTTP a un error que llega a mitad del streaming.
+        return _conversation_too_long(who, status)
     return FriendlyError(
         "MODELO-DESCONOCIDO",
         "Ocurrió un problema inesperado al preparar la respuesta. Volvé a enviar tu mensaje; "
@@ -388,68 +464,19 @@ def describe_transcription_error(exc: BaseException) -> FriendlyError:
     )
 
 
-# spec voz-fish-audio REQ-003/009: por que un motor de voz no pudo hablar y
-# que hacer. `kind` sale de `app.voice.engines.VoiceEngineError`.
-_VOICE_ENGINE_ERRORS: dict[str, tuple[str, str]] = {
-    "sin_clave": (
-        "VOZ-MOTOR-SIN-CLAVE",
-        "{engine} no tiene su clave cargada. Cargala en Configuración > Credenciales.",
-    ),
-    "clave_invalida": (
-        "VOZ-MOTOR-CLAVE",
-        "{engine} no aceptó la clave configurada. Revisala en Configuración > Credenciales.",
-    ),
-    "sin_voz": (
-        "VOZ-MOTOR-SIN-VOZ",
-        "{engine} no tiene una voz elegida o la voz ya no existe. Elegila en Configuración > Audio.",
-    ),
-    "sin_credito": (
-        "VOZ-MOTOR-CREDITO",
-        "{engine} se quedó sin crédito. Cargá crédito en {engine} o cambiá el orden de las voces "
-        "en Configuración > Audio.",
-    ),
-    "limite": (
-        "VOZ-MOTOR-LIMITE",
-        "{engine} está recibiendo demasiados pedidos. En unos minutos vuelvo a probarlo solo.",
-    ),
-    "sin_conexion": (
-        "VOZ-MOTOR-SIN-CONEXION",
-        "No pude conectarme con {engine}. Revisá tu conexión (y el proxy de tu empresa, si hace "
-        "falta); en unos minutos vuelvo a probarlo solo.",
-    ),
-    "no_instalado": (
-        "VOZ-LOCAL-NO-INSTALADA",
-        "La clonación local de voz no está instalada. Instalala desde Configuración > Audio.",
-    ),
-    "sin_muestra": (
-        "VOZ-LOCAL-SIN-MUESTRA",
-        "Falta tu muestra de voz para la clonación local. Subila en Configuración > Audio.",
-    ),
-    "fallo": (
-        "VOZ-MOTOR-FALLO",
-        "{engine} no pudo generar el audio. En unos minutos vuelvo a probarlo solo.",
-    ),
-}
-
-
-def describe_voice_engine_error(
-    kind: str, engine: str, next_engine: str | None = None, status: int | None = None
-) -> FriendlyError:
-    """Mensaje para el chat cuando un motor de voz falla. `next_engine`: con
-    que motor sigue hablando Vision (REQ-003: nunca queda mudo)."""
-    code, template = _VOICE_ENGINE_ERRORS.get(kind, _VOICE_ENGINE_ERRORS["fallo"])
-    message = template.format(engine=engine)
-    if next_engine:
-        message = f"{message} Mientras tanto sigo hablando con {next_engine}."
-    return FriendlyError(code, message, status)
-
-
 def describe_connector_error(exc: BaseException, system: str) -> FriendlyError:
     """Falla de un conector (BigQuery, SharePoint, Oracle, SAP, Graph).
     `system`: nombre visible del sistema, tal cual lo ve el usuario."""
     status = _status_of(exc)
     text = str(exc).lower()
     names = _type_names(exc)
+    if "proxyerror" in names or _has_any(text, _PROXY):
+        return FriendlyError(
+            "CONECTOR-PROXY",
+            f"El proxy de tu empresa no deja pasar a {system}. Si es un servidor interno de la empresa, agregá .empresa.com en "
+            "Configuración > Conexiones > Red y proxy, en «Sin proxy para», y probá de nuevo.",
+            status,
+        )
     if _is_timeout(names) or _has_any(text, _TIMEOUT):
         return FriendlyError(
             "CONECTOR-DEMORA",
@@ -563,6 +590,64 @@ def describe_task_needs_new_message(model: str) -> FriendlyError:
         f"continuar una tarea que empezó otro modelo. Mandá tu próximo mensaje (por ejemplo "
         f"«continuá») y sigo con {model}.",
     )
+
+
+# spec voz-fish-audio REQ-003/009: por que un motor de voz no pudo hablar y
+# que hacer. `kind` sale de `app.voice.engines.VoiceEngineError`.
+_VOICE_ENGINE_ERRORS: dict[str, tuple[str, str]] = {
+    "sin_clave": (
+        "VOZ-MOTOR-SIN-CLAVE",
+        "{engine} no tiene su clave cargada. Cargala en {where}.",
+    ),
+    "clave_invalida": (
+        "VOZ-MOTOR-CLAVE",
+        "{engine} no aceptó la clave configurada. Revisala en {where}.",
+    ),
+    "sin_voz": (
+        "VOZ-MOTOR-SIN-VOZ",
+        "{engine} no tiene una voz elegida o la voz ya no existe. Elegila en Configuración > Audio.",
+    ),
+    "sin_credito": (
+        "VOZ-MOTOR-CREDITO",
+        "{engine} se quedó sin crédito. Cargá crédito en {engine} o cambiá el orden de las voces "
+        "en Configuración > Audio.",
+    ),
+    "limite": (
+        "VOZ-MOTOR-LIMITE",
+        "{engine} está recibiendo demasiados pedidos. En unos minutos vuelvo a probarlo solo.",
+    ),
+    "sin_conexion": (
+        "VOZ-MOTOR-SIN-CONEXION",
+        "No pude conectarme con {engine}. Revisá tu conexión (y el proxy de tu empresa, si hace "
+        "falta); en unos minutos vuelvo a probarlo solo.",
+    ),
+    "no_instalado": (
+        "VOZ-LOCAL-NO-INSTALADA",
+        "La clonación local de voz no está instalada. Instalala desde Configuración > Audio.",
+    ),
+    "sin_muestra": (
+        "VOZ-LOCAL-SIN-MUESTRA",
+        "Falta tu muestra de voz para la clonación local. Subila en Configuración > Audio.",
+    ),
+    "fallo": (
+        "VOZ-MOTOR-FALLO",
+        "{engine} no pudo generar el audio. En unos minutos vuelvo a probarlo solo.",
+    ),
+}
+
+
+def describe_voice_engine_error(
+    kind: str, engine: str, next_engine: str | None = None, status: int | None = None
+) -> FriendlyError:
+    """Mensaje para el chat cuando un motor de voz falla. `next_engine`: con
+    que motor sigue hablando Vision (REQ-003: nunca queda mudo)."""
+    code, template = _VOICE_ENGINE_ERRORS.get(kind, _VOICE_ENGINE_ERRORS["fallo"])
+    from app import credentials  # import diferido: credentials importa config y conectores
+
+    message = template.format(engine=engine, where=credentials.where_to_load("Voz"))  # gestor-conexiones: Credenciales o Conexiones
+    if next_engine:
+        message = f"{message} Mientras tanto sigo hablando con {next_engine}."
+    return FriendlyError(code, message, status)
 
 
 _SWITCH_REASONS = {

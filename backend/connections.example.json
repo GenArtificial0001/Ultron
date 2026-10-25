@@ -1,0 +1,61 @@
+{
+  "_comentario": "Copialo a  ~/.vision/connections.json (en Windows: C:/Users/TU_USUARIO/.vision/connections.json)  (esa carpeta es tuya: NO esta en el repo, no viaja con el codigo ni con el .exe). Un bloque por conexion. Los secretos van DENTRO del bloque. Los nombres son unicos por tipo, de hasta 60 caracteres (letras, numeros, espacios y guion); hasta 10 conexiones por tipo. 'default': true marca la que se usa cuando no se indica cual. Vision relee el archivo solo, sin reiniciar. Los tipos son oracle, sharepoint y sap; Graph usa las credenciales Azure de 'Sitio Logistico'. Confluence: este bloque lleva SOLO la URL, el espacio y las secciones (nombre + numero de la pagina raiz, el que aparece en la URL .../pages/NUMERO/...). Tu correo y tu token de Confluence son PERSONALES: van en tu .env (CONFLUENCE_EMAIL y CONFLUENCE_API_TOKEN), NUNCA en este archivo. Los numeros de pagina de este ejemplo son inventados: reemplazalos por los de tus paginas.",
+  "connections": [
+    {
+      "type": "oracle",
+      "name": "Datamart",
+      "default": true,
+      "fields": {
+        "oracle_user": "TU_USUARIO",
+        "oracle_password": "TU_PASSWORD",
+        "oracle_host": "host.ejemplo.empresa.com",
+        "oracle_port": "1521",
+        "oracle_service_name": "SERVICIO",
+        "oracle_schema": "ESQUEMA"
+      }
+    },
+    {
+      "type": "sharepoint",
+      "name": "Sitio Logistico",
+      "default": true,
+      "fields": {
+        "sharepoint_site_url": "https://empresa.sharepoint.com/sites/TU_SITIO",
+        "azure_client_id": "CLIENT_ID",
+        "azure_client_secret": "CLIENT_SECRET",
+        "azure_tenant_id": "TENANT_ID",
+        "sharepoint_default_list_name": ""
+      }
+    },
+    {
+      "type": "sap",
+      "name": "Principal",
+      "default": true,
+      "fields": {
+        "sap_base_url": "https://sap.ejemplo.empresa.com",
+        "sap_client": "100",
+        "sap_user": "TU_USUARIO",
+        "sap_password": "TU_PASSWORD",
+        "sap_language": "EN"
+      }
+    },
+    {
+      "type": "confluence",
+      "name": "la empresa",
+      "default": true,
+      "fields": {
+        "confluence_base_url": "https://empresa.atlassian.net/wiki",
+        "confluence_space_key": "QOS",
+        "sections": [
+          {
+            "name": "MP&L Procedures",
+            "page_id": "611718870"
+          },
+          {
+            "name": "Otra seccion",
+            "page_id": "123456789"
+          }
+        ]
+      }
+    }
+  ]
+}

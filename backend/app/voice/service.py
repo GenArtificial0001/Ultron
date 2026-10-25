@@ -134,7 +134,9 @@ def _link_ready(link: dict[str, str], cfg: VoiceConfig) -> str | None:
     settings = get_settings()
     key = settings.fish_api_key if engine == "fish" else settings.elevenlabs_api_key
     if not key.strip():
-        return "falta la clave en Configuración > Credenciales"
+        from app import credentials  # import diferido: credentials importa config y conectores
+
+        return f"falta la clave en {credentials.where_to_load('Voz')}"  # gestor-conexiones: Credenciales o Conexiones
     if not cfg.voice_for(engine):
         return "falta elegir la voz"
     if not cfg.consent.get(engine):

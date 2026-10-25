@@ -30,6 +30,7 @@ del frontend)."""
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any
@@ -39,6 +40,10 @@ from app.tools.base import Tool
 logger = logging.getLogger(__name__)
 
 RECOMMENDED_SUFFIX = "(Recomendada)"
+# REQ-018 (spec fix-detener-y-progreso-visible): el resultado que deja la tool cuando la pregunta ESPERA al usuario. Con esto se
+# reconoce, en el historial guardado, una pregunta sin contestar (ver `pending_question_view`): no una que el loop contesto solo ni un
+# error.
+PENDING_RESULT_PREFIX = "Pregunta mostrada al usuario"
 
 # Bug real reportado por el usuario: a veces el modelo (se observo con
 # Claude via el proveedor de IA) no manda 'options' como array JSON sino como UN SOLO
@@ -161,9 +166,30 @@ def _question_execute(args: dict, session: Any = None) -> str:
         )
 
     return (
-        f"Pregunta mostrada al usuario: '{question_text}' (opciones: {opciones_txt}). "
+        f"{PENDING_RESULT_PREFIX}: '{question_text}' (opciones: {opciones_txt}). "
         "Esperando que el usuario responda en su proximo mensaje."
     )
+
+
+def pending_question_view(part: dict[str, Any]) -> dict[str, Any] | None:
+    """REQ-018 (spec fix-detener-y-progreso-visible): lo que la pagina necesita para volver a mostrar (por ejemplo con F5) una pregunta
+    que quedo sin contestar, a partir del part 'tool' guardado en SQLite (`arguments` crudo del modelo y `result`). Solo si la tool la
+    mostro y espera al usuario: una que el loop autonomo ya contesto solo, un error o una llamada sin terminar dan None. Las opciones se
+    normalizan igual que al mostrarla (`_question_execute`); nunca lanza."""
+    if not str(part.get("result") or "").startswith(PENDING_RESULT_PREFIX):
+        return None
+    try:
+        args = json.loads(part.get("arguments") or "{}")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(args, dict) or not args.get("question"):
+        return None
+    raw_options = args.get("options", [])
+    if isinstance(raw_options, str):
+        raw_options = _parse_options_from_malformed_string(raw_options)
+    if not isinstance(raw_options, list):
+        raw_options = []
+    return {"question": str(args["question"]), "options": [_normalize_option(o) for o in raw_options]}
 
 
 question_tool = Tool(

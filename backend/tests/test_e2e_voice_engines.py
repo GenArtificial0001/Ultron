@@ -135,11 +135,19 @@ def browser(tmp_path_factory, base_url):
         yield b
 
 
+# Opener SIN proxy: el backend de prueba esta en loopback. `urllib.request.urlopen` toma el
+# proxy del sistema (en esta PC, el PAC de la VPN de tu empresa) y, segun el estado de la red,
+# intentaba salir por `proxy.empresa.com` incluso para 127.0.0.1 -- el guardian de red de
+# los tests lo bloquea y el fixture fallaba con "Acceso a red bloqueado" (intermitente,
+# dependia de la VPN). Con ProxyHandler({}) el pedido va siempre directo.
+_LOOPBACK = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def post_json(url: str, payload: dict) -> dict:
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST"
     )
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with _LOOPBACK.open(req, timeout=10) as resp:
         return json.loads(resp.read())
 
 
@@ -242,7 +250,7 @@ def test_adding_a_cloud_engine_asks_for_consent(app, base_url):
     page.click("#cfg-voice-save")
     page.wait_for_function("document.getElementById('cfg-voice-status').textContent.includes('Guardado')")
 
-    with urllib.request.urlopen(base_url + "/api/voice/config", timeout=10) as resp:
+    with _LOOPBACK.open(base_url + "/api/voice/config", timeout=10) as resp:
         saved = json.loads(resp.read())
     assert saved["chain"] == [{"engine": "fish", "model": "s2.1-pro"}]
     assert saved["consent"]["fish"] is True
@@ -390,3 +398,42 @@ def test_brain_mode_does_not_record_while_a_voice_engine_speaks_and_listens_agai
     app.page.wait_for_function("(async () => !(await import('/js/tts.js')).isSpeaking())()", timeout=60_000)
     app.page.wait_for_function("window.__recStarts.length > 0", timeout=15_000)
     assert app.page_errors == []
+
+
+RECORDER_SPY_WITH_STOPS = """
+(() => {
+  window.__recStarts = [];
+  window.__recStops = [];
+  const Original = window.MediaRecorder;
+  window.MediaRecorder = function (stream, options) {
+    const rec = new Original(stream, options);
+    const start = rec.start.bind(rec);
+    const stop = rec.stop.bind(rec);
+    rec.start = (...a) => { window.__recStarts.push(performance.now()); return start(...a); };
+    rec.stop = (...a) => { window.__recStops.push(performance.now()); return stop(...a); };
+    return rec;
+  };
+  window.MediaRecorder.prototype = Original.prototype;
+  window.MediaRecorder.isTypeSupported = Original.isTypeSupported.bind(Original);
+})();
+"""
+
+
+def test_a_phrase_being_recorded_is_closed_as_soon_as_vision_starts_speaking(app, fish):
+    """spec fix-cerebro-escucha-y-microfono REQ-002: lo que el usuario venia diciendo se cierra (y se manda, como antes) apenas
+    Vision empieza a hablar, en vez de seguir grabando la voz de Vision, que la cancelacion de eco no resta."""
+    fish.audio = tone_wav(seconds=3.0)
+    app.page.add_init_script(RECORDER_SPY_WITH_STOPS)
+    app.page.reload(wait_until="domcontentloaded")
+    app.wait_ready()
+    app.start_listening("#brain-btn")
+    app.page.wait_for_function("window.__recStarts.length >= 1", timeout=10_000)  # el tono del microfono falso abre una frase
+
+    app.page.evaluate("(async () => (await import('/js/tts.js')).speak('respuesta de prueba'))()")
+    app.page.wait_for_function("(async () => (await import('/js/tts.js')).isSpeaking())()", timeout=20_000)
+    spoke_at = app.page.evaluate("performance.now()")
+
+    app.page.wait_for_function("window.__recStops.length >= 1", timeout=3_000)
+    stopped_at = app.page.evaluate("window.__recStops[0]")
+    assert stopped_at - spoke_at < 700, f"la frase siguio grabando {stopped_at - spoke_at:.0f} ms con Vision hablando"
+    app.page.keyboard.press("Escape")

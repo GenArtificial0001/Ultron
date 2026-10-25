@@ -84,3 +84,79 @@ def test_list_returns_empty_if_glob_fails(tmp_path, monkeypatch):
 
 def test_init_prompt_is_nonempty():
     assert "AGENTS.md" in commands.INIT_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# REQ-005 (spec quick-panel-labels-comandos): importar comandos desde carpeta
+# ---------------------------------------------------------------------------
+def _src(tmp_path, files: dict[str, str]):
+    src = tmp_path / "origen"
+    src.mkdir()
+    for name, content in files.items():
+        (src / name).write_text(content, encoding="utf-8")
+    return src
+
+
+def test_import_copies_md_and_classifies(tmp_path):
+    project = tmp_path / "proyecto"
+    project.mkdir()
+    src = _src(
+        tmp_path,
+        {"Resumen.md": "resumí esto", "init.md": "pisaria el sistema", "vacio.md": "  ", "nota.txt": "no es md"},
+    )
+    (src / "sub").mkdir()
+    (src / "sub" / "anidado.md").write_text("no recursivo", encoding="utf-8")
+
+    result = commands.import_commands_from_folder(str(project), str(src))
+
+    assert result["imported"] == ["resumen"]
+    assert result["reserved"] == ["init"]
+    assert result["invalid"] == ["vacio.md"]
+    assert result["conflicts"] == []
+    assert (project / "commands" / "resumen.md").read_text(encoding="utf-8") == "resumí esto"
+    assert not (project / "commands" / "anidado.md").exists()
+    assert [c["name"] for c in result["custom"]] == ["resumen"]
+
+
+def test_import_conflict_requires_explicit_overwrite(tmp_path):
+    project = tmp_path / "proyecto"
+    project.mkdir()
+    commands.save_custom_command(str(project), "resumen", "original")
+    src = _src(tmp_path, {"resumen.md": "nuevo"})
+
+    first = commands.import_commands_from_folder(str(project), str(src))
+    assert first["conflicts"] == ["resumen"] and first["imported"] == []
+    assert (project / "commands" / "resumen.md").read_text(encoding="utf-8") == "original"
+
+    second = commands.import_commands_from_folder(str(project), str(src), overwrite=["RESUMEN"])
+    assert second["imported"] == ["resumen"]
+    assert (project / "commands" / "resumen.md").read_text(encoding="utf-8") == "nuevo"
+
+
+def test_import_missing_folder_raises(tmp_path):
+    with pytest.raises(ValueError, match="no existe"):
+        commands.import_commands_from_folder(str(tmp_path), str(tmp_path / "nope"))
+
+
+def test_import_endpoint(tmp_path, tmp_master_db, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app import main
+
+    project = tmp_path / "proyecto"
+    project.mkdir()
+    src = _src(tmp_path, {"hola.md": "decí hola"})
+    monkeypatch.setattr(main, "_assert_session_owner", lambda sid: None)
+    monkeypatch.setattr(main.persistence_service, "project_root_for_session", lambda sid: project)
+
+    c = TestClient(main.app)
+    r = c.post("/api/commands/import-path", json={"session_id": "s", "source_path": str(src)})
+    assert r.status_code == 200, r.text
+    assert r.json()["imported"] == ["hola"]
+
+    r = c.post("/api/commands/import-path", json={"session_id": "s", "source_path": str(tmp_path / "x")})
+    assert r.status_code == 400
+
+    monkeypatch.setattr(main.persistence_service, "project_root_for_session", lambda sid: None)
+    r = c.post("/api/commands/import-path", json={"session_id": "s", "source_path": str(src)})
+    assert r.status_code == 400 and "carpeta" in r.json()["detail"]

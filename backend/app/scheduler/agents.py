@@ -101,7 +101,29 @@ def _time_of_day_ts(base: datetime, hm: str) -> float:
         hh, mm = int(hh_s), int(mm_s)
     except (ValueError, AttributeError):
         hh, mm = 8, 30
+    # BL-007 (ADR-006, bug #2): una hora fuera de rango ("25:99", "24:00", "08:60") hacia que `replace()` lanzara
+    # ValueError FUERA de este try; como `is_due_now` se llama sin proteccion en `_check_and_fire_due_agents`, un solo
+    # agente mal escrito abortaba el chequeo de TODOS los demas cada 20 s. Mismo criterio que para el texto no
+    # parseable: se cae en 08:30 en vez de romper.
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        hh, mm = 8, 30
     return base.replace(hour=hh, minute=mm, second=0, microsecond=0).timestamp()
+
+
+def _weekday_of(trigger: dict[str, Any]) -> int:
+    """Dia de la semana del trigger en convencion JS (0=domingo..6=sabado), como el <select> del frontend.
+
+    BL-007 (ADR-006, bug #1): antes se leia con `int(trigger.get("weekday") or 1)`, y como `0 or 1 == 1` un agente semanal
+    del DOMINGO (la UI manda el NUMERO 0) se leia como LUNES y nunca disparaba el domingo. Ahora solo la ausencia (`None`,
+    "") o un valor ilegible caen en lunes -- igual que antes -- y 0 es domingo. Fuera de 0..6 tambien cae en lunes."""
+    raw = trigger.get("weekday")
+    if raw is None or raw == "":
+        return 1
+    try:
+        dow = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    return dow if 0 <= dow <= 6 else 1
 
 
 def _next_weekday_from(base: datetime, target_dow: int, hm: str) -> float | None:
@@ -153,11 +175,7 @@ def next_due(agent: dict[str, Any]) -> float | None:
         return None
 
     if rule == "weekly":
-        try:
-            target_dow = int(trigger.get("weekday") or 1)
-        except (TypeError, ValueError):
-            target_dow = 1
-        return _next_weekday_from(today, target_dow, hm)
+        return _next_weekday_from(today, _weekday_of(trigger), hm)
 
     if rule in ("ndays", "nhours"):
         try:
@@ -225,10 +243,7 @@ def _most_recent_due(agent: dict[str, Any], now: float) -> float | None:
         return None
 
     if rule == "weekly":
-        try:
-            target_dow = int(trigger.get("weekday") or 1)
-        except (TypeError, ValueError):
-            target_dow = 1
+        target_dow = _weekday_of(trigger)
         if (today.weekday() + 1) % 7 == target_dow:
             ts = _time_of_day_ts(today, hm)
             if ts <= now:

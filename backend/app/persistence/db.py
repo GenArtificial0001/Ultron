@@ -102,8 +102,25 @@ CREATE TABLE IF NOT EXISTS session (
     -- reemplaza la portabilidad SIN aislamiento que definia originalmente
     -- persistencia-sqlite-sesiones REQ-005).
 windows_user_created TEXT NOT NULL DEFAULT '',
+    -- spec sesion-publica-privada: 1 = sesion PUBLICA (sin dueño: otra persona que abra la carpeta puede importar una COPIA); 0 = privada,
+    -- el valor por defecto de toda sesion nueva y de toda existente.
+    is_public INTEGER NOT NULL DEFAULT 0,
+    -- spec comando-update-sesiones-publicas: usuario de Windows de quien publico la sesion (SOLO una etiqueta para que `/update` diga de quien viene
+    -- cada novedad; NO da ningun permiso, eso lo decide `is_public`). Vacio si es privada o si se publico antes de esta version.
+    published_by TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
+);
+
+-- spec comando-update-sesiones-publicas REQ-003: hasta que mensaje de cada conversacion publica ajena ya se resumio en la sesion `session_id`.
+-- La clave es el par (created_at, id) del ultimo mensaje visto: asi dos mensajes con la misma hora no se pierden ni se repiten.
+CREATE TABLE IF NOT EXISTS public_follow (
+    session_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    last_seen_created_at REAL NOT NULL,
+    last_seen_message_id TEXT NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (session_id, source_id)
 );
 
 CREATE TABLE IF NOT EXISTS message (
@@ -184,6 +201,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE session ADD COLUMN windows_user_created TEXT NOT NULL DEFAULT ''"
         )
+    # spec sesion-publica-privada REQ-001: una base de antes de esta feature no tiene `is_public`; todo lo existente queda PRIVADO.
+    if "is_public" not in cols:
+        conn.execute("ALTER TABLE session ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0")
+    # spec comando-update-sesiones-publicas REQ-001: una base de antes no tiene `published_by`; las publicas viejas quedan sin etiqueta.
+    if "published_by" not in cols:
+        conn.execute("ALTER TABLE session ADD COLUMN published_by TEXT NOT NULL DEFAULT ''")
     # Sistema de sub-tareas (2 niveles, pedido explicito del usuario): una
     # `vision.db` de antes de esta feature no tiene `subtasks_json` en la
     # tabla `todo` -- mismo criterio defensivo de arriba.
@@ -299,7 +322,7 @@ def get_session_meta(db_path: Path, session_id: str) -> dict[str, Any] | None:
         return None
     with _connect(db_path) as conn:
         row = conn.execute(
-            "SELECT id, title, model, created_at, updated_at FROM session WHERE id = ?",
+            "SELECT id, title, model, created_at, updated_at, is_public FROM session WHERE id = ?",
             (session_id,),
         ).fetchone()
         if row is None:
@@ -310,7 +333,24 @@ def get_session_meta(db_path: Path, session_id: str) -> dict[str, Any] | None:
             "model": row[2],
             "created_at": row[3],
             "updated_at": row[4],
+            "is_public": bool(row[5]),
         }
+
+
+def set_public(db_path: Path, session_id: str, public: bool, user: str, now: float) -> bool:
+    """spec sesion-publica-privada REQ-002: marca la sesion como PUBLICA o PRIVADA. Publica = `is_public = 1` y SIN dueño (`windows_user_created`
+    vacio: es el «borrar el CSID» del pedido); privada = `is_public = 0` y el dueño vuelve a ser `user` (`usuario_aaaammddhhmmss`, igual que al
+    crear una sesion). Idempotente, no toca mensajes ni partes. Devuelve False si la sesion no existe en esta base."""
+    from datetime import datetime
+
+    with _connect(db_path) as conn:
+        owner = "" if public else f"{user}_{datetime.now().strftime('%Y%m%d%H%M%S')}"  # noqa: DTZ005 -- hora local, igual que windows_user_tag
+        # `published_by` (spec comando-update-sesiones-publicas REQ-001): al publicar guarda quien lo hizo; al volverla privada se vacia.
+        cur = conn.execute(
+            "UPDATE session SET is_public = ?, windows_user_created = ?, published_by = ?, updated_at = ? WHERE id = ?",
+            (1 if public else 0, owner, user if public else "", now, session_id),
+        )
+        return cur.rowcount > 0
 
 
 def session_exists(db_path: Path, session_id: str) -> bool:
@@ -363,9 +403,291 @@ def autoname_session(db_path: Path, session_id: str, title: str, now: float) -> 
 
 
 def delete_session(db_path: Path, session_id: str) -> bool:
+    """Borra la sesion (y por cascada sus mensajes, partes y tareas) y COMPACTA el archivo.
+
+    spec indice-resiliente-y-borrado-seguro REQ-009: antes solo marcaba las paginas como libres. Medido en la PC del usuario: la
+    base quedo vacia pero pesaba lo mismo y el texto de los mensajes seguia legible dentro del archivo. Compactar es de mejor
+    esfuerzo: si falla (base ocupada por otra conexion) el borrado YA valio y solo se avisa en el log, nunca se revierte ni se lanza."""
     with _connect(db_path) as conn:
         cur = conn.execute("DELETE FROM session WHERE id = ?", (session_id,))
-        return cur.rowcount > 0
+        deleted = cur.rowcount > 0
+    if deleted:
+        try:
+            compact_database(db_path)
+        except Exception:
+            logger.warning(
+                "La sesion %s se borro pero no se pudo compactar el archivo %s", session_id, db_path, exc_info=True
+            )
+    return deleted
+
+
+def count_session_messages_readonly(db_path: Path, session_id: str) -> tuple[int, int]:
+    """spec cambio-carpeta-historial: (mensajes, adjuntos 'file') de UNA sesion, en SOLO LECTURA (`mode=ro`: no crea el esquema ni la
+    carpeta). `(0, 0)` si la base no existe; una base ilegible lanza `sqlite3.Error` (el llamador decide)."""
+    if not db_path.exists():
+        return (0, 0)
+    conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+    try:
+        (messages,) = conn.execute("SELECT COUNT(*) FROM message WHERE session_id = ?", (session_id,)).fetchone()
+        (files,) = conn.execute(
+            "SELECT COUNT(*) FROM part WHERE session_id = ? AND type = 'file'", (session_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return (messages, files)
+
+
+def copy_session_history(src_path: Path, dst_path: Path, session_id: str, now: float) -> int:
+    """spec cambio-carpeta-historial REQ-004/005: COPIA el historial de UNA sesion (fila de sesion, mensajes, partes -incluidas las imagenes-
+    y tareas) de la base `src_path` a la base `dst_path`. La de origen se abre en SOLO LECTURA: jamas se modifica ni se borra nada alli.
+    Si el destino ya tiene mensajes de esa sesion no inserta nada (nunca se mezcla) y devuelve 0; si no, devuelve cuantos mensajes copio.
+    Conserva ids, orden, fechas, titulo (y que fue puesto a mano), modelo y creador originales. Los adjuntos (archivos) NO se copian: sus
+    mensajes si, y en la carpeta nueva el chip dira «no encontrado». Las excepciones de SQLite se propagan: el llamador las registra."""
+    src = sqlite3.connect(f"{src_path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+    try:
+        session = src.execute(
+            "SELECT id, title, model, title_manual, windows_user_created, created_at, updated_at FROM session WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if session is None:
+            return 0
+        messages = src.execute(
+            "SELECT id, session_id, role, created_at, updated_at, response_type FROM message WHERE session_id = ? "
+            "ORDER BY created_at, id",
+            (session_id,),
+        ).fetchall()
+        parts = src.execute(
+            "SELECT id, message_id, session_id, seq, type, data, created_at, updated_at FROM part WHERE session_id = ? "
+            "ORDER BY message_id, seq",
+            (session_id,),
+        ).fetchall()
+        todos = src.execute(
+            "SELECT session_id, position, content, status, priority, subtasks_json FROM todo WHERE session_id = ? ORDER BY position",
+            (session_id,),
+        ).fetchall()
+    finally:
+        src.close()
+    with _connect(dst_path) as conn:
+        (already,) = conn.execute("SELECT COUNT(*) FROM message WHERE session_id = ?", (session_id,)).fetchone()
+        if already:
+            return 0
+        conn.execute(
+            "INSERT OR IGNORE INTO session (id, title, model, title_manual, windows_user_created, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            session,
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO message (id, session_id, role, created_at, updated_at, response_type) VALUES (?, ?, ?, ?, ?, ?)",
+            messages,
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO part (id, message_id, session_id, seq, type, data, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            parts,
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO todo (session_id, position, content, status, priority, subtasks_json) VALUES (?, ?, ?, ?, ?, ?)",
+            todos,
+        )
+        return len(messages)
+
+
+# spec sesion-publica-privada REQ-005: los resultados de estas herramientas son correos, chats y reuniones de OTRA persona; al importar una
+# conversacion ajena no se copian. El prefijo cubre las 37 `m365_*` (Outlook, Teams, OneDrive, canales).
+PRIVATE_TOOL_PREFIXES = ("m365_",)
+PRIVATE_RESULT_MARK = "contenido privado omitido"
+
+
+def _hide_private_result(data_json: str) -> str:
+    """Si la parte es una llamada a una herramienta privada, devuelve su JSON con el `result` reemplazado por la marca; el resto, igual."""
+    try:
+        data = json.loads(data_json)
+    except (TypeError, ValueError):
+        return data_json
+    if isinstance(data, dict) and str(data.get("name", "")).startswith(PRIVATE_TOOL_PREFIXES) and "result" in data:
+        data["result"] = PRIVATE_RESULT_MARK
+        return json.dumps(data, ensure_ascii=False)
+    return data_json
+
+
+def import_session_history(
+    db_path: Path, source_id: str, target_id: str, owner_tag: str, now: float, hide_private_tools: bool = False
+) -> int:
+    """spec importar-historial-de-carpeta REQ-004/005: COPIA el historial de la sesion `source_id` a la sesion `target_id` DENTRO de la
+    misma base (las dos viven en el mismo `vision.db`). Mensajes, partes (texto, herramientas, imagenes, adjuntos) y tareas, con su orden
+    y fechas. Los ids de mensaje y de parte de la copia son nuevos y derivados (`<target_id>:<id original>`): no chocan con los del
+    origen y la copia es idempotente. La sesion de origen NO se modifica. Devuelve cuantos mensajes copio: 0 si `target_id` ya tiene
+    mensajes en esta base (nunca se mezcla) o si el origen no existe. Todo en UNA transaccion; las excepciones de SQLite se propagan.
+    `owner_tag` es el `usuario_aaaammddhhmmss` con que se crea la fila de la sesion nueva si todavia no existe.
+    `hide_private_tools` (spec sesion-publica-privada REQ-005): con True, el resultado de las herramientas `m365_*` NO se copia (queda la marca
+    «contenido privado omitido»): se usa al importar una conversacion de OTRA persona. La copia siempre queda privada y a nombre de quien importa."""
+    with _connect(db_path) as conn:
+        source = conn.execute("SELECT title, model, title_manual FROM session WHERE id = ?", (source_id,)).fetchone()
+        if source is None:
+            return 0
+        (already,) = conn.execute("SELECT COUNT(*) FROM message WHERE session_id = ?", (target_id,)).fetchone()
+        if already:
+            return 0
+        conn.execute(
+            "INSERT OR IGNORE INTO session (id, title, model, title_manual, windows_user_created, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (target_id, source[0], source[1], source[2], owner_tag, now, now),
+        )
+        messages = conn.execute(
+            "SELECT id, role, created_at, updated_at, response_type FROM message WHERE session_id = ? ORDER BY created_at, id",
+            (source_id,),
+        ).fetchall()
+        conn.executemany(
+            "INSERT OR IGNORE INTO message (id, session_id, role, created_at, updated_at, response_type) VALUES (?, ?, ?, ?, ?, ?)",
+            [(f"{target_id}:{m[0]}", target_id, m[1], m[2], m[3], m[4]) for m in messages],
+        )
+        parts = conn.execute(
+            "SELECT id, message_id, seq, type, data, created_at, updated_at FROM part WHERE session_id = ? ORDER BY message_id, seq",
+            (source_id,),
+        ).fetchall()
+        conn.executemany(
+            "INSERT OR IGNORE INTO part (id, message_id, session_id, seq, type, data, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    f"{target_id}:{p[0]}",
+                    f"{target_id}:{p[1]}",
+                    target_id,
+                    p[2],
+                    p[3],
+                    _hide_private_result(p[4]) if hide_private_tools and p[3] == "tool" else p[4],
+                    p[5],
+                    p[6],
+                )
+                for p in parts
+            ],
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO todo (session_id, position, content, status, priority, subtasks_json) "
+            "SELECT ?, position, content, status, priority, subtasks_json FROM todo WHERE session_id = ?",
+            (target_id, source_id),
+        )
+        conn.execute("UPDATE session SET updated_at = ? WHERE id = ?", (now, target_id))
+        return len(messages)
+
+
+def get_follow_mark(db_path: Path, session_id: str, source_id: str) -> tuple[float, str] | None:
+    """spec comando-update-sesiones-publicas REQ-003: `(created_at, message_id)` del ultimo mensaje de `source_id` que ya se resumio en `session_id`,
+    o None si nunca se actualizo desde esa conversacion. Solo lectura; una base sin la tabla (de antes) devuelve None."""
+    if not db_path.exists():
+        return None
+    try:
+        with _connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT last_seen_created_at, last_seen_message_id FROM public_follow WHERE session_id = ? AND source_id = ?",
+                (session_id, source_id),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return (row[0], row[1]) if row else None
+
+
+def set_follow_mark(db_path: Path, session_id: str, source_id: str, created_at: float, message_id: str, now: float) -> None:
+    """Avanza la marca de agua. Se llama SOLO despues de guardar la nota: si algo fallo antes, la marca queda donde estaba y el proximo
+    `/update` vuelve a intentar esas mismas novedades."""
+    with _connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO public_follow (session_id, source_id, last_seen_created_at, last_seen_message_id, updated_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(session_id, source_id) DO UPDATE SET last_seen_created_at = excluded.last_seen_created_at, "
+            "last_seen_message_id = excluded.last_seen_message_id, updated_at = excluded.updated_at",
+            (session_id, source_id, created_at, message_id, now),
+        )
+
+
+FILE_WRITING_TOOLS = {"write": "creó", "edit": "editó"}  # herramientas con una ruta EXPLICITA; `bash` no la tiene (limite documentado)
+
+
+def read_news_since(db_path: Path, source_id: str, mark: tuple[float, str] | None) -> dict[str, Any]:
+    """spec comando-update-sesiones-publicas REQ-004/012/014: lo NUEVO de la conversacion `source_id` posterior a `mark` (o todo si es None), en
+    SOLO LECTURA. Devuelve `{texts, files, bash_count, last}`:
+    - `texts`: `(role, texto)` de los mensajes `user`/`assistant`, en orden. Sin resultados de herramientas, imagenes ni adjuntos.
+    - `files`: `{tool|attachment, op, path}` de las herramientas `write`/`edit` y de los adjuntos. NUNCA el contenido ni los argumentos extra.
+    - `bash_count`: cuantos comandos `bash` hubo. NUNCA su texto (puede llevar contraseñas).
+    - `last`: `(created_at, message_id)` del ultimo mensaje incluido, o None si no hay novedades.
+    El orden y la marca usan el par `(created_at, id)`, asi dos mensajes con la misma hora no se pierden ni se repiten."""
+    news: dict[str, Any] = {"texts": [], "files": [], "bash_count": 0, "last": None}
+    if not db_path.exists():
+        return news
+    with _connect(db_path) as conn:
+        if mark is None:
+            rows = conn.execute(
+                "SELECT id, role, created_at FROM message WHERE session_id = ? ORDER BY created_at ASC, id ASC", (source_id,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, role, created_at FROM message WHERE session_id = ? AND (created_at > ? OR (created_at = ? AND id > ?)) "
+                "ORDER BY created_at ASC, id ASC",
+                (source_id, mark[0], mark[0], mark[1]),
+            ).fetchall()
+        for message_id, role, created_at in rows:
+            news["last"] = (created_at, message_id)
+            for part_type, data_json in conn.execute(
+                "SELECT type, data FROM part WHERE message_id = ? ORDER BY seq ASC", (message_id,)
+            ).fetchall():
+                try:
+                    data = json.loads(data_json)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                if part_type == "text" and role in ("user", "assistant") and str(data.get("text", "")).strip():
+                    news["texts"].append((role, str(data["text"])))
+                elif part_type == "tool":
+                    name = str(data.get("name", ""))
+                    if name == "bash":
+                        news["bash_count"] += 1
+                    elif name in FILE_WRITING_TOOLS:
+                        try:
+                            args = json.loads(data.get("arguments") or "{}")
+                        except (TypeError, ValueError):
+                            args = {}
+                        path = args.get("path") if isinstance(args, dict) else None
+                        if path:
+                            news["files"].append({"tool": name, "op": FILE_WRITING_TOOLS[name], "path": str(path)})
+                elif part_type == "file":
+                    path = data.get("path") or data.get("name")
+                    if path:
+                        news["files"].append({"tool": "attachment", "op": "adjuntó", "path": str(path)})
+    return news
+
+
+def read_sessions_readonly(db_path: Path) -> list[dict[str, Any]]:
+    """spec indice-resiliente-y-borrado-seguro: las sesiones de una base, SOLO LECTURA. A diferencia de `list_sessions`, no pasa por
+    `_connect` (que crea el esquema y migra): abre con `mode=ro`, asi mirar una carpeta ajena (re-escaneo del indice, aviso de
+    copias en otra carpeta) nunca escribe en ella. `[]` si la base no existe; una base ilegible lanza `sqlite3.Error` (el llamador
+    decide: omitir). Cada item: id, title, updated_at, windows_user_created, message_count."""
+    if not db_path.exists():
+        return []
+    conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+    try:
+        # spec sesion-publica-privada: una base de antes de la feature (solo lectura: no se puede migrar) no tiene `is_public`; todo es privado.
+        has_flag = "is_public" in [row[1] for row in conn.execute("PRAGMA table_info(session)")]
+        flag = "s.is_public" if has_flag else "0"
+        has_by = "published_by" in [row[1] for row in conn.execute("PRAGMA table_info(session)")]
+        by = "s.published_by" if has_by else "''"
+        rows = conn.execute(
+            f"SELECT s.id, s.title, s.updated_at, s.windows_user_created, COUNT(m.id), {flag}, {by} "
+            "FROM session s LEFT JOIN message m ON m.session_id = s.id GROUP BY s.id"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "id": r[0],
+            "title": r[1],
+            "updated_at": r[2],
+            "windows_user_created": r[3] or "",
+            "message_count": r[4],
+            "is_public": bool(r[5]),
+            "published_by": r[6] or "",
+        }
+        for r in rows
+    ]
 
 
 def sessions_older_than(db_path: Path, cutoff_ts: float) -> list[dict[str, Any]]:
@@ -440,6 +762,49 @@ def insert_part(
         )
 
 
+def insert_history_if_empty(
+    db_path: Path, session_id: str, rows: list[dict[str, Any]], now: float
+) -> int:
+    """REQ-016 (spec fix-detener-y-progreso-visible, revision; spec carpeta-por-sesion REQ-008): guarda de una vez lo que una
+    sesion hablo SIN carpeta (solo estaba en la memoria del backend), al asignarle la carpeta por primera vez. Cada fila es
+    `{id, role, created_at, parts: [{id, type, data}]}`, con la misma forma que escribe el turno en vivo (insert_message +
+    insert_part), asi `load_messages` y `load_messages_for_display` la leen igual. Solo si la base todavia NO tiene ningun mensaje
+    de esa sesion (se mira y se escribe en la misma transaccion, en el hilo escritor): nunca se mezcla con un historial que ya
+    estaba. Devuelve cuantos mensajes guardo."""
+    ensure_session(db_path, session_id, now)
+    with _connect(db_path) as conn:
+        (already,) = conn.execute(
+            "SELECT COUNT(*) FROM message WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if already:
+            logger.info(
+                "Sesion %s: su carpeta ya tenia %d mensajes; no se guarda lo hablado sin carpeta", session_id, already
+            )
+            return 0
+        for row in rows:
+            conn.execute(
+                "INSERT OR IGNORE INTO message (id, session_id, role, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (row["id"], session_id, row["role"], row["created_at"], row["created_at"]),
+            )
+            for seq, part in enumerate(row["parts"]):
+                conn.execute(
+                    "INSERT OR IGNORE INTO part "
+                    "(id, message_id, session_id, seq, type, data, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        part["id"],
+                        row["id"],
+                        session_id,
+                        seq,
+                        part["type"],
+                        json.dumps(part["data"], ensure_ascii=False),
+                        row["created_at"],
+                        row["created_at"],
+                    ),
+                )
+        return len(rows)
+
+
 def update_part(db_path: Path, part_id: str, data: dict[str, Any], now: float) -> None:
     """REQ-002: update AL TERMINAR el part, con el contenido final
     (texto completo acumulado, o resultado de la tool)."""
@@ -477,6 +842,77 @@ def find_user_occurrence(db_path: Path, session_id: str, message_id: str) -> int
     if message_id not in ids:
         return None
     return ids.index(message_id)
+
+
+def user_message_snapshot(db_path: Path, session_id: str, message_id: str) -> dict[str, Any] | None:
+    """editar-mensaje-tras-reinicio REQ-001/003: lo que el usuario mando en un mensaje 'user' ya cerrado,
+    leido de SQLite -- texto, imagenes (sin las eliminadas) y archivos (metadata tal cual se guardo, sin los
+    eliminados). Sirve para REENVIAR un mensaje editado cuando el turno ya no esta en memoria (servidor
+    reiniciado). `None` si ese id no existe en la sesion. Las rutas de archivos NO se confian: quien las usa
+    las revalida contra la carpeta del proyecto."""
+    if not db_path.exists():
+        return None
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT id FROM message WHERE id = ? AND session_id = ? AND role = 'user'",
+            (message_id, session_id),
+        ).fetchone()
+        if row is None:
+            return None
+        parts = conn.execute(
+            "SELECT type, data FROM part WHERE message_id = ? ORDER BY seq ASC", (message_id,)
+        ).fetchall()
+    text = "".join(json.loads(d).get("text", "") for ptype, d in parts if ptype == "text")
+    images = [
+        u for ptype, d in parts if ptype == "image"
+        for data in [json.loads(d)] if not data.get("deleted") and (u := data.get("url"))
+    ]
+    files = [
+        data for ptype, d in parts if ptype == "file"
+        for data in [json.loads(d)] if not data.get("deleted")
+    ]
+    return {"text": text, "images": images, "files": files}
+
+
+def truncate_from_message(
+    db_path: Path, session_id: str, message_id: str, until_message_id: str | None = None
+) -> int:
+    """editar-mensaje-tras-reinicio REQ-002/004: borra el mensaje `message_id` y TODO lo posterior de la sesion
+    (cascada a sus parts), igual que ya hace el truncado en memoria. Mismo orden que el resto del modulo:
+    `(created_at, id)`. Sin esto, reenviar un mensaje editado reutilizaba el mismo id y SQLite le pegaba el
+    texto nuevo al viejo (se leia 'viejoNUEVO') y dejaba la respuesta vieja. Devuelve cuantos mensajes borro.
+
+    REQ-014 c (spec fix-detener-y-progreso-visible): con `until_message_id` (el mensaje de usuario del turno que esta
+    corriendo) se borra solo hasta ese mensaje, sin incluirlo. Si ese mensaje todavia no esta en la base, todo lo de ese
+    turno se va a escribir DESPUES (misma cola de escritura): el truncado completo no le quita nada."""
+    if not db_path.exists():
+        return 0
+    with _connect(db_path) as conn:
+        target = conn.execute(
+            "SELECT created_at, id FROM message WHERE id = ? AND session_id = ?",
+            (message_id, session_id),
+        ).fetchone()
+        if target is None:
+            return 0
+        bound = None
+        if until_message_id is not None:
+            bound = conn.execute(
+                "SELECT created_at, id FROM message WHERE id = ? AND session_id = ?",
+                (until_message_id, session_id),
+            ).fetchone()
+        if bound is not None:
+            if tuple(bound) <= tuple(target):
+                return 0  # no deberia pasar (el turno en curso es posterior): ante la duda no se borra nada suyo
+            cur = conn.execute(
+                "DELETE FROM message WHERE session_id = ? AND (created_at, id) >= (?, ?) AND (created_at, id) < (?, ?)",
+                (session_id, target[0], target[1], bound[0], bound[1]),
+            )
+            return cur.rowcount
+        cur = conn.execute(
+            "DELETE FROM message WHERE session_id = ? AND (created_at, id) >= (?, ?)",
+            (session_id, target[0], target[1]),
+        )
+        return cur.rowcount
 
 
 def clear_session_messages(db_path: Path, session_id: str) -> int:
@@ -547,7 +983,38 @@ def delete_assistant_response(
         return cur.rowcount > 0
 
 
-def load_messages_for_display(db_path: Path, session_id: str) -> list[dict[str, Any]]:
+def describe_file_part(data: dict[str, Any], project_root: Path | None) -> dict[str, Any]:
+    """REQ-010 a: metadata de un part 'file' + `exists` (calculado al cargar).
+    Una ruta relativa se resuelve contra la raiz del proyecto; una absoluta
+    (leida en su lugar) tal cual. `deleted` (tombstone de REQ-009) manda: un
+    archivo eliminado nunca figura como 'no encontrado'."""
+    path = data.get("path") or ""
+    deleted = bool(data.get("deleted"))
+    exists = False
+    if path and not deleted:
+        p = Path(path)
+        if not p.is_absolute() and project_root is not None:
+            p = project_root / p
+        try:
+            exists = p.is_file()
+        except OSError:
+            exists = False
+    return {
+        "name": data.get("name", ""),
+        "path": path,
+        "size": data.get("size"),
+        "mime": data.get("mime", ""),
+        "kind": data.get("kind", "file"),
+        "inplace": bool(data.get("inplace")),
+        "exists": exists,
+        "deleted": deleted,
+        "token_estimate": data.get("token_estimate"),
+    }
+
+
+def load_messages_for_display(
+    db_path: Path, session_id: str, project_root: Path | None = None
+) -> list[dict[str, Any]]:
     """Bug real reportado por el usuario: abrir Vision en OTRO navegador
     mostraba la sesion vacia de mensajes aunque ya estuvieran persistidos
     aca -- el frontend nunca llamaba a ninguna funcion de lectura de este
@@ -579,11 +1046,19 @@ def load_messages_for_display(db_path: Path, session_id: str) -> list[dict[str, 
                 for ptype, data in parts
                 if ptype == "text"
             )
-            if not text:
+            # REQ-010 a (spec adjuntar-archivos-chat): los parts 'file' se
+            # devuelven como `attachments`, con `exists` calculado AHORA.
+            attachments = [
+                describe_file_part(json.loads(data), project_root)
+                for ptype, data in parts
+                if ptype == "file"
+            ]
+            if not text and not attachments:
                 # Mensaje 'assistant' que era solo tool-calls, sin texto
                 # propio (ej. un turno que solo ejecuto una tool y no
                 # redacto respuesta) -- no hay nada que mostrar como
-                # burbuja de chat.
+                # burbuja de chat. Un mensaje que SOLO tiene adjuntos (texto
+                # vacio) si se muestra: hoy se descartaba (REQ-010 a).
                 continue
             entry = {
                 "role": role,
@@ -592,10 +1067,144 @@ def load_messages_for_display(db_path: Path, session_id: str) -> list[dict[str, 
                 "time": created_at
                 * 1000,  # created_at es epoch segundos; el frontend usa epoch ms (Date.now())
             }
+            if attachments:
+                entry["attachments"] = attachments
             if response_type:
                 entry["responseType"] = response_type
             result.append(entry)
         return result
+
+
+def _rebuild_text_message(role: str, parts: list[tuple[str, str]]) -> dict[str, Any]:
+    """Rearma un mensaje `system`/`user` desde sus parts de SQLite: texto, aviso de archivos adjuntos (se REARMA desde los parts
+    'file', el texto persistido sigue limpio) e imagenes (si hay, `content` es una LISTA de bloques; las eliminadas pasan a ser
+    el texto «[imagen eliminada]», nunca un image_url roto). `parts` = [(type, data_json)] en orden de `seq`."""
+    text = "".join(
+        json.loads(data).get("text", "")
+        for ptype, data in parts
+        if ptype == "text"
+    )
+    # spec contexto-multimodal REQ-008: si el mensaje tiene
+    # parts de imagen, se reconstruye el `content` en formato
+    # LISTA (igual que lo arma app/llm/loop.py al enviarlo por
+    # primera vez) -- una sesion con imagenes recuperada desde
+    # SQLite tras un reinicio del backend debe verlas igual
+    # que antes de reiniciar, no perder las imagenes.
+    image_parts = [
+        json.loads(data) for ptype, data in parts if ptype == "image"
+    ]
+    # REQ-003 c: el aviso de rutas se REARMA desde los parts
+    # 'file' (la conversacion que ve el modelo no cambia al
+    # reiniciar). El texto PERSISTIDO sigue limpio.
+    file_parts = [
+        json.loads(data) for ptype, data in parts if ptype == "file"
+    ]
+    from app.attachments import with_notice  # import diferido: evita ciclo
+
+    llm_text = with_notice(text, file_parts) if file_parts else text
+    # REQ-009 c: una imagen eliminada se rearma como el TEXTO
+    # "[imagen eliminada]" -- nunca queda un image_url roto.
+    image_urls = [ip.get("url", "") for ip in image_parts if not ip.get("deleted")]
+    deleted_images = sum(1 for ip in image_parts if ip.get("deleted"))
+    if deleted_images:
+        marker = " ".join(["[imagen eliminada]"] * deleted_images)
+        llm_text = f"{llm_text}\n{marker}" if llm_text else marker
+    if image_urls:
+        content_blocks: list[dict[str, Any]] = []
+        if llm_text:
+            content_blocks.append({"type": "text", "text": llm_text})
+        for url in image_urls:
+            content_blocks.append(
+                {"type": "image_url", "image_url": {"url": url}}
+            )
+        return {"role": role, "content": content_blocks}
+    else:
+        return {"role": role, "content": llm_text}
+    
+
+
+def _rebuild_assistant_messages(session_id: str, msg_id: str, parts: list[tuple[str, str]]) -> list[dict[str, Any]]:
+    """Rearma un mensaje `assistant` y, a continuacion, un mensaje `tool` por cada tool-call completa (misma forma que el flujo
+    en vivo). Las tool-calls incompletas (sin nombre, sin resultado o con id invalido) se DESCARTAN: la API rechaza una
+    tool-call sin su respuesta. Un assistant que queda sin texto ni tool-calls se omite (devuelve `[]`)."""
+    text_parts = [
+        json.loads(data).get("text", "")
+        for ptype, data in parts
+        if ptype == "text"
+    ]
+    all_tool_parts = [
+        json.loads(data) for ptype, data in parts if ptype == "tool"
+    ]
+    # Bug real encontrado (2026-09-05): `record_part_start` (ver
+    # app/persistence/service.py) inserta el part 'tool' con
+    # name="" ANTES de conocerse el nombre real de la tool-call
+    # (se completa recien en record_part_end, al terminar el
+    # streaming) -- si el proceso se corta entre esos dos
+    # momentos (crash, kill del .exe, etc.), esa fila queda
+    # CONGELADA en SQLite para siempre con name="". Al recargar
+    # la sesion (reinicio del backend, SessionStore.
+    # get_or_create), reconstruirla como tool_call real con
+    # nombre vacio rompe el proximo request al proveedor de IA con
+    # "Invalid 'input[N].name': empty string" (400) -- el
+    # gateway lo detecta recien al traducir internamente al
+    # formato Responses API, por eso el indice en el error no
+    # coincide con la posicion en `messages`. Se descartan
+    # (nunca se reconstruyen) las tool-calls incompletas: sin
+    # nombre, o con nombre pero sin 'result' (mismo problema:
+    # la API exige un mensaje 'tool' por cada tool_call
+    # anunciada en el mismo turno).
+    tool_parts = [
+        tp
+        for tp in all_tool_parts
+        if tp.get("name")
+        and "result" in tp
+        and _VALID_TOOL_CALL_ID_RE.match(tp.get("call_id") or "")
+    ]
+    dropped = len(all_tool_parts) - len(tool_parts)
+    if dropped:
+        logger.warning(
+            "Sesion %s: se descartaron %d tool-call(s) incompleta(s) o "
+            "con call_id invalido (interrumpidas antes de terminar, o "
+            "id con formato no aceptado por la API) al reconstruir el "
+            "historial -- mensaje %s",
+            session_id,
+            dropped,
+            msg_id,
+        )
+    content = "".join(text_parts) or None
+    if content is None and not tool_parts:
+        # Mensaje 'assistant' completamente vacio (solo tenia la
+        # tool-call descartada arriba, sin texto) -- omitirlo
+        # entero evita mandarle a la API un mensaje sin
+        # content ni tool_calls, que tambien rechaza.
+        return []
+    assistant_msg: dict[str, Any] = {
+        "role": "assistant",
+        "content": content,
+    }
+    if tool_parts:
+        assistant_msg["tool_calls"] = [
+            {
+                "id": tp["call_id"],
+                "type": "function",
+                "function": {
+                    "name": tp["name"],
+                    "arguments": tp["arguments"],
+                },
+            }
+            for tp in tool_parts
+        ]
+    out: list[dict[str, Any]] = [assistant_msg]
+    for tp in tool_parts:
+        out.append(
+            {
+                "role": "tool",
+                "tool_call_id": tp["call_id"],
+                "content": tp["result"],
+            }
+        )
+    
+    return out
 
 
 def load_messages(db_path: Path, session_id: str) -> list[dict[str, Any]]:
@@ -621,112 +1230,11 @@ def load_messages(db_path: Path, session_id: str) -> list[dict[str, Any]]:
             ).fetchall()
 
             if role in ("system", "user"):
-                text = "".join(
-                    json.loads(data).get("text", "")
-                    for ptype, data in parts
-                    if ptype == "text"
-                )
-                # spec contexto-multimodal REQ-008: si el mensaje tiene
-                # parts de imagen, se reconstruye el `content` en formato
-                # LISTA (igual que lo arma app/llm/loop.py al enviarlo por
-                # primera vez) -- una sesion con imagenes recuperada desde
-                # SQLite tras un reinicio del backend debe verlas igual
-                # que antes de reiniciar, no perder las imagenes.
-                image_urls = [
-                    json.loads(data).get("url", "")
-                    for ptype, data in parts
-                    if ptype == "image"
-                ]
-                if image_urls:
-                    content_blocks: list[dict[str, Any]] = []
-                    if text:
-                        content_blocks.append({"type": "text", "text": text})
-                    for url in image_urls:
-                        content_blocks.append(
-                            {"type": "image_url", "image_url": {"url": url}}
-                        )
-                    result.append({"role": role, "content": content_blocks})
-                else:
-                    result.append({"role": role, "content": text})
+                result.append(_rebuild_text_message(role, parts))
                 continue
 
             if role == "assistant":
-                text_parts = [
-                    json.loads(data).get("text", "")
-                    for ptype, data in parts
-                    if ptype == "text"
-                ]
-                all_tool_parts = [
-                    json.loads(data) for ptype, data in parts if ptype == "tool"
-                ]
-                # Bug real encontrado (2026-09-05): `record_part_start` (ver
-                # app/persistence/service.py) inserta el part 'tool' con
-                # name="" ANTES de conocerse el nombre real de la tool-call
-                # (se completa recien en record_part_end, al terminar el
-                # streaming) -- si el proceso se corta entre esos dos
-                # momentos (crash, kill del .exe, etc.), esa fila queda
-                # CONGELADA en SQLite para siempre con name="". Al recargar
-                # la sesion (reinicio del backend, SessionStore.
-                # get_or_create), reconstruirla como tool_call real con
-                # nombre vacio rompe el proximo request al proveedor de IA con
-                # "Invalid 'input[N].name': empty string" (400) -- el
-                # gateway lo detecta recien al traducir internamente al
-                # formato Responses API, por eso el indice en el error no
-                # coincide con la posicion en `messages`. Se descartan
-                # (nunca se reconstruyen) las tool-calls incompletas: sin
-                # nombre, o con nombre pero sin 'result' (mismo problema:
-                # la API exige un mensaje 'tool' por cada tool_call
-                # anunciada en el mismo turno).
-                tool_parts = [
-                    tp
-                    for tp in all_tool_parts
-                    if tp.get("name")
-                    and "result" in tp
-                    and _VALID_TOOL_CALL_ID_RE.match(tp.get("call_id") or "")
-                ]
-                dropped = len(all_tool_parts) - len(tool_parts)
-                if dropped:
-                    logger.warning(
-                        "Sesion %s: se descartaron %d tool-call(s) incompleta(s) o "
-                        "con call_id invalido (interrumpidas antes de terminar, o "
-                        "id con formato no aceptado por la API) al reconstruir el "
-                        "historial -- mensaje %s",
-                        session_id,
-                        dropped,
-                        msg_id,
-                    )
-                content = "".join(text_parts) or None
-                if content is None and not tool_parts:
-                    # Mensaje 'assistant' completamente vacio (solo tenia la
-                    # tool-call descartada arriba, sin texto) -- omitirlo
-                    # entero evita mandarle a la API un mensaje sin
-                    # content ni tool_calls, que tambien rechaza.
-                    continue
-                assistant_msg: dict[str, Any] = {
-                    "role": "assistant",
-                    "content": content,
-                }
-                if tool_parts:
-                    assistant_msg["tool_calls"] = [
-                        {
-                            "id": tp["call_id"],
-                            "type": "function",
-                            "function": {
-                                "name": tp["name"],
-                                "arguments": tp["arguments"],
-                            },
-                        }
-                        for tp in tool_parts
-                    ]
-                result.append(assistant_msg)
-                for tp in tool_parts:
-                    result.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tp["call_id"],
-                            "content": tp["result"],
-                        }
-                    )
+                result.extend(_rebuild_assistant_messages(session_id, msg_id, parts))
                 continue
 
             # role desconocido (defensivo, ver Mantenimiento en la spec):
@@ -832,6 +1340,37 @@ def find_tool_result(
         return None
 
 
+def load_pending_question(db_path: Path, session_id: str) -> dict[str, Any] | None:
+    """REQ-018 (spec fix-detener-y-progreso-visible): el part 'tool' de la ULTIMA pregunta (tool `question`, ya con resultado) que no
+    tiene ningun mensaje del usuario despues -- la pregunta que sigue sin contestar --, para que F5 la vuelva a mostrar en su sesion. Lo
+    devuelve tal cual (`arguments` crudo y `result`): si de verdad espera al usuario lo decide `tools.question.pending_question_view`
+    (una que el loop contesto solo tambien queda aca). Cualquier mensaje del usuario la da por contestada, como en la pagina. Una fila
+    rota se saltea. Sin base, None (y no crea nada)."""
+    if not db_path.exists():
+        return None
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT m.role, p.type, p.data FROM message m LEFT JOIN part p ON p.message_id = m.id "
+            "WHERE m.session_id = ? AND m.role IN ('user', 'assistant') "
+            "ORDER BY m.created_at ASC, m.id ASC, p.seq ASC",
+            (session_id,),
+        ).fetchall()
+    pending: dict[str, Any] | None = None
+    for role, ptype, data in rows:
+        if role == "user":
+            pending = None
+            continue
+        if ptype != "tool" or not data:
+            continue
+        try:
+            parsed = json.loads(data)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(parsed, dict) and parsed.get("name") == "question" and "result" in parsed:
+            pending = parsed
+    return pending
+
+
 # ---------------------------------------------------------------------------
 # Busqueda global (spec busqueda-mensajes)
 # ---------------------------------------------------------------------------
@@ -847,6 +1386,9 @@ def _extract_text(part_type: str, data: dict[str, Any]) -> str:
         return data.get("text", "")
     if part_type == "tool":
         return " ".join(str(data.get(k, "")) for k in ("name", "arguments", "result"))
+    if part_type == "file":
+        # REQ-010 e: la busqueda de mensajes encuentra tambien por nombre de archivo.
+        return str(data.get("name", ""))
     return ""
 
 
@@ -956,3 +1498,101 @@ def update_message_response_type(
             "UPDATE message SET response_type = ?, updated_at = ? WHERE id = ? AND session_id = ?",
             (response_type, now, message_id, session_id)
         )
+
+
+# ---------------------------------------------------------------------------
+# Adjuntos de archivo: consultas y limpieza (spec adjuntar-archivos-chat REQ-009)
+# ---------------------------------------------------------------------------
+def list_file_parts(db_path: Path, session_id: str | None = None) -> list[dict[str, Any]]:
+    """Todos los parts 'file' de la base (o solo de una sesion). Cada item trae
+    `part_id`, `message_id`, `session_id` y la metadata guardada."""
+    if not db_path.exists():
+        return []
+    sql = "SELECT id, message_id, session_id, data FROM part WHERE type = 'file'"
+    params: tuple[Any, ...] = ()
+    if session_id is not None:
+        sql += " AND session_id = ?"
+        params = (session_id,)
+    with _connect(db_path) as conn:
+        rows = conn.execute(sql + " ORDER BY created_at ASC", params).fetchall()
+    out: list[dict[str, Any]] = []
+    for part_id, message_id, sid, data in rows:
+        try:
+            item = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        item.update({"part_id": part_id, "message_id": message_id, "session_id": sid})
+        out.append(item)
+    return out
+
+
+def list_image_parts(db_path: Path, session_id: str) -> list[dict[str, Any]]:
+    """Parts 'image' (base64) de una sesion, con su tamaño aproximado en bytes,
+    SIN devolver el base64 completo (pesa MB)."""
+    if not db_path.exists():
+        return []
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT id, message_id, length(data), data FROM part WHERE type = 'image' AND session_id = ?",
+            (session_id,),
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for part_id, message_id, nbytes, data in rows:
+        try:
+            deleted = bool(json.loads(data).get("deleted"))
+        except json.JSONDecodeError:
+            deleted = False
+        out.append({"part_id": part_id, "message_id": message_id, "bytes": nbytes, "deleted": deleted})
+    return out
+
+
+def tombstone_file_part(db_path: Path, part_id: str, now: float) -> None:
+    """REQ-009 b: el part queda como tombstone (`deleted: true`, `deleted_at`);
+    conserva nombre/ruta/tamaño para que el chip diga "archivo eliminado"."""
+    with _connect(db_path) as conn:
+        row = conn.execute("SELECT data FROM part WHERE id = ? AND type = 'file'", (part_id,)).fetchone()
+        if row is None:
+            return
+        data = json.loads(row[0])
+        data.update({"deleted": True, "deleted_at": now})
+        conn.execute(
+            "UPDATE part SET data = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(data, ensure_ascii=False), now, part_id),
+        )
+
+
+def tombstone_image_part(db_path: Path, part_id: str, now: float) -> None:
+    """REQ-009 c: el base64 se reemplaza por un marcador (libera el espacio);
+    `load_messages` la rearma como el texto "[imagen eliminada]"."""
+    with _connect(db_path) as conn:
+        conn.execute(
+            "UPDATE part SET data = ?, updated_at = ? WHERE id = ? AND type = 'image'",
+            (json.dumps({"url": "", "deleted": True, "deleted_at": now}), now, part_id),
+        )
+
+
+def compact_database(db_path: Path) -> None:
+    """REQ-009 d: `wal_checkpoint(TRUNCATE)` + `VACUUM`. Sin VACUUM, SQLite no
+    achica el archivo. Se abre una conexion propia SIN el esquema/migracion de
+    `_connect` porque VACUUM no puede correr dentro de una transaccion."""
+    if not db_path.exists():
+        return
+    conn = sqlite3.connect(str(db_path), timeout=10, isolation_level=None)
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute("VACUUM")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        conn.close()
+
+
+def database_size(db_path: Path) -> int:
+    """Bytes en disco de la base + su WAL (para medir lo liberado de verdad)."""
+    total = 0
+    for suffix in ("", "-wal", "-shm"):
+        f = Path(str(db_path) + suffix)
+        try:
+            total += f.stat().st_size
+        except OSError:
+            pass
+    return total

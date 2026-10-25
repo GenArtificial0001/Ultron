@@ -379,6 +379,45 @@ def test_find_tool_result_by_call_id_by_name_and_latest(path):
     assert db.find_tool_result(path, "s1", None, ["sap_query"]) is None
 
 
+# ---- REQ-018 (spec fix-detener-y-progreso-visible): la pregunta sin contestar --------------------------------
+Q_ARGS = json.dumps({"question": "¿Sigo?", "options": [{"label": "Sí"}, {"label": "No"}]})
+
+
+def question_part(call_id, result="Pregunta mostrada al usuario: '¿Sigo?'. Esperando que el usuario responda."):
+    data = {"name": "question", "call_id": call_id, "arguments": Q_ARGS}
+    if result is not None:
+        data["result"] = result
+    return ("tool", data)
+
+
+def test_load_pending_question_is_the_last_question_with_no_user_message_after_it(path):
+    assert db.load_pending_question(path, "s1") is None  # sin base: None y no crea nada
+    assert not path.exists()
+    add_message(path, "u1", role="user", text="hola", at=1)
+    add_message(path, "a1", role="assistant", text="pregunto", at=2, parts=[question_part("q1")])
+    add_message(path, "a2", role="assistant", text="y sigo escribiendo", at=3, parts=[("tool", {"name": "bash", "result": "x"})])
+    got = db.load_pending_question(path, "s1")
+    assert got["call_id"] == "q1" and got["arguments"] == Q_ARGS and got["result"].startswith("Pregunta mostrada")
+
+    add_message(path, "a3", role="assistant", at=4, parts=[question_part("q2")])
+    assert db.load_pending_question(path, "s1")["call_id"] == "q2"  # la ultima
+
+    add_message(path, "u2", role="user", text="Sí", at=5)  # contestada (o cualquier otro mensaje del usuario)
+    assert db.load_pending_question(path, "s1") is None
+
+
+def test_load_pending_question_skips_unfinished_calls_corrupt_rows_and_other_sessions(path):
+    add_message(path, "a1", role="assistant", at=1, parts=[question_part("q1", result=None)])  # todavia sin resultado
+    add_message(path, "x1", sid="otra", role="assistant", at=2, parts=[question_part("qx")])
+    assert db.load_pending_question(path, "s1") is None
+    assert db.load_pending_question(path, "otra")["call_id"] == "qx"
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE part SET data = '{roto' WHERE message_id = 'x1'")
+    conn.commit()
+    conn.close()
+    assert db.load_pending_question(path, "otra") is None
+
+
 # ---- busqueda ----------------------------------------------------------------
 def test_snippet_helpers():
     assert db._extract_text("text", {"text": "hola"}) == "hola"

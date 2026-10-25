@@ -1,0 +1,1110 @@
+{
+ "book_rctr_room": {
+  "description": "Find available conference rooms, or prepare a room booking / Teams meeting for confirmation.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "attendees": {
+     "default": "",
+     "description": "Comma-separated email addresses to invite, e.g.\n``\"alice@empresa.com, bob@empresa.com\"``.",
+     "type": "string"
+    },
+    "body": {
+     "default": "",
+     "description": "Optional agenda or description text for the calendar invite.",
+     "type": "string"
+    },
+    "body_type": {
+     "default": "text",
+     "description": "``\"text\"`` (default) — plain text body.\n``\"html\"`` — body contains HTML markup that should render in the\ncalendar invite (bold, links, lists, etc.). Use this when the body\ncomes from Jira, a ticket, or any source that provides HTML.",
+     "type": "string"
+    },
+    "building": {
+     "default": "",
+     "description": "Building / room list to search, e.g. ``\"RCTR\"`` or part of a building\nname from a ``building_required`` response. Leave empty to use the\nuser's office building.",
+     "type": "string"
+    },
+    "dry_run": {
+     "default": false,
+     "description": "When True, return available rooms without booking. Ignores ``room_name``,\n``subject``, and ``attendees``.",
+     "type": "boolean"
+    },
+    "duration_minutes": {
+     "default": 30,
+     "description": "Duration in minutes. Default 30.",
+     "type": "integer"
+    },
+    "location": {
+     "default": "",
+     "description": "Optional physical location string (Teams-link-only meetings only).",
+     "type": "string"
+    },
+    "meeting_date": {
+     "description": "Date in YYYY-MM-DD format, e.g. ``\"2026-05-20\"``.",
+     "type": "string"
+    },
+    "room_email": {
+     "default": "",
+     "description": "Room email address from ``dry_run`` results. Optional — it must belong\nto a room in the directory; pass the same ``building`` used for ``dry_run``.",
+     "type": "string"
+    },
+    "room_name": {
+     "default": "",
+     "description": "Display name of the room to book, as returned by ``dry_run``, e.g.\n``\"RCTR 2NAA07\"``. Leave empty for a Teams-link-only meeting or when\nusing ``dry_run=True``.",
+     "type": "string"
+    },
+    "room_prefix": {
+     "default": "",
+     "description": "Optional room-name filter, e.g. ``\"RCTR 2N\"`` for one wing. Without\n``building`` it searches all rooms whose name starts with this text.",
+     "type": "string"
+    },
+    "show_as": {
+     "default": "busy",
+     "description": "How to show the time on your calendar.\n``\"busy\"`` (default), ``\"free\"``, ``\"tentative\"``,\n``\"oof\"`` (Out of Office), ``\"workingElsewhere\"``, ``\"unknown\"``.\nUse ``\"oof\"`` when the user says \"out of office\", \"OOO\", or\n\"mark me as out of office\".",
+     "enum": [
+      "free",
+      "tentative",
+      "busy",
+      "oof",
+      "workingElsewhere",
+      "unknown"
+     ],
+     "type": "string"
+    },
+    "start_time": {
+     "description": "Start time in HH:MM 24-hour format, interpreted in the signed-in\nuser's own mailbox time zone (same as ``check_availability`` and\n``get_meetings``) — la empresa locations now span multiple time zones,\nso this is no longer hardcoded to Eastern.",
+     "type": "string"
+    },
+    "subject": {
+     "default": "",
+     "description": "Event title, e.g. ``\"Sprint Review\"``. Required when booking or creating.",
+     "type": "string"
+    },
+    "with_teams_link": {
+     "default": false,
+     "description": "Attach a Teams online-meeting link when booking a room, so attendees\ncan join remotely. Creates one event with both room and Teams link.",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "meeting_date",
+    "start_time"
+   ],
+   "type": "object"
+  }
+ },
+ "cancel_meeting": {
+  "description": "Cancel a calendar event and notify all attendees.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "event_id": {
+     "description": "The Graph event ID returned in the ``id`` field of ``get_meetings``.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "event_id"
+   ],
+   "type": "object"
+  }
+ },
+ "check_availability": {
+  "description": "Check whether one or more people are free at a given time slot.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "duration_minutes": {
+     "default": 30,
+     "description": "Duration of the slot to check in minutes. Default 30.",
+     "type": "integer"
+    },
+    "emails": {
+     "description": "Comma-separated email addresses to check, e.g.\n``\"alice@empresa.com, bob@empresa.com\"``.\nUse ``find_person`` or ``my_recent_contacts`` first to resolve\na name to an email address.",
+     "type": "string"
+    },
+    "meeting_date": {
+     "description": "Date in YYYY-MM-DD format, e.g. ``\"2026-07-15\"``.",
+     "type": "string"
+    },
+    "start_time": {
+     "description": "Start time in HH:MM 24-hour format, interpreted in the signed-in\nuser's own mailbox time zone (see ``my_profile``/``get_meetings``\nfor what that time zone is), e.g. ``\"14:00\"``.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "emails",
+    "meeting_date",
+    "start_time"
+   ],
+   "type": "object"
+  }
+ },
+ "collect_meeting_transcript_evidence": {
+  "description": "Collect bounded, structured person-related transcript evidence.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "attendee": {
+     "default": "",
+     "maxLength": 320,
+     "type": "string"
+    },
+    "end_date": {
+     "type": "string"
+    },
+    "organizer": {
+     "default": "",
+     "maxLength": 320,
+     "type": "string"
+    },
+    "page_token": {
+     "default": "",
+     "maxLength": 16000,
+     "type": "string"
+    },
+    "shared_speaker_labels": {
+     "anyOf": [
+      {
+       "items": {
+        "maxLength": 256,
+        "type": "string"
+       },
+       "maxItems": 10,
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "speaker": {
+     "maxLength": 200,
+     "minLength": 1,
+     "type": "string"
+    },
+    "start_date": {
+     "type": "string"
+    },
+    "subject": {
+     "default": "",
+     "maxLength": 200,
+     "type": "string"
+    }
+   },
+   "required": [
+    "start_date",
+    "end_date",
+    "speaker"
+   ],
+   "type": "object"
+  }
+ },
+ "confirm_booking": {
+  "description": "Book the room / create the meeting previewed by ``book_rctr_room``.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "booking_token": {
+     "description": "The opaque token returned by ``book_rctr_room``. Pass unchanged.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "booking_token"
+   ],
+   "type": "object"
+  }
+ },
+ "create_draft_email": {
+  "description": "Save an email as a draft in the Drafts folder without sending it.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "bcc": {
+     "default": "",
+     "description": "Optional comma-separated BCC email addresses.",
+     "type": "string"
+    },
+    "body": {
+     "default": "",
+     "description": "Email body content.",
+     "type": "string"
+    },
+    "body_type": {
+     "default": "text",
+     "description": "``\"text\"`` (default) or ``\"html\"``.",
+     "type": "string"
+    },
+    "cc": {
+     "default": "",
+     "description": "Optional comma-separated CC email addresses.",
+     "type": "string"
+    },
+    "cc_name": {
+     "default": "",
+     "description": "Optional person name to resolve and add to CC.",
+     "type": "string"
+    },
+    "reply_all": {
+     "default": true,
+     "description": "When True (default), reply includes all original To/CC recipients.\nWhen False, reply goes only to the sender of the original message.",
+     "type": "boolean"
+    },
+    "reply_to_message_id": {
+     "default": "",
+     "description": "When provided, creates a reply draft linked to this message ID.",
+     "type": "string"
+    },
+    "send_to_self": {
+     "default": false,
+     "description": "Set True only to send an email to yourself. Requires a new email\naddressed solely to you (no CC/BCC, no reply); returns a\n``draft_token`` for ``send_email_to_self``.",
+     "type": "boolean"
+    },
+    "subject": {
+     "default": "",
+     "description": "Email subject line.",
+     "type": "string"
+    },
+    "to": {
+     "default": "",
+     "description": "Comma-separated recipient email addresses (optional if to_name given).",
+     "type": "string"
+    },
+    "to_name": {
+     "default": "",
+     "description": "Person name to resolve to an email address (preferred over ``to``).",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  }
+ },
+ "draft_message": {
+  "description": "Compose a draft and show it to the user for review before sending.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "attachment_refs": {
+     "default": "",
+     "description": "Comma-separated references to existing OneDrive/SharePoint files to\nattach (nothing is uploaded). Each entry is a sharing/browser URL\n(what a user copies from OneDrive) or a raw driveItem ID. Ask the\nuser to paste the file's share link if you don't have an ID.",
+     "type": "string"
+    },
+    "content_type": {
+     "default": "text",
+     "description": "``\"text\"`` (default) — plain text, newlines and special characters\nare handled automatically.\n``\"html\"`` — *message* contains HTML markup (``<b>``, ``<a>``,\n``<p>``, etc.) that should render in Teams.  Use this when the\nmessage body already contains HTML tags (e.g. copied from Jira or\nanother tool).  The HTML is sent as-is — do not double-escape.",
+     "type": "string"
+    },
+    "message": {
+     "description": "The message body.",
+     "type": "string"
+    },
+    "subject": {
+     "default": "",
+     "description": "Optional subject line (channel messages only).",
+     "type": "string"
+    },
+    "to_channel_id": {
+     "default": "",
+     "type": "string"
+    },
+    "to_chat_name": {
+     "default": "",
+     "type": "string"
+    },
+    "to_person": {
+     "default": "",
+     "type": "string"
+    },
+    "to_team_id": {
+     "default": "",
+     "type": "string"
+    }
+   },
+   "required": [
+    "message"
+   ],
+   "type": "object"
+  }
+ },
+ "find_meetings": {
+  "description": "Find transcript candidates in your calendar, not ordinary scheduling.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "attendee": {
+     "default": "",
+     "maxLength": 320,
+     "type": "string"
+    },
+    "end_date": {
+     "type": "string"
+    },
+    "join_url": {
+     "default": "",
+     "maxLength": 2000,
+     "type": "string"
+    },
+    "limit": {
+     "default": 20,
+     "maximum": 20,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "organizer": {
+     "default": "",
+     "maxLength": 320,
+     "type": "string"
+    },
+    "page_token": {
+     "default": "",
+     "maxLength": 16000,
+     "type": "string"
+    },
+    "start_date": {
+     "type": "string"
+    },
+    "subject": {
+     "default": "",
+     "description": "Meeting name or topic to match. When the user names a meeting, pass it here instead of scanning unrelated calendar meetings.",
+     "maxLength": 200,
+     "type": "string"
+    },
+    "transcribed_only": {
+     "default": false,
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "start_date",
+    "end_date"
+   ],
+   "type": "object"
+  }
+ },
+ "find_person": {
+  "description": "Resolve a person's name (or partial email) to their full identity.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "name": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "name"
+   ],
+   "type": "object"
+  }
+ },
+ "get_emails": {
+  "description": "Return emails from any Outlook folder, newest first.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "email_date": {
+     "default": "",
+     "description": "Start date YYYY-MM-DD in your mailbox time zone. Defaults to today.",
+     "type": "string"
+    },
+    "folder": {
+     "default": "",
+     "description": "Folder to read. Accepts well-known names (``\"inbox\"`` default,\n``\"sentitems\"``, ``\"deleteditems\"``, ``\"drafts\"``, ``\"junkemail\"``)\nor a folder_id from ``list_mail_folders``.\nLeave empty to read the inbox.",
+     "type": "string"
+    },
+    "importance": {
+     "default": "",
+     "description": "``\"high\"``, ``\"normal\"``, or ``\"low\"``. Leave empty for all.",
+     "type": "string"
+    },
+    "max_results": {
+     "default": 50,
+     "description": "Maximum number of messages to return (default 50).",
+     "type": "integer"
+    },
+    "query": {
+     "default": "",
+     "description": "Keyword search across subject and body.",
+     "type": "string"
+    },
+    "unread_only": {
+     "default": false,
+     "description": "When True, return only unread messages.",
+     "type": "boolean"
+    },
+    "until_date": {
+     "default": "",
+     "description": "End date YYYY-MM-DD in your mailbox time zone (inclusive). Use with ``email_date`` for a range.",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  }
+ },
+ "get_file_content": {
+  "description": "Get a file's full content. Text/PDF/Word/Excel/PowerPoint under ~15MB are inlined (capped at 200k chars, truncated: true if cut); everything else (images, legacy formats, oversized, unparseable) returns a download_url instead. A folder (or other item with no downloadable content) returns status=\"no_content\", distinct from status=\"not_found\" (no item matched the id/path at all).",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "file_id": {
+     "default": "",
+     "type": "string",
+     "description": "Graph item ID. Takes precedence over file_path."
+    },
+    "file_path": {
+     "default": "",
+     "type": "string",
+     "description": "Path relative to OneDrive root. Used only if file_id is empty."
+    },
+    "drive_id": {
+     "default": "",
+     "type": "string",
+     "description": "See above."
+    }
+   },
+   "type": "object"
+  }
+ },
+ "get_file_info": {
+  "description": "Get file metadata: size, sharing, modified-by, creator, versions.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "file_id": {
+     "default": "",
+     "type": "string",
+     "description": "Graph item ID. Takes precedence over file_path."
+    },
+    "file_path": {
+     "default": "",
+     "type": "string",
+     "description": "Path relative to OneDrive root. Used only if file_id is empty."
+    },
+    "drive_id": {
+     "default": "",
+     "type": "string",
+     "description": "See above."
+    }
+   },
+   "type": "object"
+  }
+ },
+ "get_meeting_attendance": {
+  "description": "Return attendance for the selected find_meetings candidate.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "meeting_ref": {
+     "maxLength": 16000,
+     "minLength": 1,
+     "type": "string"
+    }
+   },
+   "required": [
+    "meeting_ref"
+   ],
+   "type": "object"
+  }
+ },
+ "get_meetings": {
+  "description": "List calendar events for today, this week, next week, or any specific date.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "check_rooms": {
+     "default": false,
+     "description": "When True, splits results into ``has_room`` and ``needs_room`` buckets\nshowing which meetings have an RCTR room booked and which still need one.\nAll-day events, free blocks, and tentative meetings are excluded.\nDefault False.",
+     "type": "boolean"
+    },
+    "period": {
+     "default": "",
+     "description": "One of:\n- \"\" or \"today\"  — today's events (default)\n- \"week\"         — current week (Monday–Sunday)\n- \"next week\"    — next week (Monday–Sunday)\n- \"YYYY-MM-DD\"   — events for that specific date, e.g. \"2026-05-20\"",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  }
+ },
+ "list_chats": {
+  "description": "List, search, or find chats — including group chats and meeting chats.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "active_date": {
+     "default": "",
+     "type": "string"
+    },
+    "chat_type": {
+     "default": "",
+     "type": "string"
+    },
+    "limit": {
+     "default": 50,
+     "type": "integer"
+    },
+    "name": {
+     "default": "",
+     "type": "string"
+    },
+    "page_token": {
+     "default": "",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  }
+ },
+ "list_files": {
+  "description": "List files in root or folder, with optional search.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "folder_path": {
+     "default": "",
+     "type": "string",
+     "description": "Folder path relative to OneDrive root, e.g. \"Reports\" or \"Reports/2026\". Two known causes of a 404 even when the folder visibly exists in the browser: (1) for OneDrive for Business, the drive root…"
+    },
+    "folder_id": {
+     "default": "",
+     "type": "string",
+     "description": "Graph item ID of the folder. Takes precedence over folder_path."
+    },
+    "query": {
+     "default": "",
+     "type": "string",
+     "description": "When given, searches the drive instead of listing a folder."
+    },
+    "limit": {
+     "default": 50,
+     "type": "integer",
+     "description": "Max items to return. Default 50."
+    }
+   },
+   "type": "object"
+  }
+ },
+ "list_mail_folders": {
+  "description": "List the user's Outlook mail folders including subfolders.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {},
+   "type": "object"
+  }
+ },
+ "list_meeting_transcripts": {
+  "description": "List transcript artifacts for one find_meetings (or resolve_meeting_link) candidate.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "meeting_ref": {
+     "maxLength": 16000,
+     "minLength": 1,
+     "type": "string"
+    },
+    "page_token": {
+     "default": "",
+     "maxLength": 16000,
+     "type": "string"
+    }
+   },
+   "required": [
+    "meeting_ref"
+   ],
+   "type": "object"
+  }
+ },
+ "list_recent_files": {
+  "description": "List the signed-in user's own recently modified OneDrive files. Requires Files.Read.All. No search term needed.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "limit": {
+     "default": 25,
+     "type": "integer",
+     "description": "Max items to return. Default 25."
+    },
+    "modified_after": {
+     "default": "",
+     "type": "string",
+     "description": "Only files modified on/after this date (your mailbox time zone if no offset)."
+    },
+    "modified_before": {
+     "default": "",
+     "type": "string",
+     "description": "Only files modified on/before this date (your mailbox time zone if no offset)."
+    },
+    "include_media": {
+     "default": false,
+     "type": "boolean",
+     "description": "False (default): exclude video/audio/.loop. True: include them."
+    }
+   },
+   "type": "object"
+  }
+ },
+ "list_shared_files": {
+  "description": "List files shared with the signed-in user from someone else's OneDrive. Requires Files.Read.All.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "limit": {
+     "default": 25,
+     "type": "integer",
+     "description": "Max items to return. Default 25."
+    },
+    "include_media": {
+     "default": false,
+     "type": "boolean",
+     "description": "False (default): exclude video/audio/.loop. True: include them."
+    }
+   },
+   "type": "object"
+  }
+ },
+ "list_teams_channels": {
+  "description": "List Teams the signed-in user has joined, with their channels.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "team_name": {
+     "default": "",
+     "type": "string",
+     "description": "Optional filter — only return teams whose name contains this string (case-insensitive). When provided, only matching teams and their channels are returned, keeping the response small. Leave empty to…"
+    },
+    "include_channels": {
+     "default": true,
+     "type": "boolean",
+     "description": "When ``False``, skip the per-team channel requests and return only team names and IDs. Useful for \"what teams am I in?\" queries where channel details are not needed — avoids N extra API calls.…"
+    }
+   },
+   "type": "object"
+  }
+ },
+ "mark_email_read": {
+  "description": "Mark an email message as read.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "message_id": {
+     "description": "The Graph message id from the ``id`` field of ``get_emails``.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "message_id"
+   ],
+   "type": "object"
+  }
+ },
+ "my_profile": {
+  "description": "Return the signed-in user's display name, email address, and time zone.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {},
+   "type": "object"
+  }
+ },
+ "my_recent_contacts": {
+  "description": "Return people the signed-in user has recently emailed or chatted with.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "limit": {
+     "default": 20,
+     "description": "Maximum number of contacts to return per source (default 20).\nThe merged result may contain up to ``limit * 3`` entries before\ndeduplication, typically resolving to 20-40 unique people.",
+     "type": "integer"
+    }
+   },
+   "type": "object"
+  }
+ },
+ "read_active_chats": {
+  "description": "Return all messages from all chats active in a time window.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "max_chats": {
+     "default": 30,
+     "description": "Maximum number of active chats to fetch messages from (default 30).\nChats are ordered by most-recently-active first — the most relevant\nones are always included.",
+     "type": "integer"
+    },
+    "period": {
+     "default": "7d",
+     "description": "How far back to look.  Accepts:\n- ``\"1d\"``   — today\n- ``\"7d\"``   — last 7 days  (default)\n- ``\"14d\"``  — last 14 days\n- ``\"30d\"``  — last 30 days\n- ``\"YYYY-MM-DD\"`` — exact start date",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  }
+ },
+ "read_channel_messages": {
+  "description": "Read messages from a Teams channel — accepts names OR IDs.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "team_id": {
+     "default": "",
+     "type": "string",
+     "description": "The ID of the team. Use ``list_teams_channels`` to find it."
+    },
+    "channel_id": {
+     "default": "",
+     "type": "string",
+     "description": "The ID of the channel within that team."
+    },
+    "team_name": {
+     "default": "",
+     "type": "string"
+    },
+    "channel_name": {
+     "default": "",
+     "type": "string"
+    },
+    "period": {
+     "default": "1d",
+     "type": "string",
+     "description": "How far back to fetch messages. Any ``Nd`` suffix is accepted (e.g. ``\"5d\"``, ``\"21d\"``), as well as ``\"YYYY-MM-DD\"`` for a specific start date, or ``\"\"`` for the most recent ``count`` messages…"
+    },
+    "count": {
+     "default": 50,
+     "type": "integer",
+     "description": "When ``period`` is empty, return at most this many recent messages (default 50). Ignored when a period or date is supplied."
+    },
+    "include_replies": {
+     "default": false,
+     "type": "boolean",
+     "description": "When ``True``, fetch and include threaded replies for every top-level message that has any (gated on ``replyCount > 0``, so no wasted calls for messages with no replies). Default ``False`` — only…"
+    },
+    "unanswered_only": {
+     "default": false,
+     "type": "boolean",
+     "description": "When ``True``, return only top-level messages that have received **zero replies** — useful for spotting open issues or questions that nobody has responded to yet. Uses the ``replyCount`` field…"
+    }
+   },
+   "type": "object"
+  }
+ },
+ "read_chat_messages": {
+  "description": "Read messages from a chat — recent messages or all messages on a specific date.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "chat_id": {
+     "description": "The chat ID from list_chats or find_chat.",
+     "type": "string"
+    },
+    "count": {
+     "default": 20,
+     "description": "Number of recent messages to return when no date is given (default 20, max 50).",
+     "type": "integer"
+    },
+    "date": {
+     "default": "",
+     "description": "Date in YYYY-MM-DD format, e.g. \"2026-05-12\". When provided, returns all\nmessages from that date and ``count`` is ignored.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "chat_id"
+   ],
+   "type": "object"
+  }
+ },
+ "read_email": {
+  "description": "Read a single email's full body OR a full conversation thread.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "conversation_id": {
+     "default": "",
+     "type": "string"
+    },
+    "max_results": {
+     "default": 20,
+     "type": "integer"
+    },
+    "message_id": {
+     "default": "",
+     "type": "string"
+    },
+    "subject": {
+     "default": "",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  }
+ },
+ "read_transcript": {
+  "description": "Read timestamped, sanitized transcript evidence (not meeting chat).",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "max_segments": {
+     "default": 200,
+     "maximum": 200,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "page_token": {
+     "default": "",
+     "maxLength": 16000,
+     "type": "string"
+    },
+    "speaker": {
+     "default": "",
+     "maxLength": 200,
+     "type": "string"
+    },
+    "transcript_ref": {
+     "maxLength": 16000,
+     "minLength": 1,
+     "type": "string"
+    }
+   },
+   "required": [
+    "transcript_ref"
+   ],
+   "type": "object"
+  }
+ },
+ "resolve_meeting_link": {
+  "description": "Resolve one meeting directly from a Teams meeting link the user pasted.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "meeting_url": {
+     "maxLength": 4000,
+     "minLength": 1,
+     "type": "string"
+    }
+   },
+   "required": [
+    "meeting_url"
+   ],
+   "type": "object"
+  }
+ },
+ "search_files": {
+  "description": "Keyword search across OneDrive (own + shared-with-user). Requires Files.Read.All. query is required — use list_recent_files for a keyword-free listing.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "query": {
+     "type": "string",
+     "description": "Required search term (not a bare wildcard)."
+    },
+    "limit": {
+     "default": 25,
+     "type": "integer",
+     "description": "Target items to return. Default 25. May be exceeded (see above)."
+    },
+    "sort": {
+     "default": "",
+     "type": "string",
+     "description": "\"\" (relevance, default), \"modified_desc\", \"modified_asc\", \"name_asc\", \"name_desc\"."
+    },
+    "include_shared": {
+     "default": true,
+     "type": "boolean",
+     "description": "No effect; kept for compatibility."
+    },
+    "modified_after": {
+     "default": "",
+     "type": "string",
+     "description": "Only files modified on/after this date (your mailbox time zone if no offset)."
+    },
+    "modified_before": {
+     "default": "",
+     "type": "string",
+     "description": "Only files modified on/before this date (your mailbox time zone if no offset)."
+    },
+    "include_media": {
+     "default": false,
+     "type": "boolean",
+     "description": "False (default): exclude video/audio/.loop. True: include them."
+    }
+   },
+   "required": [
+    "query"
+   ],
+   "type": "object"
+  }
+ },
+ "search_messages": {
+  "description": "Search for messages by keyword, sender, or @mentions across chats and channels.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "date": {
+     "default": "",
+     "description": "YYYY-MM-DD. Scopes search to a specific day.",
+     "type": "string"
+    },
+    "end_date": {
+     "default": "",
+     "description": "YYYY-MM-DD inclusive. Mentions date range only.",
+     "type": "string"
+    },
+    "from_person": {
+     "default": "",
+     "description": "Person name or email prefix — find messages sent BY this person.\nAccepts: ``\"smith\"``, ``\"Smith, John\"``, ``\"jsmith@empresa.com\"``.\nResolved to a full display name before searching.",
+     "type": "string"
+    },
+    "max_chats": {
+     "default": 25,
+     "description": "Max chats to scan (default 25).",
+     "type": "integer"
+    },
+    "mentions_only": {
+     "default": false,
+     "description": "When True, find @mentions instead of keyword search.",
+     "type": "boolean"
+    },
+    "query": {
+     "default": "",
+     "description": "Keyword or phrase to search for in message bodies.\nRequired unless ``from_person`` or ``mentions_only`` is given.",
+     "type": "string"
+    },
+    "search_channels": {
+     "default": false,
+     "description": "Also search Teams channel messages (slower).",
+     "type": "boolean"
+    }
+   },
+   "type": "object"
+  }
+ },
+ "search_transcript": {
+  "description": "Literal case-insensitive search inside ONE identified transcript.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "limit": {
+     "default": 20,
+     "maximum": 50,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "query": {
+     "maxLength": 200,
+     "minLength": 1,
+     "type": "string"
+    },
+    "transcript_ref": {
+     "maxLength": 16000,
+     "minLength": 1,
+     "type": "string"
+    }
+   },
+   "required": [
+    "transcript_ref",
+    "query"
+   ],
+   "type": "object"
+  }
+ },
+ "search_transcripts": {
+  "description": "Bounded literal search across your OWN calendar meetings' transcripts.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "attendee": {
+     "default": "",
+     "maxLength": 320,
+     "type": "string"
+    },
+    "end_date": {
+     "type": "string"
+    },
+    "limit": {
+     "default": 20,
+     "maximum": 20,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "organizer": {
+     "default": "",
+     "maxLength": 320,
+     "type": "string"
+    },
+    "page_token": {
+     "default": "",
+     "maxLength": 16000,
+     "type": "string"
+    },
+    "query": {
+     "maxLength": 200,
+     "minLength": 1,
+     "type": "string"
+    },
+    "start_date": {
+     "type": "string"
+    },
+    "subject": {
+     "default": "",
+     "maxLength": 200,
+     "type": "string"
+    }
+   },
+   "required": [
+    "query",
+    "start_date",
+    "end_date"
+   ],
+   "type": "object"
+  }
+ },
+ "send_drafted_message": {
+  "description": "Send a message that was previously drafted with ``draft_message``.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "draft_token": {
+     "description": "The opaque token returned by ``draft_message``.  Pass unchanged.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "draft_token"
+   ],
+   "type": "object"
+  }
+ },
+ "send_email_to_self": {
+  "description": "Send a draft email addressed to yourself, after user confirmation.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "draft_token": {
+     "description": "The opaque token from ``create_draft_email``. Pass it unchanged.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "draft_token"
+   ],
+   "type": "object"
+  }
+ },
+ "trust_senders": {
+  "description": "Add extra trusted email domains or addresses for this session.",
+  "parameters": {
+   "additionalProperties": false,
+   "properties": {
+    "domains": {
+     "default": "",
+     "type": "string",
+     "description": "Comma-separated domain names to trust, e.g. ``\"github.com, atlassian.com\"``. The ``@`` is optional."
+    },
+    "addresses": {
+     "default": "",
+     "type": "string",
+     "description": "Comma-separated exact email addresses to trust, e.g. ``\"noreply@github.com, alerts@pagerduty.com\"``."
+    }
+   },
+   "type": "object"
+  }
+ }
+}

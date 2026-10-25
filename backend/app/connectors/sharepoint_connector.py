@@ -134,16 +134,27 @@ class SharePointConnector:
             return False
 
     def list_lists(self) -> list[str]:
+        # Mismo bug de fondo que `fetch_list_items` (ver comentario largo ahi):
+        # un sitio con mas listas que una sola pagina de Graph quedaba
+        # truncado porque no se seguia `@odata.nextLink`. Se pagina completo
+        # por las mismas razones (consistencia de criterio en todo el
+        # conector), aunque en la practica un sitio rara vez supera el
+        # tamanio de pagina default en cantidad de LISTAS (si en items).
         site_id = self._resolve_site_id()
         endpoint = f"{GRAPH_BASE_URL}/sites/{site_id}/lists"
-        resp = requests.get(
-            endpoint, headers=self._headers(), timeout=15, proxies=self._proxies()
-        )
-        if resp.status_code != 200:
-            raise SharePointConnectionError(
-                f"Error listando listas ({resp.status_code}): {resp.text[:300]}"
+        nombres: list[str] = []
+        while endpoint:
+            resp = requests.get(
+                endpoint, headers=self._headers(), timeout=15, proxies=self._proxies()
             )
-        return [lst.get("displayName", "") for lst in resp.json().get("value", [])]
+            if resp.status_code != 200:
+                raise SharePointConnectionError(
+                    f"Error listando listas ({resp.status_code}): {resp.text[:300]}"
+                )
+            data = resp.json()
+            nombres.extend(lst.get("displayName", "") for lst in data.get("value", []))
+            endpoint = data.get("@odata.nextLink")
+        return nombres
 
     # -- Bibliotecas de documentos (drives) y navegacion de carpetas -------
     # Usado por el explorador de "Configuracion > Sitio SharePoint" del
@@ -218,19 +229,54 @@ class SharePointConnector:
         return f"{clean}/{data.get('name', '')}".strip("/")
 
     def fetch_list_items(
-        self, list_display_name: str | None = None, top: int = 200
+        self,
+        list_display_name: str | None = None,
+        page_size: int = 200,
+        max_items: int | None = None,
     ) -> pd.DataFrame:
+        """Lee los items de una lista de SharePoint, recorriendo TODAS las
+        paginas via `@odata.nextLink` hasta agotar la lista real.
+
+        Bug real (2026-10-01, reportado por Jorge Gamez: el tracker ZCC
+        mostraba items 249-354 en la UI de SharePoint pero Vision solo veia
+        hasta el id 213, siempre el MISMO bloque viejo en cada consulta):
+        antes, el parametro `top` se usaba a la vez como (a) tamanio de
+        pagina para el `$top` de la URL de Graph y (b) tope TOTAL de filas
+        via `if len(registros) >= top: break` -- con el default `top=200` y
+        sin que `dbquery.py` pasara nada distinto, toda lista con mas de 200
+        items quedaba cortada SIEMPRE en las primeras 200 (ordenadas por id
+        ascendente, las mas viejas), sin importar cuantas paginas mas hubiera
+        disponibles via `@odata.nextLink`.
+
+        Fix: separar los dos conceptos.
+        - `page_size` (antes `top`): SOLO controla cuantos items trae Graph
+          por request HTTP (eficiencia de red/memoria por pagina). No limita
+          el total.
+        - `max_items` (nuevo, opcional): tope TOTAL real, si el que llama
+          quiere explicitamente acotar el resultado (ej. "dame los primeros
+          50"). Por defecto `None` = sin tope, se recorren TODAS las paginas
+          hasta que Graph deje de devolver `@odata.nextLink`.
+        """
         list_name = list_display_name or self._settings.sharepoint_default_list_name
         if not list_name:
             raise ValueError(
                 "Debes indicar list_display_name o configurar SHAREPOINT_DEFAULT_LIST_NAME"
             )
 
+        # Resuelve el sitio y la lista una sola vez (cacheados a nivel de
+        # instancia/modulo, ver _resolve_site_id/_get_list_id mas arriba).
         site_id = self._resolve_site_id()
         list_id = self._get_list_id(list_name)
-        endpoint = f"{GRAPH_BASE_URL}/sites/{site_id}/lists/{list_id}/items?expand=fields&$top={top}"
+        # `$top` aca es SOLO el tamanio de cada pagina HTTP, no un limite total.
+        endpoint = (
+            f"{GRAPH_BASE_URL}/sites/{site_id}/lists/{list_id}/items"
+            f"?expand=fields&$top={page_size}"
+        )
 
-        registros = []
+        registros: list[dict] = []
+        # Recorre paginas hasta que Graph no devuelva mas `@odata.nextLink`
+        # (fin real de la lista) o se alcance `max_items` si el que llama
+        # pidio explicitamente un tope.
         while endpoint:
             resp = requests.get(
                 endpoint, headers=self._headers(), timeout=30, proxies=self._proxies()
@@ -242,8 +288,11 @@ class SharePointConnector:
             data = resp.json()
             for item in data.get("value", []):
                 registros.append(item.get("fields", {}))
+            # `@odata.nextLink` es la URL completa (con el skip-token) de la
+            # proxima pagina; viene `None`/ausente cuando ya no hay mas filas.
             endpoint = data.get("@odata.nextLink")
-            if len(registros) >= top:
+            if max_items is not None and len(registros) >= max_items:
+                registros = registros[:max_items]
                 break
 
         return pd.DataFrame(registros)

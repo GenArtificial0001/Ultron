@@ -192,7 +192,8 @@ def test_provider_failure_leaves_the_default_model_and_a_plain_warning(api, llm,
     monkeypatch.setattr(llm_providers, "OpenAI", _fake_openai(exc=RuntimeError("sin red")))
     data = api.get("/api/models").json()
     assert [m["id"] for m in data["models"]] == ["anthropic/claude-sonnet-5"]
-    assert data["warning"] == "No se pudo consultar la lista de modelos de: Claude."
+    # El aviso nombra al proveedor y suma una frase con que hacer (spec proxy-autoheal REQ-006, traida de la version de origen).
+    assert data["warning"].startswith("No se pudo consultar la lista de modelos de: Claude.") and "sin red" not in data["warning"]
     assert main._MODELS_CACHE["data"] is None  # se reintenta en la proxima apertura
 
 
@@ -231,6 +232,8 @@ def test_company_name_reaches_the_status_and_the_prompt(monkeypatch):
     from app.llm import loop as loop_module
 
     settings = config.get_settings()
+    # Otro test pudo recrear la configuracion (`get_settings.cache_clear`): `main` usa la suya, se la alinea con la de aca.
+    monkeypatch.setattr(main, "settings", settings)
     monkeypatch.setattr(settings, "vision_company_name", "Acme Logistica")
     assert TestClient(main.app).get("/api/status").json()["company_name"] == "Acme Logistica"
     monkeypatch.setattr(loop_module, "list_available_skills_xml", lambda session_id: "")

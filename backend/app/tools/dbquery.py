@@ -55,6 +55,7 @@ from app.connectors import (
 )
 from app.connectors.graph_connector import GraphConnectionError, GraphForbiddenError
 from app.tools.base import Tool
+from app import connections, switches
 
 MAX_ROWS_TO_MODEL = 50
 
@@ -71,6 +72,45 @@ MAX_ROWS_TO_MODEL = 50
 # seteado, sino el default de Settings", en un solo lugar para no repetir
 # la logica en cada guardrail.
 # ---------------------------------------------------------------------------
+# spec conexiones-con-nombre REQ-003: las tools de Oracle/SharePoint/SAP/Graph aceptan `connection` (nombre de la conexion). Sin `connection`, o sin
+# archivo de conexiones, se usa el `get_settings()` de siempre (el `.env` de hoy): la compatibilidad (REQ-001) es el caso por defecto.
+_CONNECTION_PARAM = {
+    "type": "string",
+    "description": (
+        "Nombre de la conexion a usar (ver 'Conexiones disponibles' del sistema). "
+        "Si se omite, se usa la conexion predeterminada de este tipo."
+    ),
+}
+
+
+def _connection_settings(type_id: str, args: dict) -> tuple[Any, str | None]:
+    """Devuelve (settings, error). `error` es un texto para el modelo cuando el nombre pedido no existe (lista los validos)."""
+    settings, _conn, error = _connection_context(type_id, args)
+    return settings, error
+
+
+def _connection_context(type_id: str, args: dict) -> tuple[Any, Any, str | None]:
+    """(settings, conexion, error). La conexion sirve para enmascarar sus valores en un mensaje de error (`_safe_error`); es None si viene del `.env` de hoy."""
+    name = str(args.get("connection") or "").strip() or None
+    base = get_settings()
+    try:
+        conn = switches.resolve_enabled(type_id, name)
+    except switches.DisabledConnectionError as exc:
+        return None, None, f"Error: {exc}"
+    except connections.ConnectionLookupError as exc:
+        return (base, None, None) if name is None else (None, None, f"Error: {exc}")
+    if not conn.from_file:
+        return base, None, None  # la conexion viene del .env de hoy: exactamente el comportamiento de antes
+    return connections.settings_for(conn), conn, None
+
+
+def _safe_error(conn: Any, exc: BaseException) -> str:
+    """Texto de una excepcion para devolverselo al MODELO. Las tools devuelven el error crudo al LLM (y de ahi al historial y al proveedor de IA): con conexiones que
+    llevan la contrasena dentro del bloque, un driver que falla con el DSN en el mensaje la filtraria. Se enmascaran los valores de la conexion (REQ-004)."""
+    text = str(exc)
+    return connections.redact(conn, text) if conn is not None else text
+
+
 def _effective_bq_cost_threshold(settings: Any) -> int:
     from app.project_context import get_project_config  # import diferido: evita ciclo
 
@@ -214,29 +254,31 @@ def _hash_query(query: str) -> str:
     return hashlib.sha256(query.encode("utf-8", errors="replace")).hexdigest()
 
 
-def _bigquery_risk_check(query: str, session: Any) -> str | None:
-    """REQ-003: si detecta un verbo/patron riesgoso y esta consulta EXACTA
-    todavia no fue mostrada al usuario en esta sesion, devuelve el mensaje
-    de bloqueo (sin ejecutar nada) y registra el hash como visto. Si el
-    hash YA estaba registrado (el agente ya mostro la alarma antes y esta
-    reintentando tras la respuesta del usuario), devuelve None -- se deja
-    continuar hacia REQ-002/ejecucion real ("bloquea una vez, permite el
-    reintento", decision explicita del usuario)."""
+def _risk_check(query: str, session: Any, seen_attr: str) -> tuple[str, str] | None:
+    """Nucleo compartido de la guarda de riesgo (BigQuery y Oracle). Devuelve (patron, statement) si hay que BLOQUEAR esta vez,
+    o None si la consulta es segura o ya fue mostrada al usuario (el reintento tras su confirmacion). Registra el hash de la
+    consulta en `session.<seen_attr>` al bloquear. Sin sesion no hay donde recordar la aprobacion: siempre bloquea."""
     detected = _detect_risky_statement(query)
     if detected is None:
         return None
-    pattern, statement = detected
-
-    risky_seen = (
-        getattr(session, "bq_risky_seen", None) if session is not None else None
-    )
+    seen = getattr(session, seen_attr, None) if session is not None else None
     query_hash = _hash_query(query)
-    if risky_seen is not None and query_hash in risky_seen:
+    if seen is not None and query_hash in seen:
         return None  # ya aprobado por el usuario en un intento anterior
+    if seen is not None:
+        seen.add(query_hash)
+    return detected
 
-    if risky_seen is not None:
-        risky_seen.add(query_hash)
 
+def _bigquery_risk_check(query: str, session: Any) -> str | None:
+    """REQ-003: si detecta un verbo/patron riesgoso y esta consulta EXACTA todavia no fue mostrada al usuario en esta sesion,
+    devuelve el mensaje de bloqueo (sin ejecutar nada) y registra el hash como visto. Si el hash YA estaba registrado (el agente
+    ya mostro la alarma antes y esta reintentando tras la respuesta del usuario), devuelve None -- se deja continuar hacia
+    REQ-002/ejecucion real ("bloquea una vez, permite el reintento", decision explicita del usuario)."""
+    blocked = _risk_check(query, session, "bq_risky_seen")
+    if blocked is None:
+        return None
+    pattern, statement = blocked
     return (
         f"[GUARDRAIL DE RIESGO - BigQuery] Se detecto el patron '{pattern}' en la consulta, "
         "que puede modificar o eliminar datos/tablas de forma irreversible. La consulta NO "
@@ -244,6 +286,29 @@ def _bigquery_risk_check(query: str, session: Any) -> str | None:
         f"Statement detectado:\n{statement}\n\n"
         f"Motivo: '{pattern}' esta en la lista de operaciones de riesgo que Vision bloquea "
         "estructuralmente antes de tocar BigQuery (DROP, DELETE, TRUNCATE, UPDATE, MERGE, "
+        "CREATE TABLE, CREATE OR REPLACE TABLE).\n\n"
+        "Debes usar la tool `question` para pedirle confirmacion explicita al usuario, "
+        'agregando el sufijo "(Riesgo)" a la opcion que autoriza continuar (esto dispara la '
+        "alarma y el banner rojo). Si el usuario confirma, volve a intentar EXACTAMENTE la "
+        "misma consulta -- recien ahi se ejecutara de verdad."
+    )
+
+
+def _oracle_risk_check(query: str, session: Any) -> str | None:
+    """PQ-005 / BL-023: la misma guarda de riesgo que BigQuery, para Oracle (misma lista de verbos, mismo flujo: bloquea UNA vez,
+    pide confirmacion con `question` y deja pasar el reintento de la MISMA consulta). Las aprobaciones de Oracle y de BigQuery son
+    independientes (`oracle_risky_seen` vs `bq_risky_seen`). Importa mas en Oracle: un DDL (DROP/TRUNCATE) confirma solo."""
+    blocked = _risk_check(query, session, "oracle_risky_seen")
+    if blocked is None:
+        return None
+    pattern, statement = blocked
+    return (
+        f"[GUARDRAIL DE RIESGO - Oracle] Se detecto el patron '{pattern}' en la consulta, "
+        "que puede modificar o eliminar datos/tablas de forma irreversible. La consulta NO "
+        "se ejecuto.\n\n"
+        f"Statement detectado:\n{statement}\n\n"
+        f"Motivo: '{pattern}' esta en la lista de operaciones de riesgo que Vision bloquea "
+        "estructuralmente antes de tocar Oracle (DROP, DELETE, TRUNCATE, UPDATE, MERGE, "
         "CREATE TABLE, CREATE OR REPLACE TABLE).\n\n"
         "Debes usar la tool `question` para pedirle confirmacion explicita al usuario, "
         'agregando el sufijo "(Riesgo)" a la opcion que autoriza continuar (esto dispara la '
@@ -436,29 +501,39 @@ def _df_to_text(
 # oracle_query
 # --------------------------------------------------------------------------
 def _oracle_query_execute(args: dict, session: Any = None) -> str:
-    settings = get_settings()
+    settings, conn, conn_error = _connection_context("oracle", args)
+    if conn_error:
+        return conn_error
     if not settings.enable_oracle:
         return "Error: el conector Oracle esta deshabilitado (ENABLE_ORACLE=false)."
     query = args.get("query", "")
     if not query:
         return "Error: falta el argumento 'query' (SQL SELECT)."
+    risk_block = _oracle_risk_check(query, session)  # PQ-005: antes de abrir ninguna conexion
+    if risk_block is not None:
+        return risk_block
     try:
         df = OracleConnector(settings).fetch_query(_cap_oracle_query(query))
         return _df_to_text(df, session, source="oracle", query=query)
     except Exception as exc:
-        return f"Error consultando Oracle: {exc}"
+        return f"Error consultando Oracle: {_safe_error(conn, exc)}"
 
 
 oracle_query_tool = Tool(
     name="oracle_query",
-    description="Ejecuta una consulta SQL (SELECT) contra la base de datos Oracle (Datamart) de la empresa y devuelve los resultados en CSV.",
+    description=(
+        "Ejecuta una consulta SQL (SELECT) contra la base de datos Oracle (Datamart) de la empresa y devuelve los resultados en CSV. "
+        "Si la consulta modifica datos o tablas (DROP, DELETE, TRUNCATE, UPDATE, MERGE, CREATE TABLE) la herramienta NO la ejecuta "
+        "y te pide confirmar con el usuario antes con la tool `question`."
+    ),
     parameters={
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
                 "description": "SQL SELECT, ej. SELECT * FROM MMDBDP7.CPNT023_PART WHERE ROWNUM <= 10",
-            }
+            },
+            "connection": _CONNECTION_PARAM,
         },
         "required": ["query"],
     },
@@ -469,10 +544,27 @@ oracle_query_tool = Tool(
 # --------------------------------------------------------------------------
 # bigquery_query
 # --------------------------------------------------------------------------
+def _bigquery_switch_error() -> str | None:
+    """spec interruptores-conexiones-skills REQ-003 (barrera 2): aviso si BigQuery esta configurada y el usuario la APAGO; None si se puede usar.
+
+    BigQuery no pasa por `_connection_context` (no tiene conexiones con nombre), asi que sus tools no miraban el interruptor y solo las frenaba `dispatch`. Sin configurar
+    no se frena aunque haya quedado una clave apagada vieja: la pantalla ya no la muestra y el usuario no podria prenderla (mismo criterio que `tool_is_available`)."""
+    if switches.BIGQUERY_KEY not in switches.all_connection_keys():
+        return None
+    try:
+        switches.assert_connection_enabled("bigquery", "bigquery")
+    except switches.DisabledConnectionError as exc:
+        return f"Error: {exc}"
+    return None
+
+
 def _bigquery_query_execute(args: dict, session: Any = None) -> str:
     settings = get_settings()
     if not settings.enable_bigquery:
         return "Error: el conector BigQuery esta deshabilitado (ENABLE_BIGQUERY=false)."
+    switch_error = _bigquery_switch_error()
+    if switch_error:
+        return switch_error
     query = args.get("query", "")
     if not query:
         return "Error: falta el argumento 'query' (SQL de BigQuery)."
@@ -536,6 +628,9 @@ bigquery_query_tool = Tool(
 
 def _bigquery_list_tables_execute(args: dict, session: Any = None) -> str:
     settings = get_settings()
+    switch_error = _bigquery_switch_error()
+    if switch_error:
+        return switch_error
     dataset_id = args.get("dataset_id") or None
     try:
         bq = BigQueryConnector(settings)
@@ -575,29 +670,70 @@ bigquery_list_tables_tool = Tool(
 # --------------------------------------------------------------------------
 # sharepoint_list_items
 # --------------------------------------------------------------------------
+def _parse_max_items(raw: Any) -> int | None:
+    """Tope de filas que pidio el modelo, o None (= la lista completa).
+
+    El modelo a veces manda "50" (texto) o 50.0 en vez de 50: se acepta. Un valor sin sentido (0, negativo, texto
+    que no es numero, booleano, lista) se IGNORA y se trae la lista entera. Antes un "50" daba un error de tipos
+    dentro del conector, un 0 devolvia una tabla vacia en silencio y un negativo recortaba mal las filas: en los tres
+    casos el usuario se quedaba sin datos sin saber por que."""
+    if raw is None:
+        return None
+    try:
+        # `str()` primero: `True`/`False` no son numeros validos como texto ("True"), asi que caen en el except
+        # y devuelven None (si se hiciera `float(True)` valdria 1.0 y un tope booleano recortaria la lista a 1 fila).
+        value = int(float(str(raw).strip()))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value if value > 0 else None
+
+
 def _sharepoint_list_items_execute(args: dict, session: Any = None) -> str:
-    settings = get_settings()
+    settings, conn, conn_error = _connection_context("sharepoint", args)
+    if conn_error:
+        return conn_error
     if not settings.enable_sharepoint:
         return "Error: el conector SharePoint esta deshabilitado (ENABLE_SHAREPOINT=false)."
     list_name = args.get("list_name") or None
+    # Bug real (2026-10-01): antes no existia forma de pedir MAS de 200 filas
+    # -- `fetch_list_items` ahora pagina SIEMPRE la lista completa via
+    # `@odata.nextLink` salvo que el modelo pida explicitamente un tope con
+    # `max_items` (ej. "dame solo los primeros 50"). Sin este argumento, se
+    # trae la lista entera (ver app/connectors/sharepoint_connector.py).
+    max_items = _parse_max_items(args.get("max_items"))
     try:
         sp = SharePointConnector(settings)
-        df = sp.fetch_list_items(list_name)
+        df = sp.fetch_list_items(list_name, max_items=max_items)
         return _df_to_text(df, session, source="sharepoint")
     except Exception as exc:
-        return f"Error consultando SharePoint: {exc}"
+        return f"Error consultando SharePoint: {_safe_error(conn, exc)}"
 
 
 sharepoint_list_items_tool = Tool(
     name="sharepoint_list_items",
-    description="Lee los items de una lista de SharePoint (por nombre visible) y los devuelve en CSV. Si no se especifica, usa la lista por defecto configurada.",
+    description=(
+        "Lee TODOS los items de una lista de SharePoint (por nombre visible), "
+        "recorriendo todas las paginas de la lista, y los devuelve en CSV "
+        "(con export automatico si supera el umbral configurado). Si no se "
+        "especifica, usa la lista por defecto configurada."
+    ),
     parameters={
         "type": "object",
         "properties": {
             "list_name": {
                 "type": "string",
                 "description": "Nombre visible de la lista de SharePoint",
-            }
+            },
+            "connection": _CONNECTION_PARAM,
+            "max_items": {
+                "type": "integer",
+                "description": (
+                    "Tope opcional de filas totales a traer. Si se omite, se "
+                    "trae la lista COMPLETA (todas las paginas via "
+                    "@odata.nextLink), no solo las primeras 200. Usar solo si "
+                    "el usuario pidio explicitamente un numero acotado."
+                ),
+            },
         },
     },
     execute=_sharepoint_list_items_execute,
@@ -605,19 +741,21 @@ sharepoint_list_items_tool = Tool(
 
 
 def _sharepoint_list_lists_execute(args: dict, session: Any = None) -> str:
-    settings = get_settings()
+    settings, conn, conn_error = _connection_context("sharepoint", args)
+    if conn_error:
+        return conn_error
     try:
         sp = SharePointConnector(settings)
         lists = sp.list_lists()
         return "Listas disponibles: " + ", ".join(lists) if lists else "(sin listas)"
     except Exception as exc:
-        return f"Error listando SharePoint: {exc}"
+        return f"Error listando SharePoint: {_safe_error(conn, exc)}"
 
 
 sharepoint_list_lists_tool = Tool(
     name="sharepoint_list_lists",
     description="Lista los nombres de todas las listas disponibles en el sitio de SharePoint configurado.",
-    parameters={"type": "object", "properties": {}},
+    parameters={"type": "object", "properties": {"connection": _CONNECTION_PARAM}},
     execute=_sharepoint_list_lists_execute,
 )
 
@@ -626,7 +764,9 @@ sharepoint_list_lists_tool = Tool(
 # sap_query
 # --------------------------------------------------------------------------
 def _sap_query_execute(args: dict, session: Any = None) -> str:
-    settings = get_settings()
+    settings, conn, conn_error = _connection_context("sap", args)
+    if conn_error:
+        return conn_error
     if not settings.enable_sap:
         return "Error: el conector SAP esta deshabilitado (ENABLE_SAP=false)."
     service_name = args.get("service_name", "")
@@ -645,7 +785,7 @@ def _sap_query_execute(args: dict, session: Any = None) -> str:
         )
         return _df_to_text(df, session, source="sap")
     except Exception as exc:
-        return f"Error consultando SAP: {exc}"
+        return f"Error consultando SAP: {_safe_error(conn, exc)}"
 
 
 sap_query_tool = Tool(
@@ -657,6 +797,7 @@ sap_query_tool = Tool(
     parameters={
         "type": "object",
         "properties": {
+            "connection": _CONNECTION_PARAM,
             "service_name": {"type": "string"},
             "entity_name": {"type": "string"},
             "entity_params": {
@@ -689,12 +830,17 @@ def _graph_search_execute(args: dict, session: Any = None) -> str:
     size = int(args.get("size", 25))
     if not query:
         return "Error: falta el argumento 'query'."
+    graph_settings, graph_conn, conn_error = _connection_context("graph", {})
+    if conn_error:
+        # spec interruptores-conexiones-skills REQ-003 (barrera 2): con Graph apagada el contexto trae el aviso y `graph_settings` es None; sin esta linea,
+        # `GraphConnector(None)` caia a `get_settings()` y abria la conexion igual. Sin nombre, el unico error posible es el de conexion desactivada.
+        return conn_error
     try:
-        results = GraphConnector(get_settings()).search(query, size=size)
+        results = GraphConnector(graph_settings).search(query, size=size)
     except GraphForbiddenError as exc:
-        return f"[gate 403 - permiso insuficiente] {exc}"
+        return f"[gate 403 - permiso insuficiente] {_safe_error(graph_conn, exc)}"
     except Exception as exc:
-        return f"Error en Graph Search: {exc}"
+        return f"Error en Graph Search: {_safe_error(graph_conn, exc)}"
 
     if not results:
         return "(sin resultados)"
@@ -739,14 +885,17 @@ def _graph_directory_lookup_execute(args: dict, session: Any = None) -> str:
     identifier = args.get("identifier", "")
     if not identifier:
         return "Error: falta el argumento 'identifier' (UPN, correo o id de usuario)."
+    graph_settings, graph_conn, conn_error = _connection_context("graph", {})
+    if conn_error:
+        return conn_error  # REQ-003 (barrera 2), ver `_graph_search_execute`
     try:
-        user = GraphConnector(get_settings()).directory_lookup(identifier)
+        user = GraphConnector(graph_settings).directory_lookup(identifier)
     except GraphForbiddenError as exc:
-        return f"[gate 403 - permiso insuficiente] {exc}"
+        return f"[gate 403 - permiso insuficiente] {_safe_error(graph_conn, exc)}"
     except GraphConnectionError as exc:
-        return f"Error: {exc}"
+        return f"Error: {_safe_error(graph_conn, exc)}"
     except Exception as exc:
-        return f"Error consultando directorio: {exc}"
+        return f"Error consultando directorio: {_safe_error(graph_conn, exc)}"
 
     return (
         f"displayName: {user.get('displayName')}\n"
@@ -784,14 +933,17 @@ def _graph_directory_manager_execute(args: dict, session: Any = None) -> str:
     identifier = args.get("identifier", "")
     if not identifier:
         return "Error: falta el argumento 'identifier' (UPN, correo o id de usuario)."
+    graph_settings, graph_conn, conn_error = _connection_context("graph", {})
+    if conn_error:
+        return conn_error  # REQ-003 (barrera 2), ver `_graph_search_execute`
     try:
-        manager = GraphConnector(get_settings()).directory_manager(identifier)
+        manager = GraphConnector(graph_settings).directory_manager(identifier)
     except GraphForbiddenError as exc:
-        return f"[gate 403 - permiso insuficiente] {exc}"
+        return f"[gate 403 - permiso insuficiente] {_safe_error(graph_conn, exc)}"
     except GraphConnectionError as exc:
-        return f"Error: {exc}"
+        return f"Error: {_safe_error(graph_conn, exc)}"
     except Exception as exc:
-        return f"Error consultando manager: {exc}"
+        return f"Error consultando manager: {_safe_error(graph_conn, exc)}"
 
     return (
         f"manager displayName: {manager.get('displayName')}\n"

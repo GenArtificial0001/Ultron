@@ -1,4 +1,4 @@
-"""Unit de `app/token_estimate.py`: heuristica ~4 chars/token del medidor de
+"""Unit de `app/token_estimate.py`: heuristica ~3 chars/token (spec aviso-contexto-largo) del medidor de
 contexto. Es la base de la decision de compactar (85%), asi que un cambio
 silencioso de formula debe romper un test."""
 
@@ -28,7 +28,7 @@ def test_multimodal_content_counts_only_text_parts():
             ],
         }
     ]
-    assert estimate_tokens(msgs) == 10
+    assert estimate_tokens(msgs) == 40 // CHARS_PER_TOKEN_ESTIMATE
 
 
 def test_tool_calls_count_name_and_arguments():
@@ -39,7 +39,7 @@ def test_tool_calls_count_name_and_arguments():
             "tool_calls": [{"function": {"name": "bash", "arguments": "y" * 36}}],
         }
     ]
-    assert estimate_tokens(msgs) == (4 + 36) // 4
+    assert estimate_tokens(msgs) == (4 + 36) // CHARS_PER_TOKEN_ESTIMATE
 
 
 def test_messages_without_content_or_calls_are_ignored():
@@ -48,4 +48,4 @@ def test_messages_without_content_or_calls_are_ignored():
 
 @pytest.mark.parametrize("n_chars", [3, 4, 7, 8, 1001])
 def test_integer_division_never_rounds_up(n_chars):
-    assert estimate_tokens([{"role": "user", "content": "z" * n_chars}]) == n_chars // 4
+    assert estimate_tokens([{"role": "user", "content": "z" * n_chars}]) == n_chars // CHARS_PER_TOKEN_ESTIMATE

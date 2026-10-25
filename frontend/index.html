@@ -242,17 +242,9 @@
         <span class="footer-label" id="footer-company">Vision</span>
       </div>
 
-      <!-- Cache local (localStorage) de esta conversacion -- sutil, no bloqueante -->
-      <div class="cache-meter">
-        <div class="cache-meter-row">
-          <span class="cache-meter-label">Caché local</span>
-          <span class="cache-meter-pct" id="cache-pct">0%</span>
-        </div>
-        <div class="cache-meter-track">
-          <div class="cache-meter-fill" id="cache-fill"></div>
-        </div>
-        <button id="cache-clear-btn" class="cache-clear-btn" type="button" title="Borra el historial de esta conversacion guardado en el navegador">Liberar caché</button>
-      </div>
+      <!-- REQ-016 (spec fix-detener-y-progreso-visible, D2): aca estaba el medidor «Caché local» con «Liberar caché». Se quito:
+           la conversacion vive en SQLite y el medidor no media lo que decia (sumaba las copias de TODAS las sesiones contra
+           300 000 caracteres y se leia como si fuera el contexto del modelo). El unico medidor es «Contexto», arriba. -->
 
       <!-- REQ-001/002/003 (spec perfil-usuario-y-footer): atribucion de
            autoria -- el avatar circular placeholder se quito (pedido
@@ -292,6 +284,16 @@
       </div>
 
       <!--
+        spec cerebro-cartel-estado (pedido del usuario 2026-10-19: «nadie sabe como apagarlo y es tan sencillo como presionar la tecla escape»): cartel con el MISMO
+        diseno que el banner de persistencia, visible SOLO mientras el Modo Cerebro esta activo. Verde = te escucha, ambar = procesando; nunca rojo. Lo pinta
+        `setBrainState` (app.js) desde el mismo estado que el boton Cerebro: una sola fuente de verdad. Texto fijo del front (no viene del servidor).
+      -->
+      <div class="brain-banner hidden" id="brain-banner" role="status" aria-live="polite" data-state="idle">
+        <span class="brain-banner-icon" aria-hidden="true">●</span>
+        <span id="brain-banner-text"></span>
+      </div>
+
+      <!--
         spec modo-plan-loop REQ-009: banner de "el loop necesita tu ayuda" --
         visible SOLO mientras `loop_paused_for_question` esta activo (ver
         handleEvent 'loop-paused' y activateSession). Rojo/accent (a
@@ -312,6 +314,22 @@
         <span id="alarm-toast-text"></span>
       </div>
 
+      <!-- REQ-016 (spec fix-detener-y-progreso-visible): aviso UNA vez por carga cuando el navegador no deja guardar una
+           preferencia (tema, «Leer en voz alta», auto-envío...). Encima de Configuración, que es donde se cambian; se cierra con
+           «Entendido». El texto lo pone app.js (PREF_NOT_SAVED_TEXT). -->
+      <div class="pref-save-notice hidden" id="pref-save-notice" role="status" aria-live="polite">
+        <span class="pref-save-notice-text" id="pref-save-notice-text"></span>
+        <button type="button" class="pref-save-notice-close" id="pref-save-notice-close">Entendido</button>
+      </div>
+
+      <!-- REQ-007 (spec aviso-proceso-terminado): el navegador tiene bloqueadas las notificaciones (o Windows no pudo mostrar el aviso
+           de que Vision terminó): se dice UNA vez, en lenguaje claro y con cómo habilitarlas. Mismo aspecto que el aviso de arriba; el
+           texto lo pone app.js (NOTIFY_DENIED_TEXT). -->
+      <div class="pref-save-notice hidden" id="notify-denied-notice" role="status" aria-live="polite">
+        <span class="pref-save-notice-text" id="notify-denied-notice-text"></span>
+        <button type="button" class="pref-save-notice-close" id="notify-denied-notice-close">Entendido</button>
+      </div>
+
       <!-- Encabezado de comando: contexto vivo, no decorativo -->
       <header class="command-bar">
         <button id="menu-btn" class="menu-btn" type="button" aria-label="Abrir menu" aria-controls="sidebar" title="Abrir panel lateral">
@@ -327,7 +345,7 @@
           <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82A1.65 1.65 0 0 0 3 13.09H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
         </button>
 
-        <div class="command-status" id="conn-status" data-state="connecting" title="Estado de conexion con el backend">
+        <div class="command-status" id="conn-status" data-state="connecting" aria-live="polite" title="Estado de conexion con el backend">
           <span class="status-dot"></span>
           <span class="status-text" id="conn-status-text">Conectando…</span>
         </div>
@@ -353,6 +371,12 @@
         </button>
 
         <div class="command-meta">
+          <!-- spec aviso-contexto-largo REQ-008: uso estimado del contexto, siempre visible (antes solo dentro del acordeon «Contexto»).
+               Es un dato, no un boton: `data-state` = ok | warn | high | critical | unknown. -->
+          <div class="meta-chip context-chip" id="context-chip" data-state="unknown" title="Contexto: sin datos todavía">
+            <span class="meta-key">CONTEXTO</span>
+            <span class="meta-val" id="context-chip-val">—</span>
+          </div>
           <div class="model-picker">
             <button type="button" class="meta-chip meta-chip-btn" id="meta-model" aria-haspopup="listbox" aria-expanded="false" title="Modelo activo (click para cambiar)">
               <span class="meta-key">MODELO</span>
@@ -384,7 +408,7 @@
           mismo patron ya usado en el resto del proyecto para estado
           visual, ver `data-recording` de #voice-record-btn).
         -->
-        <button id="brain-btn" class="icon-btn" type="button" title="Modo Cerebro (conversación por voz continua)" data-state="idle">
+        <button id="brain-btn" class="icon-btn" type="button" title="Modo Cerebro (conversación por voz continua). También se enciende con la barra Espacio." data-state="idle">
           <svg class="ic-brain" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
             <path d="M9 4.5a3 3 0 0 0-3 3v.2A3 3 0 0 0 4.5 10.5v.3a3 3 0 0 0-1 5.4 3 3 0 0 0 2.8 3.8H9a2 2 0 0 0 2-2V6.5a2 2 0 0 0-2-2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
             <path d="M15 4.5a3 3 0 0 1 3 3v.2a3 3 0 0 1 1.5 2.8v.3a3 3 0 0 1 1 5.4 3 3 0 0 1-2.8 3.8H15a2 2 0 0 1-2-2V6.5a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -416,9 +440,9 @@
         que cae en la sesion actual (ver activateSearchInOpenSession).
       -->
       <div class="search-nav-bar hidden" id="search-nav-bar">
-        <span id="search-nav-count">0 de 0</span>
-        <button type="button" class="search-nav-btn" id="search-nav-prev" title="Coincidencia anterior">↑</button>
-        <button type="button" class="search-nav-btn" id="search-nav-next" title="Coincidencia siguiente">↓</button>
+        <span id="search-nav-count" aria-live="polite">0/0</span>
+        <button type="button" class="search-nav-btn" id="search-nav-prev" title="Coincidencia anterior (Mayús+Enter)" aria-label="Coincidencia anterior">↑</button>
+        <button type="button" class="search-nav-btn" id="search-nav-next" title="Coincidencia siguiente (Enter)" aria-label="Coincidencia siguiente">↓</button>
         <button type="button" class="search-nav-btn search-nav-close" id="search-nav-close" title="Cerrar búsqueda">✕</button>
       </div>
 
@@ -460,6 +484,19 @@
       -->
       <div id="pending-images-row" class="pending-images-row hidden"></div>
 
+      <!--
+        REQ-004/008 (spec adjuntar-archivos-chat): chips de ARCHIVOS pendientes de enviar
+        (uno por archivo, con estado subiendo/listo/error y peso/tokens), arriba del
+        compositor. Separada de la fila de miniaturas de imagen: son cosas distintas
+        (una viaja en base64 por el body, la otra ya esta en disco).
+      -->
+      <div id="pending-files-row" class="pending-files-row hidden" aria-live="polite"></div>
+
+      <!-- REQ-001 f: "Se suelta aca" -- cartel de la zona de soltar (todo `.chat-main`). -->
+      <div id="attach-drop-overlay" class="attach-drop-overlay hidden" aria-hidden="true">
+        <div class="attach-drop-overlay-card">Soltá los archivos acá para adjuntarlos</div>
+      </div>
+
       <form id="chat-form" class="chat-form">
         <!--
           spec modo-plan-loop REQ-005: chip de modo actual (Plan/Activo) --
@@ -499,8 +536,11 @@
         <!-- REQ-001: selector de archivos nativo, oculto -- disparado por
              el boton de adjuntar (clip). accept restringe a imagenes de
              entrada, coherente con el alcance de esta spec (no documentos). -->
-        <input type="file" id="image-file-input" accept="image/*" multiple hidden />
-        <button type="button" id="attach-image-btn" class="attach-image-btn" title="Adjuntar imagen">📎</button>
+        <!-- REQ-001 (spec adjuntar-archivos-chat): SIN `accept` -- cualquier archivo. Las
+             imagenes siguen por el flujo de contexto-multimodal (base64); el resto se sube
+             a `attachment/` de la carpeta de la sesion. -->
+        <input type="file" id="image-file-input" multiple hidden />
+        <button type="button" id="attach-image-btn" class="attach-image-btn" title="Adjuntar archivos o imágenes (también podés arrastrarlos o pegarlos)" aria-label="Adjuntar archivos o imágenes">📎</button>
         <!--
           REQ-001/002/003 (spec compositor-expandible): wrapper con
           position:relative para anclar el boton ampliar/reducir en la
@@ -511,7 +551,7 @@
         <div class="chat-input-wrap">
           <textarea
             id="chat-input"
-            placeholder="Escribile a Vision... ('/' para skills, Shift+Enter para nueva linea, Ctrl+V para pegar imagenes)"
+            placeholder="Escribile a Vision... ('/' para skills, Shift+Enter para nueva linea, Ctrl+V para pegar imagenes o archivos)"
             rows="2"
           ></textarea>
           <button type="button" id="composer-expand-btn" class="composer-expand-btn" title="Ampliar compositor">↕</button>
@@ -562,6 +602,8 @@
       <div id="voice-eye-widget" class="voice-eye-widget hidden">
         <div id="voice-eye-drag-handle" class="voice-eye-drag-handle" title="Arrastrar">
           <span class="voice-eye-rec-dot"></span>
+          <!-- spec audio-sistema-modo-reunion REQ-010: de donde escucha ahora (Micrófono / Audio de la PC / los dos) -->
+          <span id="voice-eye-source" class="voice-eye-source" aria-live="polite"></span>
         </div>
         <div id="voice-eye-container" class="voice-eye-container"></div>
       </div>
@@ -585,7 +627,7 @@
             LOCALES del proyecto de la sesion actual.
       -->
       <div id="quick-panel-widget" class="quick-panel-widget">
-        <button type="button" id="quick-panel-btn" class="quick-panel-btn" title="Accesos rapidos" aria-expanded="false">
+        <button type="button" id="quick-panel-btn" class="quick-panel-btn" title="Accesos rápidos" aria-expanded="false">
           <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="1.8" fill="currentColor"/><circle cx="6" cy="12" r="1.8" fill="currentColor"/><circle cx="18" cy="12" r="1.8" fill="currentColor"/></svg>
         </button>
         <div id="quick-panel-menu" class="quick-panel-menu hidden">
@@ -608,7 +650,7 @@
               <span class="quick-panel-item-label">Auto-envío</span>
               <span id="quick-panel-autosend-toggle" class="quick-panel-toggle" data-checked="false" aria-hidden="true"><span class="quick-panel-toggle-knob"></span></span>
             </button>
-            <button type="button" id="quick-panel-loop-btn" class="quick-panel-item" title="Repetir en bucle: al reproducir un fragmento con 🔊, se repite hasta desactivarlo o detenerlo">
+            <button type="button" id="quick-panel-loop-btn" class="quick-panel-item" title="Reproducir en Bucle: al reproducir un fragmento con 🔊, se repite hasta desactivarlo o detenerlo">
               <span class="quick-panel-item-icon">
                 <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                   <path d="M17 2l4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
@@ -616,10 +658,10 @@
                   <path d="M21 13v2a4 4 0 0 1-4 4H3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
               </span>
-              <span class="quick-panel-item-label">Repetir en bucle</span>
+              <span class="quick-panel-item-label">Reproducir en Bucle</span>
               <span id="quick-panel-loop-toggle" class="quick-panel-toggle" data-checked="false" aria-hidden="true"><span class="quick-panel-toggle-knob"></span></span>
             </button>
-            <button type="button" id="quick-panel-looprun-btn" class="quick-panel-item" title="Loop: inicia/detiene la ejecución automática de la lista de tareas pendientes">
+            <button type="button" id="quick-panel-looprun-btn" class="quick-panel-item" title="Loop de Tareas: inicia/detiene la ejecución automática de la lista de tareas pendientes">
               <span class="quick-panel-item-icon">
                 <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                   <path d="M17 2l4 4-4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
@@ -627,30 +669,50 @@
                   <path d="M21 13v2a4 4 0 0 1-4 4H3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
                 </svg>
               </span>
-              <span class="quick-panel-item-label">Loop</span>
+              <span class="quick-panel-item-label">Loop de Tareas</span>
               <span id="quick-panel-looprun-toggle" class="quick-panel-toggle" data-checked="false" aria-hidden="true"><span class="quick-panel-toggle-knob"></span></span>
             </button>
-            <button type="button" id="quick-panel-loopauto-btn" class="quick-panel-item" title="Auto: en loop, Vision decide las opciones (Recomendada); pausa si hay (Riesgo) o ninguna recomendada">
+            <button type="button" id="quick-panel-loopauto-btn" class="quick-panel-item" title="Auto-Confirmación: en el Loop de Tareas, Vision decide las opciones (Recomendada); pausa si hay (Riesgo) o ninguna recomendada">
               <span class="quick-panel-item-icon">
                 <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                   <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.6"/>
                   <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
                 </svg>
               </span>
-              <span class="quick-panel-item-label">Auto</span>
+              <span class="quick-panel-item-label">Auto-Confirmación</span>
               <span id="quick-panel-loopauto-toggle" class="quick-panel-toggle" data-checked="false" aria-hidden="true"><span class="quick-panel-toggle-knob"></span></span>
             </button>
-            <button type="button" id="quick-panel-browser-btn" class="quick-panel-item">
+            <button type="button" id="quick-panel-browser-btn" class="quick-panel-item" title="Navegador Integrado: abre/cierra la vista previa en vivo">
               <span class="quick-panel-item-icon">
                 <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6"/><path d="M3 12h18M12 3c2.5 2.5 3.8 5.7 3.8 9s-1.3 6.5-3.8 9c-2.5-2.5-3.8-5.7-3.8-9s1.3-6.5 3.8-9Z" stroke="currentColor" stroke-width="1.6"/></svg>
               </span>
-              <span class="quick-panel-item-label">Navegador</span>
+              <span class="quick-panel-item-label">Navegador Integrado</span>
             </button>
             <button type="button" id="quick-panel-skills-btn" class="quick-panel-item">
               <span class="quick-panel-item-icon">
                 <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 3l2.2 4.5 5 .7-3.6 3.5.9 5-4.5-2.4-4.5 2.4.9-5-3.6-3.5 5-.7L12 3Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
               </span>
               <span class="quick-panel-item-label">Skills</span>
+              <span class="quick-panel-item-chevron">›</span>
+            </button>
+            <!-- REQ-002 (spec quick-panel-labels-comandos): acceso rapido a
+                 los comandos "/" (sistema + propios de la sesion), mismo
+                 patron de submenu in-place que Skills. -->
+            <button type="button" id="quick-panel-commands-btn" class="quick-panel-item" title="Comandos: lista y ejecuta los comandos del sistema y los propios de esta sesión">
+              <span class="quick-panel-item-icon">
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 6l5 6-5 6M11 18h9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </span>
+              <span class="quick-panel-item-label">Comandos</span>
+              <span class="quick-panel-item-chevron">›</span>
+            </button>
+            <!-- spec interruptores-conexiones-skills REQ-008: apartado «Conexiones» del panel rapido -- lista TODAS las conexiones configuradas (activas y
+                 desactivadas) con su interruptor. Mismo patron de submenu in-place que Skills y Comandos. -->
+            <button type="button" id="quick-panel-connections-btn" class="quick-panel-item" title="Conexiones: activá o desactivá por dónde busca Vision">
+              <span class="quick-panel-item-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a3.5 3.5 0 0 0 5 0l2.3-2.3a3.5 3.5 0 0 0-5-5L10.8 8.2"/><path d="M14 10a3.5 3.5 0 0 0-5 0l-2.3 2.3a3.5 3.5 0 0 0 5 5L13.2 15.8"/></svg>
+              </span>
+              <span class="quick-panel-item-label">Conexiones</span>
+              <span id="quick-panel-connections-summary" class="quick-panel-item-count"></span>
               <span class="quick-panel-item-chevron">›</span>
             </button>
           </div>
@@ -660,6 +722,18 @@
           <div id="quick-panel-skills-view" class="quick-panel-view hidden">
             <button type="button" id="quick-panel-skills-back" class="quick-panel-back">‹ Accesos rápidos</button>
             <div id="quick-panel-skills-list" class="quick-panel-skills-list"></div>
+          </div>
+          <!-- REQ-002/003/005 (spec quick-panel-labels-comandos): submenu
+               in-place de Comandos, con boton para importar una carpeta
+               de .md a commands/ de la sesion. -->
+          <div id="quick-panel-connections-view" class="quick-panel-view hidden">
+            <button type="button" id="quick-panel-connections-back" class="quick-panel-back">‹ Accesos rápidos</button>
+            <p class="quick-panel-hint">Lo que apagues no se le ofrece al modelo ni se consulta: ahorra tokens y evita que busque por ahí.</p>
+            <div id="quick-panel-connections-list" class="quick-panel-skills-list"></div>
+          </div>
+          <div id="quick-panel-commands-view" class="quick-panel-view hidden">
+            <button type="button" id="quick-panel-commands-back" class="quick-panel-back">‹ Accesos rápidos</button>
+            <div id="quick-panel-commands-list" class="quick-panel-skills-list"></div>
           </div>
         </div>
       </div>
@@ -678,9 +752,11 @@
       -->
       <div id="quick-browser-panel" class="quick-browser-panel hidden">
         <div class="quick-browser-header">
-          <span class="quick-browser-title">Navegador — vista previa en vivo</span>
+          <span class="quick-browser-title">Navegador Integrado — vista previa en vivo</span>
           <span id="quick-browser-url" class="quick-browser-url" title="Hacé click para copiar la dirección"></span>
           <div class="quick-browser-window-cntrls">
+            <button type="button" id="quick-browser-isolate-btn" class="quick-browser-cntrl-btn" aria-pressed="false" title="Aislar la vista previa: el dashboard no podrá usar localStorage ni llamar a la API de Vision" aria-label="Aislar vista previa">🛡</button>
+            <button type="button" id="quick-browser-reset-btn" class="quick-browser-cntrl-btn" title="Restablecer posición y tamaño" aria-label="Restablecer posición y tamaño">⟲</button>
             <button type="button" id="quick-browser-open-btn" class="quick-browser-cntrl-btn" title="Abrir en pestaña del navegador" aria-label="Abrir en navegador">
               <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 13L13 3M7 3h6v6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
@@ -692,6 +768,7 @@
           </div>
         </div>
         <iframe id="quick-browser-iframe" class="quick-browser-iframe" title="Vista previa generada por Vision"></iframe>
+        <div id="quick-browser-resize-handle" class="quick-browser-resize-handle" title="Arrastrar para cambiar el tamaño" aria-hidden="true"></div>
       </div>
 
 
@@ -770,6 +847,17 @@
             <button id="session-edit-browse" type="button" class="acc-action-btn" title="Abrir el Explorador de Windows para elegir la carpeta">📁 Elegir…</button>
           </div>
         </div>
+        <!-- spec sesion-publica-privada REQ-008: privada por defecto. Publica = otra persona que abra la carpeta puede importar una COPIA. -->
+        <div class="settings-field session-edit-public-field">
+          <label class="settings-checkbox-label" for="session-edit-public">
+            <input id="session-edit-public" type="checkbox" />
+            <span>Sesión pública (otras personas pueden importar una copia)</span>
+          </label>
+          <p id="session-edit-public-warning" class="settings-hint hidden">
+            Cualquiera con acceso a esta carpeta podrá leer esta conversación y traer una copia a su propia sesión. Lo que cada persona escriba después queda
+            solo en su copia. Los resultados de Outlook y Teams no se copian: quien importe verá «contenido privado omitido».
+          </p>
+        </div>
         <div class="settings-actions">
           <button id="session-edit-save" class="acc-action-btn" type="button">Guardar</button>
           <span id="session-edit-status" class="settings-status"></span>
@@ -795,6 +883,104 @@
         <div class="confirm-actions">
           <button id="confirm-cancel-btn" class="acc-action-btn secondary" type="button">Cancelar</button>
           <button id="confirm-accept-btn" class="acc-action-btn danger" type="button">Confirmar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- spec importar-historial-de-carpeta (REQ-010/011): la carpeta elegida YA tiene conversaciones anteriores del usuario. Lista cada una (titulo, mensajes, fecha) con
+       «Importar a esta sesión» (copia, solo si la sesion actual esta vacia) y «Abrir esa sesión»; abajo «Seguir con esta sesión vacía». La ✕ y el clic afuera no cambian nada. Lo arma app.js. -->
+  <div id="folder-history-overlay" class="dashboard-overlay hidden">
+    <div class="dashboard-modal confirm-modal folder-history-modal" role="dialog" aria-modal="true" aria-labelledby="folder-history-title">
+      <header class="dashboard-header">
+        <div>
+          <span class="dashboard-eyebrow">CARPETA CON HISTORIAL</span>
+          <h2 id="folder-history-title">Esta carpeta ya tiene conversaciones</h2>
+        </div>
+        <button id="folder-history-close" class="dashboard-close" type="button" title="Cancelar">✕</button>
+      </header>
+      <div class="dashboard-body confirm-body">
+        <p id="folder-history-intro" class="confirm-message"></p>
+        <ul id="folder-history-list" class="folder-history-list"></ul>
+        <p id="folder-history-note" class="settings-hint"></p>
+        <div class="confirm-actions">
+          <button id="folder-history-keep" class="acc-action-btn secondary" type="button">Seguir con esta sesión vacía</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- spec audio-sistema-modo-reunion (REQ-001/003/004/005): de DONDE escucha el Modo reunión al empezar. «Solo lo que hablo» viene marcada. Lo maneja frontend/js/meeting-source.js.
+       El audio de la PC se pide AL TOCAR «Empezar» (el navegador solo abre su selector de pantalla con un gesto reciente y siempre pregunta). Vision no guarda audio ni imagen. -->
+  <div id="meeting-source-overlay" class="dashboard-overlay hidden">
+    <div class="dashboard-modal confirm-modal meeting-source-modal" role="dialog" aria-modal="true" aria-labelledby="meeting-source-title">
+      <header class="dashboard-header">
+        <div>
+          <span class="dashboard-eyebrow">MODO REUNIÓN</span>
+          <h2 id="meeting-source-title">¿Qué querés que escuche?</h2>
+        </div>
+        <button id="meeting-source-close" class="dashboard-close" type="button" title="Cancelar">✕</button>
+      </header>
+      <div class="dashboard-body confirm-body">
+        <label class="meeting-source-option">
+          <input type="radio" name="meeting-source" value="mic" />
+          <span><strong>Solo lo que hablo</strong><small>Tu micrófono. Es lo que hacía hasta ahora.</small></span>
+        </label>
+        <label class="meeting-source-option">
+          <input type="radio" name="meeting-source" value="system" />
+          <span><strong>Solo lo que escucho</strong><small>El audio de la PC (los demás en Teams, Zoom, un video…), aunque uses auriculares.</small></span>
+        </label>
+        <label class="meeting-source-option">
+          <input type="radio" name="meeting-source" value="both" />
+          <span><strong>Lo que escucho y lo que hablo</strong><small>El audio de la PC y tu micrófono mezclados en una sola transcripción.</small></span>
+        </label>
+        <p id="meeting-source-hint" class="settings-hint"></p>
+        <label class="settings-checkbox-label">
+          <input id="meeting-source-noask" type="checkbox" />
+          <span>No volver a preguntar (se cambia en Configuración &gt; Audio)</span>
+        </label>
+        <p id="meeting-source-error" class="settings-status" role="alert"></p>
+        <div class="confirm-actions">
+          <button id="meeting-source-cancel" class="acc-action-btn secondary" type="button">Cancelar</button>
+          <button id="meeting-source-start" class="acc-action-btn" type="button">Empezar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- spec control-microfono-windows (REQ-005/006/009): aviso ANTES de escuchar cuando el microfono esta silenciado en Windows (o no llega senal). Muestra cual es, lista los
+       conectados, deja activarlo, ajustar el volumen y ver la barra verde. Vision NUNCA cambia el audio sola: solo lo que se toca aca. Lo maneja frontend/js/mic-control.js. -->
+  <div id="mic-warn-overlay" class="dashboard-overlay hidden">
+    <div class="dashboard-modal confirm-modal mic-warn-modal" role="alertdialog" aria-modal="true" aria-labelledby="mic-warn-title">
+      <header class="dashboard-header">
+        <div>
+          <span class="dashboard-eyebrow">MICRÓFONO</span>
+          <h2 id="mic-warn-title">Tu micrófono está silenciado en Windows</h2>
+        </div>
+        <button id="mic-warn-close" class="dashboard-close" type="button" title="Cancelar">✕</button>
+      </header>
+      <div class="dashboard-body confirm-body">
+        <p id="mic-warn-message" class="confirm-message"></p>
+        <div class="settings-field">
+          <label for="mic-warn-select">Micrófonos conectados</label>
+          <select id="mic-warn-select"></select>
+        </div>
+        <div class="settings-winmic-row">
+          <span id="mic-warn-status" class="settings-winmic-state" data-state="unknown"></span>
+          <button id="mic-warn-activate" class="acc-action-btn" type="button">Activar micrófono</button>
+        </div>
+        <div class="settings-winmic-row">
+          <label for="mic-warn-slider" class="settings-winmic-vol-label">Volumen</label>
+          <input id="mic-warn-slider" class="settings-winmic-slider" type="range" min="0" max="100" step="1" value="50" />
+          <span id="mic-warn-value" class="settings-winmic-value">– %</span>
+        </div>
+        <div class="settings-field">
+          <label>Nivel de entrada (hablá para probar)</label>
+          <div class="settings-mic-meter"><div id="mic-warn-meter-fill" class="settings-mic-meter-fill"></div></div>
+        </div>
+        <p id="mic-warn-error" class="settings-status" role="alert"></p>
+        <div class="confirm-actions">
+          <button id="mic-warn-continue" class="acc-action-btn" type="button">Continuar</button>
         </div>
       </div>
     </div>
@@ -848,9 +1034,9 @@
         <button class="settings-tab" type="button" data-tab="skills" role="tab" title="Carpeta/repo donde viven las skills">Skills</button>
         <button class="settings-tab" type="button" data-tab="commands" role="tab" title="Comandos propios del menú &quot;/&quot;">Comandos</button>
         <button class="settings-tab" type="button" data-tab="agentes" role="tab" title="Automatizaciones programadas: comandos, skills, archivos o alarmas/recordatorios">Agentes</button>
-        <button class="settings-tab" type="button" data-tab="credentials" role="tab" title="Credenciales de conectores (Oracle/SAP/BigQuery/SharePoint), cifradas en disco">Credenciales</button>
+        <button class="settings-tab" type="button" data-tab="credentials" role="tab" title="Claves de BigQuery y de la voz de Vision, cifradas en disco">Credenciales</button>
         <button class="settings-tab" type="button" data-tab="connections" role="tab" title="Estado de cada conector, exploracion de datasets/tablas y umbral de consulta pesada">Conexiones</button>
-        <button class="settings-tab" type="button" data-tab="server" role="tab" title="Direccion y token del backend (util al abrir Vision desde otro dispositivo en la misma red)">Servidor</button>
+        <button class="settings-tab" type="button" data-tab="server" role="tab" title="Configuracion avanzada de red: direccion del servidor de Vision y salida a internet (proxy)">Red</button>
       </nav>
 
       <div class="dashboard-body settings-body">
@@ -955,6 +1141,8 @@
           revisado en spec.md): la Web Speech API no lo soporta.
         -->
         <section class="settings-pane hidden" data-pane="audio">
+          <h3 class="settings-subheading settings-group-title">Voz de Vision (salida)</h3>
+          <p class="settings-hint">Cómo habla Vision: la voz, el informe técnico hablado y los motores de voz.</p>
 <div class="settings-field">
             <label class="settings-checkbox-label">
               <input type="checkbox" id="cfg-tts-enabled" />
@@ -968,6 +1156,14 @@
               Hablar informe técnico: mientras trabaja, Vision dice en una frase cada acción (el comando, el
               archivo y para qué es, las tablas que consulta). Las claves nunca se dicen.
             </label>
+          </div>
+          <!-- spec informe-tecnico-hablado REQ-012: nivel del informe -->
+          <div class="settings-field">
+            <label for="cfg-tts-tech-level">Nivel del informe técnico</label>
+            <select id="cfg-tts-tech-level">
+              <option value="detailed">Detallado: cuenta también la estructura de la página (encabezado, menú, pie), los estilos y las funciones</option>
+              <option value="summary">Resumido: una frase por acción</option>
+            </select>
           </div>
           <div class="settings-field">
             <label for="cfg-tts-voice-select">Voz del navegador (español)</label>
@@ -1056,12 +1252,41 @@
             <input id="cfg-voice-sample" type="file" accept=".wav,.mp3,audio/wav,audio/mpeg" />
             <p id="cfg-voice-sample-status" class="settings-hint"></p>
           </div>
+          <h3 class="settings-subheading settings-group-title">Micrófono (entrada)</h3>
+          <p class="settings-hint">Qué micrófono usa Vision, su volumen en Windows, cuánto se mueve el nivel y en qué idioma te transcribe.</p>
           <div class="settings-field">
             <label for="cfg-mic-select">Micrófono</label>
             <select id="cfg-mic-select">
               <option value="">(dispositivo por defecto)</option>
             </select>
           </div>
+          <!-- spec control-microfono-windows (REQ-001..004): el microfono de Windows -- ver si esta silenciado, activarlo y ajustar su volumen como en Panel de control > Sonido.
+               Lo arma frontend/js/mic-control.js con /api/audio/*. Deslizar al minimo SILENCIA. -->
+          <div id="cfg-winmic-block" class="settings-field settings-winmic" data-state="loading">
+            <label for="cfg-winmic-select">Micrófonos de Windows (activar y volumen)</label>
+            <select id="cfg-winmic-select"></select>
+            <div class="settings-winmic-row">
+              <span id="cfg-winmic-state" class="settings-winmic-state" data-state="unknown">Leyendo el estado de Windows…</span>
+              <button id="cfg-winmic-toggle" class="acc-action-btn" type="button" disabled>Activar micrófono</button>
+            </div>
+            <div class="settings-winmic-row">
+              <label for="cfg-winmic-slider" class="settings-winmic-vol-label">Volumen</label>
+              <input id="cfg-winmic-slider" class="settings-winmic-slider" type="range" min="0" max="100" step="1" value="50" disabled />
+              <span id="cfg-winmic-value" class="settings-winmic-value">– %</span>
+            </div>
+            <p id="cfg-winmic-note" class="settings-hint"></p>
+          </div>
+          <div class="settings-field">
+            <label>Nivel de entrada (hablá para probar)</label>
+            <div class="settings-mic-meter">
+              <div id="cfg-mic-meter-fill" class="settings-mic-meter-fill"></div>
+              <!-- spec cerebro-hablar-con-espacio-y-audio-agrupado REQ-010: marca fina donde cae el umbral de sensibilidad elegido (umbral x 300 %, la escala del propio medidor). -->
+              <div id="cfg-mic-meter-mark" class="settings-mic-meter-mark" aria-hidden="true"></div>
+            </div>
+            <span id="cfg-mic-status" class="settings-status"></span>
+          </div>
+          <p class="settings-hint">El medidor de nivel solo captura audio mientras esta pestaña de Configuración está abierta — se libera el micrófono automáticamente al cerrarla o cambiar de pestaña.</p>
+
           <!--
             Bug real reportado por el usuario: hablando en español, a veces
             Whisper transcribia en INGLES -- causa confirmada: sin forzar
@@ -1087,6 +1312,97 @@
               <option value="ja">Japonés</option>
 <option value="ru">Ruso</option>
             </select>
+          </div>
+          <h3 class="settings-subheading">Modo reunión</h3>
+          <!-- spec audio-sistema-modo-reunion (REQ-011): fuente por defecto del Modo reunión y si preguntar al empezar. Lo arma frontend/js/meeting-source.js. -->
+          <div class="settings-field">
+            <label for="cfg-meeting-source">Modo reunión: qué escucha</label>
+            <select id="cfg-meeting-source">
+              <option value="mic">Solo lo que hablo (micrófono)</option>
+              <option value="system">Solo lo que escucho (audio de la PC)</option>
+              <option value="both">Lo que escucho y lo que hablo</option>
+            </select>
+            <label class="settings-checkbox-label">
+              <input id="cfg-meeting-ask" type="checkbox" checked />
+              <span>Preguntar al empezar la reunión</span>
+            </label>
+            <p class="settings-hint">El audio de la PC lo pide el navegador cada vez: elegí «Pantalla completa» y tildá «Compartir también el audio del sistema». Vision no guarda audio ni pantalla.</p>
+          </div>
+          <h3 class="settings-subheading settings-group-title">Modo Cerebro</h3>
+          <p class="settings-hint">La conversación por voz continua: cuándo envía lo que dijiste y cómo te escucha.</p>
+          <!--
+            REQ-012 (spec asistente-contextual-voz): controles del modo
+            Cerebro -- mismo patron visual que el resto de esta pestaña
+            (checkbox + campo numerico con su propio settings-field).
+            Auto-envio ACTIVADO por defecto (pedido explicito del
+            usuario); si se desactiva, el modo Cerebro pasa a necesitar
+            decir "Vision" para forzar el envio (ver REQ-005).
+          -->
+          <div class="settings-field">
+            <label class="settings-checkbox-label">
+              <input type="checkbox" id="cfg-brain-autosend-enabled" checked />
+              Auto-envío en Modo Cerebro (sin necesidad de decir "Vision")
+            </label>
+          </div>
+<div class="settings-field" id="cfg-brain-autosend-pause-field">
+            <label for="cfg-brain-autosend-pause">Pausa para auto-envío en Modo Cerebro (segundos)</label>
+            <input type="number" id="cfg-brain-autosend-pause" min="1" max="10" step="1" value="2" />
+            <!-- spec autoenvio-cerebro-sin-voz REQ-005: confirmacion visible de lo guardado (o a que se corrigio). -->
+            <span id="cfg-brain-autosend-pause-status" class="settings-status" role="status" aria-live="polite"></span>
+          </div>
+          <!--
+            REQ-004 (spec atajo-espacio-modo-cerebro, 2026-09-26): pedido
+            explicito del usuario -- interrumpir a Vision con la barra
+            espaciadora mientras habla en Modo Cerebro, y reiniciar la
+            ronda de escucha en curso (reset liviano, sin reabrir el
+            microfono). Activado por defecto, mismo criterio que
+            cfg-brain-autosend-enabled.
+          -->
+          <div class="settings-field">
+            <label class="settings-checkbox-label">
+              <input type="checkbox" id="cfg-brain-space-interrupt-enabled" checked />
+              Interrumpir a Vision con la barra espaciadora en Modo Cerebro
+            </label>
+          </div>
+          <!-- spec cerebro-hablar-con-espacio-y-audio-agrupado REQ-001/002/012: como escucha el Modo Cerebro. De fabrica «Automatico» (lo de siempre). -->
+          <div class="settings-field">
+            <label for="cfg-brain-listen-mode">Cómo escucha el Modo Cerebro</label>
+            <select id="cfg-brain-listen-mode">
+              <option value="auto">Automático: detecta cuándo hablás (recomendado en silencio)</option>
+              <option value="push">Mantener Espacio para hablar: solo te escucha mientras apretás la barra</option>
+            </select>
+            <p class="settings-hint">Con «Mantener Espacio para hablar» apretás Espacio, hablás y soltás para enviar; entre pulsaciones no escucha nada, así que el ruido ambiente no lo molesta. Funciona aunque el interruptor de interrumpir con Espacio esté apagado. El micrófono queda abierto en segundo plano (el indicador de Windows sigue encendido): con <kbd>Esc</kbd> se apaga del todo.</p>
+          </div>
+          <!-- spec cerebro-hablar-con-espacio-y-audio-agrupado REQ-009/012: sensibilidad del detector de voz (solo el modo Automatico lo usa). -->
+          <div class="settings-field" id="cfg-brain-sensitivity-field">
+            <label for="cfg-brain-sensitivity">Sensibilidad del micrófono en Modo Cerebro</label>
+            <select id="cfg-brain-sensitivity">
+              <option value="very_noisy">Muy ruidoso: oficina o taller con mucho ruido</option>
+              <option value="noisy">Ruidoso: ruido ambiente moderado</option>
+              <option value="normal" selected>Normal (recomendado)</option>
+              <option value="quiet">Silencioso: auriculares o hablando bajito</option>
+            </select>
+            <p class="settings-hint">Cuánto volumen hace falta para que Vision crea que estás hablando. Si hay ruido y nunca termina de enviar, subí hacia «Muy ruidoso»; si no te escucha cuando hablás bajito, bajá hacia «Silencioso». La marca del medidor de nivel (en Micrófono) muestra dónde cae el umbral.</p>
+            <p id="cfg-brain-sensitivity-note" class="settings-hint" role="status" aria-live="polite"></p>
+          </div>
+          <h3 class="settings-subheading settings-group-title">Avisos y alarmas</h3>
+          <!--
+            REQ-002/004/005/006/007 (spec aviso-proceso-terminado): aviso de Windows cuando Vision termina lo pedido con todas las
+            tareas completadas. Prendido de fábrica (REQ-006). Suena el sonido de notificación de Windows (D3, REQ-004): se cambia en
+            Windows, no acá. La línea del permiso del navegador la pone app.js (refreshNotifyPermissionStatus).
+          -->
+          <div class="settings-field">
+            <span class="settings-section-label">Aviso al terminar</span>
+          </div>
+          <div class="settings-field">
+            <label class="settings-checkbox-label">
+              <input type="checkbox" id="cfg-notify-finish" checked />
+              Avisarme cuando termine
+            </label>
+            <p class="settings-hint">Cuando Vision termina lo que pediste con todas las tareas completadas, Windows muestra un aviso abajo a la derecha con el nombre de la sesión, la hora y el comienzo de la respuesta. Al tocarlo se abre esa sesión.</p>
+            <p class="settings-hint">Windows puede mostrar este aviso también en la pantalla bloqueada.</p>
+            <p class="settings-hint">Suena el sonido de notificación de Windows. Se cambia en Windows: Configuración &gt; Sistema &gt; Sonido &gt; Más opciones de sonido &gt; Notificación.</p>
+            <p class="settings-hint" id="cfg-notify-finish-permission" role="status" aria-live="polite"></p>
           </div>
 
           <div class="settings-field">
@@ -1117,47 +1433,6 @@
           <div class="settings-field">
             <button id="cfg-loop-alarm-test" class="acc-action-btn" type="button">Probar alarma</button>
             <p class="settings-hint">Reproduce el tipo, cadencia y volumen seleccionados.</p>
-          </div>
-          <div class="settings-field">
-            <label>Nivel de entrada (hablá para probar)</label>
-            <div class="settings-mic-meter">
-              <div id="cfg-mic-meter-fill" class="settings-mic-meter-fill"></div>
-            </div>
-            <span id="cfg-mic-status" class="settings-status"></span>
-          </div>
-          <p class="settings-hint">El medidor de nivel solo captura audio mientras esta pestaña de Configuración está abierta — se libera el micrófono automáticamente al cerrarla o cambiar de pestaña.</p>
-
-          <!--
-            REQ-012 (spec asistente-contextual-voz): controles del modo
-            Cerebro -- mismo patron visual que el resto de esta pestaña
-            (checkbox + campo numerico con su propio settings-field).
-            Auto-envio ACTIVADO por defecto (pedido explicito del
-            usuario); si se desactiva, el modo Cerebro pasa a necesitar
-            decir "Vision" para forzar el envio (ver REQ-005).
-          -->
-          <div class="settings-field">
-            <label class="settings-checkbox-label">
-              <input type="checkbox" id="cfg-brain-autosend-enabled" checked />
-              Auto-envío en Modo Cerebro (sin necesidad de decir "Vision")
-            </label>
-          </div>
-<div class="settings-field" id="cfg-brain-autosend-pause-field">
-            <label for="cfg-brain-autosend-pause">Pausa para auto-envío en Modo Cerebro (segundos)</label>
-            <input type="number" id="cfg-brain-autosend-pause" min="1" max="10" step="1" value="2" />
-          </div>
-          <!--
-            REQ-004 (spec atajo-espacio-modo-cerebro, 2026-09-26): pedido
-            explicito del usuario -- interrumpir a Vision con la barra
-            espaciadora mientras habla en Modo Cerebro, y reiniciar la
-            ronda de escucha en curso (reset liviano, sin reabrir el
-            microfono). Activado por defecto, mismo criterio que
-            cfg-brain-autosend-enabled.
-          -->
-          <div class="settings-field">
-            <label class="settings-checkbox-label">
-              <input type="checkbox" id="cfg-brain-space-interrupt-enabled" checked />
-              Interrumpir a Vision con la barra espaciadora en Modo Cerebro
-            </label>
           </div>
         </section>
 
@@ -1461,9 +1736,10 @@
         -->
         <section class="settings-pane hidden" data-pane="credentials">
           <p class="settings-hint">
-            Estas credenciales se guardan CIFRADAS en <code>backend/.env.enc</code> (nunca en texto
-            plano) usando una clave derivada de tu par de llaves SSH local. Dejar un campo vacío no
-            lo borra. Expandí cada sección para completar sus credenciales.
+            Acá van solo las claves de <strong>BigQuery</strong> y de la <strong>voz</strong> (Fish Audio, ElevenLabs): se guardan
+            CIFRADAS en <code>backend/.env.enc</code> (nunca en texto plano) con una clave derivada de tu par de llaves SSH local.
+            Oracle, SharePoint y SAP se configuran ahora en <code>connections.json</code> (ver la pestaña Conexiones). Dejar un
+            campo vacío no lo borra.
           </p>
 
           <div id="cred-accordion"></div>
@@ -1491,6 +1767,12 @@
             de BigQuery y el export automático a CSV).
           </p>
 
+          <!-- spec gestor-conexiones Fase B: gestor de conexiones (lo arma frontend/js/vault.js): tarjetas por conexión, + Agregar, ojo en contraseñas, key de BigQuery -->
+          <div id="vault-root" class="vault-root"></div>
+
+          <h3 class="settings-subheading">Estado de las conexiones</h3>
+          <p id="conn-file-note" class="settings-hint"></p>
+          <p class="settings-hint">Cada conexión tiene un interruptor: una conexión apagada no se le ofrece al modelo, no se prueba y no aparece en el panel lateral. Los cambios se ven acá y en el panel lateral al tocar «Actualizar estado».</p>
           <div id="conn-status-list" class="conn-status-list"></div>
           <div class="settings-actions">
             <button id="conn-status-refresh" class="acc-action-btn secondary" type="button">Actualizar estado</button>
@@ -1515,6 +1797,39 @@
             <span id="conn-thresholds-status" class="settings-status"></span>
           </div>
 
+          <h3 class="settings-subheading">Archivos adjuntos</h3>
+          <div class="settings-field">
+            <label for="conn-attach-warn-mb">Pedir confirmación si el archivo pesa más de (MB)</label>
+            <input id="conn-attach-warn-mb" type="number" min="1" placeholder="(default: 100 MB)" />
+          </div>
+          <div class="settings-field">
+            <label for="conn-attach-inplace-mb">Por encima de (MB) no se copia: se lee en su lugar</label>
+            <input id="conn-attach-inplace-mb" type="number" min="1" placeholder="(default: 500 MB)" />
+          </div>
+          <div class="settings-actions">
+            <button id="conn-attach-save" class="acc-action-btn" type="button">Guardar</button>
+            <span id="conn-attach-status" class="settings-status"></span>
+          </div>
+
+          <h3 class="settings-subheading">Imágenes dentro de PDF y Word</h3>
+          <!-- spec leer-imagenes-pdf-word REQ-007: cuándo Vision pregunta antes de leer las imágenes de un documento. -->
+          <div class="settings-field">
+            <label for="conn-img-min-px">Ignorar imágenes cuyo lado menor mida menos de (px)</label>
+            <input id="conn-img-min-px" type="number" min="1" placeholder="(default: 64 px)" />
+          </div>
+          <div class="settings-field">
+            <label for="conn-img-ask-count">Preguntar antes de leerlas si hay más de (imágenes)</label>
+            <input id="conn-img-ask-count" type="number" min="1" placeholder="(default: 5)" />
+          </div>
+          <div class="settings-field">
+            <label for="conn-img-ask-pct">…o si ocuparían más de este % de la ventana de contexto del modelo</label>
+            <input id="conn-img-ask-pct" type="number" min="1" max="100" placeholder="(default: 10 %)" />
+          </div>
+          <div class="settings-actions">
+            <button id="conn-img-save" class="acc-action-btn" type="button">Guardar</button>
+            <span id="conn-img-status" class="settings-status"></span>
+          </div>
+
           <h3 class="settings-subheading">Explorar datos disponibles</h3>
           <div class="conn-explore-block">
             <button id="conn-bq-datasets-toggle" class="conn-tree-toggle" type="button" aria-expanded="false">
@@ -1524,9 +1839,15 @@
           </div>
           <div class="conn-explore-block">
             <button id="conn-sp-lists-toggle" class="conn-tree-toggle" type="button" aria-expanded="false">
-              <span class="conn-tree-caret">▶</span> SharePoint — listas
+              <span class="conn-tree-caret">▶</span> SharePoint — sitios y listas
             </button>
             <ul id="conn-sp-lists-list" class="conn-tree-list hidden"></ul>
+          </div>
+          <div class="conn-explore-block">
+            <button id="conn-cf-toggle" class="conn-tree-toggle" type="button" aria-expanded="false">
+              <span class="conn-tree-caret">▶</span> Confluence — secciones y páginas
+            </button>
+            <ul id="conn-cf-list" class="conn-tree-list hidden"></ul>
           </div>
         </section>
 
@@ -1538,6 +1859,8 @@
           pestaña puede quedar intacta con los valores por defecto.
         -->
         <section class="settings-pane hidden" data-pane="server">
+         <div data-section="server">
+          <h3 class="settings-subheading">Servidor</h3>
           <div class="settings-field">
             <label for="cfg-server-url">Direccion del backend</label>
             <input id="cfg-server-url" type="text" placeholder="http://192.168.1.50:8030" />
@@ -1552,6 +1875,7 @@
             <span id="cfg-server-status" class="settings-status"></span>
           </div>
           <p class="settings-hint">Por defecto, Vision usa la misma dirección con la que abriste esta página. Solo necesitás cambiar esto si querés apuntar a otra notebook/servidor distinto.</p>
+         </div>
 
           <!--
             REQ-107/108 ELIMINADOS (spec configuracion-limpieza-credenciales-
@@ -1566,6 +1890,32 @@
             lista de IPs no tenia ningun uso practico -- se elimino toda la
             feature (backend app/network_info.py tambien eliminado).
           -->
+
+         <!--
+           spec proxy-autoheal (REQ-007, 2026-10-18): salida directa de Vision a internet. Vision la verifica solo al arrancar; aca se ve lo que encontro y se
+           puede probar, guardar o volver a buscar. NO reemplaza a Conexiones > Red y proxy (proxy de las conexiones de datos): las dos leen y escriben el mismo
+           valor guardado. Todo el texto lo pinta app.js con textContent.
+         -->
+         <div data-section="proxy">
+          <h3 class="settings-subheading">Proxy (salida a internet)</h3>
+          <p class="settings-hint">Es la salida a internet que usa Vision (por ejemplo, para el chat con inteligencia artificial). Al abrir Vision se verifica sola y, si la guardada dejó de responder, se cambia por otra que sí responde. Es el mismo dato que Conexiones &gt; Red y proxy.</p>
+          <dl class="proxy-summary">
+            <div><dt>En uso ahora</dt><dd id="cfg-proxy-inuse">—</dd></div>
+            <div><dt>Guardada</dt><dd id="cfg-proxy-saved">—</dd></div>
+          </dl>
+          <div id="cfg-proxy-list" class="proxy-list" aria-live="polite"></div>
+          <div class="settings-field">
+            <label for="cfg-proxy-address">Dirección del proxy (vacío = conexión directa, sin proxy)</label>
+            <input id="cfg-proxy-address" type="text" autocomplete="off" spellcheck="false" placeholder="equipo:puerto, por ejemplo 19.12.80.237:83" />
+          </div>
+          <div class="settings-actions">
+            <button id="cfg-proxy-test" class="acc-action-btn secondary" type="button">Probar</button>
+            <button id="cfg-proxy-save" class="acc-action-btn" type="button">Guardar y reconectar</button>
+            <button id="cfg-proxy-reconnect" class="acc-action-btn secondary" type="button">Reconectar</button>
+            <span id="cfg-proxy-status" class="settings-status" role="status"></span>
+          </div>
+          <p class="settings-hint">«Reconectar» vuelve a buscar una salida que funcione (la guardada, las que indica la red de la empresa y la conexión directa) y usa la primera que responde. Si trabajás desde casa o desde la empresa, con o sin VPN, conviene tocarlo después de conectarte.</p>
+         </div>
         </section>
 
       </div>

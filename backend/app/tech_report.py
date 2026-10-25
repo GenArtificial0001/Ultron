@@ -143,6 +143,35 @@ _DB_CONNECTIONS: list[tuple[re.Pattern[str], str]] = [
 _FETCH = re.compile(r"""\b(?:fetch|axios\.(?:get|post)|requests\.(?:get|post))\(\s*[`'"]([^`'"]+)""")
 
 
+# ---------------------------------------------------------------------------
+# REQ-012 (reapertura 2): nivel del informe. "summary" = el informe de siempre (REQ-001 a REQ-011);
+# "detailed" suma estructura de pagina, estilos y funciones (REQ-013/014). Un valor desconocido es
+# "summary": ante la duda NO se habla mas de lo que el usuario pidio.
+# ---------------------------------------------------------------------------
+LEVEL_SUMMARY = "summary"
+LEVEL_DETAILED = "detailed"
+_LEVEL_ALIASES = {"detailed": LEVEL_DETAILED, "detallado": LEVEL_DETAILED, "summary": LEVEL_SUMMARY, "resumido": LEVEL_SUMMARY}
+
+
+def normalize_level(value: Any) -> str:
+    """'detallado'/'detailed' -> 'detailed'; cualquier otra cosa (None, vacio, tipo raro) -> 'summary'."""
+    return _LEVEL_ALIASES.get(value.strip().lower(), LEVEL_SUMMARY) if isinstance(value, str) else LEVEL_SUMMARY
+
+
+# REQ-013: pistas de estilo que se pueden contar en una frase corta.
+_DARK_BG = re.compile(r"(?i)(?:--[\w-]*(?:bg|background|fondo|canvas)[\w-]*|background(?:-color)?)\s*:\s*#(?:[0-3][0-9a-f]{5}|[0-3][0-9a-f]{2})\b")
+_FONT_FAMILY = re.compile(r"""(?i)font-family\s*:\s*["']?([A-Za-z][A-Za-z0-9 \-]{1,30}?)["']?\s*[,;}]""")
+# REQ-014: definiciones de funcion (JS/TS y Python) y listeners.
+_FUNC_DEF = re.compile(
+    r"""^\s*(?:export\s+)?(?:async\s+)?(?:function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\("""
+    r"""|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>"""
+    r"""|def\s+([A-Za-z_][\w]*)\s*\()"""
+)
+_LISTENER = re.compile(r"""\.addEventListener\(\s*["'](\w+)["']""")
+_EVENT_WORDS = {"click": "el clic", "submit": "el envío del formulario", "change": "el cambio", "input": "lo que se escribe",
+                "keydown": "una tecla", "load": "la carga de la página", "scroll": "el scroll", "resize": "el cambio de tamaño"}
+
+
 def _decode_partial(raw: str, start: int) -> tuple[str, int, bool]:
     """Decodifica un string JSON desde `start` hasta donde llego. Devuelve
     (texto, nuevo inicio, si el string ya cerro). Una secuencia de escape
@@ -195,8 +224,16 @@ def _strip_tags(html: str) -> str:
 class LiveNarrator:
     """Recorre en vivo el codigo de UNA tool-call (write/edit/bash)."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, level: str = LEVEL_SUMMARY) -> None:
         self.name = name
+        self.level = normalize_level(level)
+        # Estado de los bloques multi-linea (REQ-013): <style> y <script> se resumen UNA vez cada uno.
+        self._in_style = False
+        self._style_seen: set[str] = set()
+        self._last_comment: str | None = None
+        # REQ-015: la PRIMERA frase de comentario de un archivo detallado es la presentacion del diseno;
+        # se marca como `lead` para que el tope de la cola de voz nunca la descarte.
+        self.lead_phrase: str | None = None
         self.field = _CODE_FIELD.get(name)
         self.raw = ""
         self.ext = ""
@@ -277,6 +314,8 @@ class LiveNarrator:
         comment = self._comment(stripped)
         if comment:
             found.append(comment)
+            if self.level == LEVEL_DETAILED and self.lead_phrase is None and self.name != "bash":
+                self.lead_phrase = _limit(redact(comment))
         title = re.search(r"(?i)<title>(.*?)</title>", stripped)
         if title and _strip_tags(title.group(1)):
             found.append(f"Título: {_strip_tags(title.group(1))}")
@@ -308,7 +347,70 @@ class LiveNarrator:
         if target:
             host = urlparse(target.group(1)).netloc or target.group(1)
             found.append(f"Pido datos a {host}")
+        if self.level == LEVEL_DETAILED:
+            found.extend(self._describe_detailed(stripped, comment))
+        self._last_comment = comment
         return found
+
+    # -- REQ-013 / REQ-014: solo nivel "detailed" ------------------------------------------------
+    def _describe_detailed(self, stripped: str, comment: str | None) -> list[str]:
+        """Estructura de la pagina, estilos y funciones. Solo para archivos de pagina/codigo: un
+        `bash` que escribe texto no es una pagina, asi que no se inventa 'pie de pagina' por una palabra."""
+        if self.name == "bash":
+            return []
+        found: list[str] = []
+        lower = stripped.lower()
+        if re.search(r"<header\b", lower):
+            found.append("Armo el encabezado de la página")
+        if re.search(r"<nav\b", lower) and not re.search(r"sidebar|side-bar|barra-lateral|menu-lateral", lower):
+            found.append("Armo el menú de navegación")
+        if re.search(r"<footer\b", lower):
+            found.append("Armo el pie de página")
+        if re.search(r"<main\b", lower):
+            found.append("Armo el contenido principal")
+        if re.search(r"<section\b", lower):
+            klass = re.search(r"""class\s*=\s*["']([\w-]+)""", stripped)
+            found.append(f"Defino una sección: {_humanize(klass.group(1))}" if klass else "Defino una sección")
+        # estilos: <style> abre un bloque; cada pista se dice UNA vez
+        if "<style" in lower:
+            self._in_style = True
+        if self._in_style:
+            hints = self._style_hints(stripped)
+            fresh = [h for h in hints if h not in self._style_seen]
+            self._style_seen.update(fresh)
+            if fresh:
+                found.append("Aplico estilos: " + ", ".join(fresh))
+        if "</style>" in lower:
+            self._in_style = False
+        # funciones JS/Python y listeners
+        func = _FUNC_DEF.match(stripped)
+        if func:
+            name = _humanize(next(g for g in func.groups() if g))
+            # El comentario suele empezar con un verbo ("renderiza la tabla..."): se une con ", que" para no
+            # decir "para renderiza".
+            purpose = f", que {self._last_comment}" if self._last_comment else ""
+            found.append(f"Defino la función {name}{purpose}")
+        listener = _LISTENER.search(stripped)
+        if listener:
+            what = _EVENT_WORDS.get(listener.group(1).lower(), f"el evento {listener.group(1)}")
+            found.append(f"Conecto {what} de un elemento")
+        return found
+
+    @staticmethod
+    def _style_hints(line: str) -> list[str]:
+        hints: list[str] = []
+        if _DARK_BG.search(line):
+            hints.append("fondo oscuro")
+        font = _FONT_FAMILY.search(line)
+        if font and font.group(1).strip().lower() not in {"sans-serif", "serif", "monospace", "system-ui", "inherit"}:
+            hints.append(f"tipografía {font.group(1).strip()}")
+        if re.search(r"(?i)display\s*:\s*grid\b", line):
+            hints.append("diseño en grilla")
+        elif re.search(r"(?i)display\s*:\s*flex\b", line):
+            hints.append("diseño flexible")
+        if re.search(r"(?i)@media\b[^{]*(?:max|min)-width", line):
+            hints.append("adaptable a celular")
+        return hints
 
 
 # REQ-010: avance del plan de tareas (lo usa la tool `todowrite`).

@@ -72,6 +72,17 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM spec exe-metadatos-version: bloque de version del .exe (empresa, producto, descripcion, version),
+REM generado desde backend\app\version.py. Si falla, el build CORTA: no se publica un .exe sin metadatos
+REM por un error callado.
+echo.
+echo Generando metadatos de version del .exe...
+"%BUILD_VENV%\Scripts\python.exe" build_version_info.py "build\version_info.txt"
+if errorlevel 1 (
+    echo ERROR: no se pudieron generar los metadatos de version del .exe.
+    exit /b 1
+)
+
 echo.
 echo Compilando Vision.exe (onefile, sin consola de PyInstaller extra)...
 "%BUILD_VENV%\Scripts\python.exe" -m PyInstaller ^
@@ -79,6 +90,7 @@ echo Compilando Vision.exe (onefile, sin consola de PyInstaller extra)...
     --console ^
     --name Vision ^
     --icon "%~dp0frontend\assets\favicon.ico" ^
+    --version-file "%~dp0build\version_info.txt" ^
     --add-data "%~dp0build\embed;embed" ^
     --distpath "." ^
     --workpath "build" ^

@@ -207,6 +207,11 @@ def _make_window(root: Any, tk: Any, req: _AlertRequest) -> None:
                 pass
 
     def _dismiss() -> None:
+        # PQ-006 (opcion (a), ADR-018): cerrar con la X (o con Alt+F4) significa 'dejame en paz con esto'. Si habia un Posponer pendiente
+        # de este MISMO item (de un disparo anterior), se cancela; si no, la alarma volveria a sonar aunque la hayas descartado a mano.
+        # Solo toca la clave de este item: no afecta a otros items ni al mismo id en el otro tipo de reloj (agente/alarma).
+        with _snoozed_lock:
+            _snoozed.pop((req.kind, req.item_id), None)
         _stop_sound()
         _stop_bell()
         win.destroy()

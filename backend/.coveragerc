@@ -6,8 +6,10 @@ omit =
     */__pycache__/*
 
 [report]
-# Piso anti-regresion (medido 2026-09-24 con 0.17.8: 62.4%, sin e2e). Subirlo al mejorar; nunca bajarlo.
-fail_under = 62
+# Piso anti-regresion. Medido 2026-10-04 con 0.23.6 en la suite COMPLETA (con e2e): 90.27 %; sin e2e: 89.3 %.
+# Se fija en 88 (no en 90): deja 2 puntos de margen para que una oscilacion normal no rompa la suite, y sigue
+# atrapando una caida real. Historia: 62 (2026-09-24, 0.17.8) -> 88 (2026-10-04). Subirlo al mejorar; nunca bajarlo.
+fail_under = 88
 show_missing = True
 skip_empty = True
 precision = 1

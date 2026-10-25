@@ -30,6 +30,7 @@ Como el usuario definio "sin persistencia, solo memoria" para esta v1
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -63,6 +64,10 @@ class UserTurn:
     # sobrevivan si este mensaje queda EN COLA (no se pierden las
     # imagenes esperando a que termine el turno activo).
     images: list[str] | None = None
+    # REQ-003 (spec adjuntar-archivos-chat): adjuntos de ARCHIVO ya validados
+    # por el endpoint ({name, path, size, mime, kind, inplace, ...}). Viajan con
+    # el turno para sobrevivir si el mensaje queda en cola.
+    attachments: list[dict] | None = None
     # REQ-006/009 (spec asistente-contextual-voz, Modo Cerebro): True si
     # este turno se origino en el modo Cerebro (conversacion por voz
     # continua) -- activa la confirmacion hablada antes de ejecutar tools
@@ -74,6 +79,41 @@ class UserTurn:
     # prendido "Hablar informe tecnico" (y "Leer en voz alta"): el turno narra
     # el codigo en vivo, pide comentarios y anuncia el avance del plan.
     narrate: bool = False
+    # REQ-012 (reapertura 2): 'summary' | 'detailed' (ver tech_report.normalize_level).
+    narrate_level: str = "summary"
+
+
+# Marca con la que arranca el aviso de rutas de los adjuntos (ver `app/attachments.py::NOTICE_HEADER`).
+_ATTACHMENT_NOTICE_MARK = "[Archivos adjuntos en la carpeta de la sesión"
+
+
+def _edited_user_content(old_content: Any, new_text: str) -> Any:
+    """REQ-003 e (spec adjuntar-archivos-chat): el contenido de un mensaje de usuario editado CONSERVA lo que no
+    es el texto escrito: las imagenes (bloques `image_url` del formato lista) y el aviso de rutas de los
+    archivos adjuntos. Antes se reemplazaba todo por `{"content": new_text}` y el agente editaba "a ciegas":
+    ya no veia las imagenes ni sabia que archivos habia adjuntado el usuario.
+
+    Solo cambia el texto; el formato de salida es el mismo que tenia (string plano si era string y no
+    habia nada que conservar, lista de bloques si habia imagenes)."""
+    old_text = ""
+    image_blocks: list[Any] = []
+    if isinstance(old_content, str):
+        old_text = old_content
+    elif isinstance(old_content, list):
+        for block in old_content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                old_text += block.get("text", "")
+            elif isinstance(block, dict) and block.get("type") == "image_url":
+                image_blocks.append(block)
+    # El aviso de rutas va al FINAL del texto que ve el LLM; se lo separa del texto del usuario.
+    notice = ""
+    mark_at = old_text.find(_ATTACHMENT_NOTICE_MARK)
+    if mark_at != -1:
+        notice = old_text[mark_at:].strip()
+    text = f"{new_text}\n\n{notice}" if notice and new_text.strip() else (notice or new_text)
+    if not image_blocks:
+        return text
+    return [{"type": "text", "text": text}, *image_blocks]
 
 
 @dataclass
@@ -120,6 +160,20 @@ class SessionState:
     turns: dict[str, UserTurn] = field(default_factory=dict)
     queue_order: list[str] = field(default_factory=list)
     active_turn_id: str | None = None
+    # REQ-014 e (spec fix-detener-y-progreso-visible): el "¿esta en la cola?" y el "sacalo" de cada operacion de la cola van
+    # juntos bajo este lock. Bug real (diagnostico, seccion D): `remove_queued_turn` hacia check-then-act sin proteccion y el
+    # DELETE corria en el threadpool mientras el event loop desencolaba -> ValueError -> 500 (y el turno arrancaba igual).
+    # Borrar y Detener ahora corren en el event loop (`async def`); reordenar sigue en el threadpool: el lock cubre ese y
+    # cualquier otro llamador de otro hilo.
+    _queue_lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+    # REQ-014 b: turnos que el usuario BORRO cuando ya habian arrancado. Borrarlo equivale a Detener ese turno y descartarlo:
+    # al terminar (ver `_launch_turn` en app/main.py) se quita de memoria y de SQLite lo que ese turno agrego.
+    discard_turn_ids: set[str] = field(default_factory=set)
+    # REQ-014 b: mensajes que YA estaban en `messages` antes del turno activo (referencias a los mismos dicts). Todo lo que
+    # quede DESPUES del ultimo de ellos es del turno activo (su mensaje de usuario y su salida, aunque una edicion REQ-004
+    # haya movido el mensaje al final o una compactacion haya rearmado la lista). Lo fija `_launch_turn` al arrancar y lo
+    # refina el loop despues de compactar; None = no hay turno activo.
+    turn_baseline: list[dict[str, Any]] | None = field(default=None, repr=False)
 
     # --- REQ-001/002/004: estado de "stop" solicitado por el usuario ----
     # Se marca en True cuando el usuario pide detener el turno activo (via
@@ -184,6 +238,17 @@ class SessionState:
     # informe tecnico hablado (UserTurn.narrate). La lee la tool `todowrite`
     # para anunciar el avance del plan; la fija run_turn al empezar cada turno.
     narrate: bool = False
+    # REQ-012: nivel del turno en curso; lo lee el loop al crear el narrador.
+    narrate_level: str = "summary"
+
+    # REQ-006 (spec adjuntar-archivos-chat): modelo que esta usando el turno
+    # ACTIVO (lo fija el loop en cada paso, tambien tras un salto automatico).
+    # La tool `read` lo necesita para transcribir un PDF escaneado con el mismo
+    # modelo que conversa, sin que el modelo tenga que pasarlo como argumento.
+    active_model: str | None = None
+    # spec leer-imagenes-pdf-word REQ-006: archivos (ruta resuelta) cuyas imagenes ya se leyeron con images=true en esta sesion;
+    # no se vuelve a preguntar por ellos. Memoria de proceso: al reiniciar Vision se vuelve a preguntar (nunca se lee de mas).
+    image_read_ok: set[str] = field(default_factory=set)
 
     # --- REQ-003 (spec controles-seguridad-optimizacion-lightspeed-bigquery):
     # guardrail estructural de riesgo en BigQuery (DROP/DELETE/TRUNCATE/
@@ -198,6 +263,21 @@ class SessionState:
     # Solo en memoria, se resetea si se reinicia el backend -- consistente
     # con el resto del estado de sesion (ver AGENTS.md).
     bq_risky_seen: set[str] = field(default_factory=set)
+    # PQ-005 / BL-023: lo mismo para Oracle, en un set APARTE: aprobar un DELETE en BigQuery no aprueba el mismo texto en Oracle.
+    oracle_risky_seen: set[str] = field(default_factory=set)
+    # spec office-outlook-teams-mcp REQ-M07/M07b: lo mismo para las acciones que ESCRIBEN en Outlook y Teams (`app/m365/policy.py`), en un set APARTE: autorizar un mensaje de
+    # Teams no autoriza una cancelacion. `m365_untrusted_read` = en este turno se leyo texto que escribio OTRA persona (correo, chat, transcripcion): es lo que vuelve riesgosa,
+    # en modo Auto, una accion que le habla a un tercero. Solo en memoria, igual que el resto del estado de sesion.
+    m365_write_seen: set[str] = field(default_factory=set)
+    m365_untrusted_read: bool = False
+    # Acciones en dos pasos del conector (preparar y confirmar): la persona autoriza el PRIMER paso (donde ve destinatarios, texto, sala y hora) y esa autorizacion vale UNA vez
+    # para el paso que confirma. Aca queda el nombre de la herramienta de confirmacion habilitada (`m365_confirm_booking`, `m365_send_drafted_message`).
+    m365_prepared: set[str] = field(default_factory=set)
+    # spec office-com-automatizacion REQ-016/REQ-019: lo mismo para lo que ESCRIBE en Excel (`app/office/policy.py`), en sets APARTE de los de Outlook y Teams: autorizar una escritura en Excel no autoriza un
+    # mensaje de Teams. `office_untrusted_read` = en este turno se leyeron celdas (contenido que pudo escribir otra persona o un sistema): es lo que vuelve riesgoso, en modo Auto, escribir en un libro que la persona
+    # no nombro. Solo en memoria, igual que el resto del estado de sesion.
+    office_write_seen: set[str] = field(default_factory=set)
+    office_untrusted_read: bool = False
 
     # --- REQ-002 (spec controles-seguridad-optimizacion-lightspeed-bigquery),
     # FIX 2026-09-21: bug real reportado por el usuario -- "el sistema de
@@ -249,9 +329,7 @@ class SessionState:
         conexion nueva abierta para un mensaje B que se encola mientras A
         esta en curso veria TAMBIEN el contenido de A mezclado con el de
         B, que no es lo que el usuario espera de esa conexion."""
-        turn_id = (
-            None if event_type in self._TURNLESS_EVENT_TYPES else self.active_turn_id
-        )
+        turn_id = None if event_type in self._TURNLESS_EVENT_TYPES else self.active_turn_id
         event = {"type": event_type, "data": data, "_turn_id": turn_id}
         for q in self._subscriber_queues:
             q.put_nowait(event)
@@ -274,57 +352,89 @@ class SessionState:
         return self.current_task is not None and not self.current_task.done()
 
     # --- REQ-003/005/008/009: helpers de la cola de turnos --------------
+    # REQ-014 e: cada helper hace su chequeo y su cambio de una sola vez bajo `_queue_lock` (ver el campo).
     def enqueue_turn(self, turn: UserTurn, position: int | None = None) -> None:
         """Agrega un turno a la cola. `position=None` lo agrega al final
         (comportamiento normal al mandar un mensaje nuevo); un indice
         explicito se usa al reordenar (REQ-008)."""
-        self.turns[turn.id] = turn
-        if position is None:
-            self.queue_order.append(turn.id)
-        else:
-            self.queue_order.insert(position, turn.id)
+        with self._queue_lock:
+            self.turns[turn.id] = turn
+            if position is None:
+                self.queue_order.append(turn.id)
+            else:
+                self.queue_order.insert(position, turn.id)
 
     def reorder_queue(self, turn_id: str, new_position: int) -> bool:
         """REQ-008: mueve un turno YA en cola a una nueva posicion. Devuelve
         False si el turno no esta en la cola (ya se esta procesando, o no
         existe)."""
-        if turn_id not in self.queue_order:
-            return False
-        self.queue_order.remove(turn_id)
-        new_position = max(0, min(new_position, len(self.queue_order)))
-        self.queue_order.insert(new_position, turn_id)
-        return True
+        with self._queue_lock:
+            if turn_id not in self.queue_order:
+                return False
+            self.queue_order.remove(turn_id)
+            new_position = max(0, min(new_position, len(self.queue_order)))
+            self.queue_order.insert(new_position, turn_id)
+            return True
 
     def dequeue_next_turn(self) -> UserTurn | None:
         """Saca y devuelve el siguiente turno a procesar (posicion 0 de la
         cola), o None si no hay ninguno esperando."""
-        if not self.queue_order:
-            return None
-        next_id = self.queue_order.pop(0)
-        return self.turns.get(next_id)
+        with self._queue_lock:
+            if not self.queue_order:
+                return None
+            next_id = self.queue_order.pop(0)
+            return self.turns.get(next_id)
 
     def remove_queued_turn(self, turn_id: str) -> bool:
         """REQ-005/008: elimina un turno de la cola SIN llegar a
         procesarlo. Devuelve False si no estaba en cola (ya en curso, ya
-        terminado, o inexistente)."""
-        if turn_id not in self.queue_order:
-            return False
-        self.queue_order.remove(turn_id)
-        turn = self.turns.get(turn_id)
-        if turn is not None:
-            turn.status = TURN_STATUS_CANCELLED
-        return True
+        terminado, o inexistente). REQ-014 e: si el desencolado le gana de
+        mano, devuelve False (nunca ValueError)."""
+        with self._queue_lock:
+            if turn_id not in self.queue_order:
+                return False
+            self.queue_order.remove(turn_id)
+            turn = self.turns.get(turn_id)
+            if turn is not None:
+                turn.status = TURN_STATUS_CANCELLED
+            return True
 
     def edit_queued_turn(self, turn_id: str, new_text: str) -> bool:
         """REQ-005: edita el texto de un turno que sigue en cola (todavia
         no arranco a procesarse). Devuelve False si no esta en cola."""
-        if turn_id not in self.queue_order:
-            return False
-        turn = self.turns.get(turn_id)
-        if turn is None:
-            return False
-        turn.text = new_text
-        return True
+        with self._queue_lock:
+            if turn_id not in self.queue_order:
+                return False
+            turn = self.turns.get(turn_id)
+            if turn is None:
+                return False
+            turn.text = new_text
+            return True
+
+    # --- REQ-014 b: lo que agrego el turno activo, para descartarlo ------
+    def active_turn_start_index(self) -> int:
+        """Indice de `messages` donde empieza lo del turno activo: justo despues del ULTIMO mensaje de `turn_baseline` que
+        sigue en la lista (identidad, no igualdad: dos mensajes con el mismo texto son distintos). Sin baseline, `len`
+        (no hay nada del turno que se pueda distinguir con certeza: no se toca nada). Lo usan el descarte de un turno
+        borrado y el borrado de historial viejo con otro turno corriendo (que no debe tocar lo del turno en curso)."""
+        baseline = self.turn_baseline
+        if baseline is None:
+            return len(self.messages)
+        # Las referencias de `baseline` mantienen vivos esos dicts: sus `id()` no se reutilizan mientras dure el turno.
+        known = {id(m) for m in baseline}
+        for i in range(len(self.messages) - 1, -1, -1):
+            if id(self.messages[i]) in known:
+                return i + 1
+        return 0
+
+    def discard_active_turn_messages(self) -> int:
+        """REQ-014 b: quita de `messages` el mensaje de usuario del turno activo y todo lo que ese turno agrego (texto parcial,
+        tool-calls y sus resultados, notas internas). Los turnos anteriores quedan intactos. Devuelve cuantos quito.
+        Se llama con el turno YA terminado (nadie mas agrega mensajes en ese momento)."""
+        start = self.active_turn_start_index()
+        removed = len(self.messages) - start
+        del self.messages[start:]
+        return removed
 
     @property
     def queue_length(self) -> int:
@@ -355,8 +465,13 @@ class SessionState:
         si is_busy es True, pero se chequea igual)."""
         for i in range(len(self.messages) - 1, -1, -1):
             if self.messages[i].get("role") == "user":
-                self.messages.pop(i)
-                self.messages.append({"role": "user", "content": new_text})
+                old = self.messages.pop(i)
+                self.messages.append(
+                    {
+                        "role": "user",
+                        "content": _edited_user_content(old.get("content"), new_text),
+                    }
+                )
                 return True
         return False
 
@@ -385,26 +500,45 @@ class SessionStore:
         self._sessions: dict[str, SessionState] = {}
 
     def get_or_create(self, session_id: str) -> SessionState:
-        if session_id not in self._sessions:
-            session = SessionState(session_id=session_id)
-            # persistencia-sqlite-sesiones REQ-003: si esta sesion ya
-            # existe en disco (backend reiniciado, o sesion abierta desde
-            # otra maquina compartiendo la misma carpeta de proyecto),
-            # reconstruye el historial ANTES de que nada mas la use --
-            # asi el primer mensaje nuevo ya tiene contexto real en vez
-            # de arrancar de cero silenciosamente.
-            from app.persistence import (
-                service as persistence,
-            )  # import diferido: evita ciclo
+        existing = self._sessions.get(session_id)
+        if existing is not None:
+            return existing
+        session = SessionState(session_id=session_id)
+        # persistencia-sqlite-sesiones REQ-003: si esta sesion ya
+        # existe en disco (backend reiniciado, o sesion abierta desde
+        # otra maquina compartiendo la misma carpeta de proyecto),
+        # reconstruye el historial ANTES de que nada mas la use --
+        # asi el primer mensaje nuevo ya tiene contexto real en vez
+        # de arrancar de cero silenciosamente.
+        from app.persistence import (
+            service as persistence,
+        )  # import diferido: evita ciclo
 
-            if persistence.session_exists_in_db(session_id):
-                session.messages = persistence.load_session_messages(session_id)
-                session.todos = persistence.load_session_todos(session_id)
-            self._sessions[session_id] = session
-        return self._sessions[session_id]
+        if persistence.session_exists_in_db(session_id):
+            session.messages = persistence.load_session_messages(session_id)
+            session.todos = persistence.load_session_todos(session_id)
+        # Revision 2026-10-09: `setdefault`, no asignacion directa. Los endpoints sync corren en el threadpool: si otro hilo
+        # (o el event loop) creo la sesion mientras esta se leia de SQLite, gana la que ya esta guardada -- nunca se reemplaza
+        # una sesion que puede tener un turno en curso por una copia nueva (Detener no la veria y un mensaje nuevo arrancaria
+        # otro turno en paralelo).
+        return self._sessions.setdefault(session_id, session)
 
     def get(self, session_id: str) -> SessionState | None:
         return self._sessions.get(session_id)
+
+    def get_or_restore(self, session_id: str) -> SessionState | None:
+        """persistencia-sqlite-sesiones REQ-003 ("cualquier request para esa
+        sesion"): la sesion en memoria o, si solo esta en SQLite (Vision se
+        reinicio), reconstruida desde disco con `get_or_create`. None si no
+        existe en ningun lado: a diferencia de `get_or_create`, consultar una
+        sesion inexistente nunca deja creada una vacia en memoria. Antes, los
+        endpoints que usaban `get()` (tareas, contexto, limpiar, compactar)
+        respondian vacio o 404 tras un reinicio aunque la conversacion
+        estuviera guardada."""
+        session = self._sessions.get(session_id)
+        if session is not None:
+            return session
+        return self.get_or_create(session_id) if self.exists(session_id) else None
 
     def exists(self, session_id: str) -> bool:
         """REQ-007 (parada-y-cola-mensajes): distingue 'esta sesion nunca

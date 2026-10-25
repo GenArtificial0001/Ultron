@@ -48,6 +48,10 @@ import pytest
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 _REPO_ROOT = _BACKEND_DIR.parent
 
+# Limite por test de los e2e (segundos). pytest.ini fija 60 s para toda la suite; los e2e del aviso de modelo lento duermen 74 s a
+# proposito. 300 s es el valor con el que se corrieron las suites completas verdes (full_suite_v5/v6/v8).
+E2E_TIMEOUT_S = 300
+
 _SESSION_TMP = Path(tempfile.mkdtemp(prefix="vision-pytest-"))
 _DATA_DIR = _SESSION_TMP / "data-dir"
 _HOME_DIR = _SESSION_TMP / "home"
@@ -161,6 +165,11 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     # Marcado automatico: un test que usa TestClient o el DB maestro es de
     # integracion; el resto es unit. Asi `-m unit` da un ciclo de feedback rapido.
     for item in items:
+        # Los e2e esperan de verdad (Chromium real, proveedor falso que duerme > 30 s, herramientas lentas): con el limite de 60 s
+        # de pytest.ini, `pytest` a secas moria en test_e2e_slow_model_notice.py. Se les da E2E_TIMEOUT_S salvo que el test ya
+        # declare su propio `@pytest.mark.timeout`. El resto de la suite conserva los 60 s como guardian contra cuelgues.
+        if item.get_closest_marker("e2e") and not item.get_closest_marker("timeout"):
+            item.add_marker(pytest.mark.timeout(E2E_TIMEOUT_S))
         if any(item.get_closest_marker(m) for m in ("unit", "integration", "e2e")):
             continue
         module_globals = getattr(item.module, "__dict__", {})
@@ -271,3 +280,28 @@ def tmp_master_db(tmp_path, monkeypatch):
     db = tmp_path / "vision.db"
     monkeypatch.setattr(mi, "master_db_path", lambda: db)
     return db
+
+
+@pytest.fixture(autouse=True)
+def _no_real_windows_hello():
+    """spec gestor-conexiones B3: `app.main` instala Windows Hello como verificador del desbloqueo. Ningun test debe abrir esa ventana de Windows (le
+    apareceria al usuario en medio de la bateria y la espera duraria 90 s): antes de cada test no hay verificador y el estado queda bloqueado. El test que
+    necesite desbloquear instala uno falso con `secret_access.set_verifier(...)`."""
+    from app import secret_access
+
+    secret_access.set_verifier(None)
+    secret_access.lock()
+    yield
+    secret_access.set_verifier(None)
+    secret_access.lock()
+
+
+@pytest.fixture(autouse=True)
+def _m365_connector_for_tests(monkeypatch):
+    """ULTRON: la direccion del conector de Microsoft 365 se configura (vacia de fabrica). Los tests heredados de la version de origen
+    suponen una ya puesta: se fija una de prueba (sin red: el bloqueo de red de arriba sigue valiendo). Un test que quiera la de fabrica
+    la vuelve a vaciar con `monkeypatch.setattr(auth, "CONNECTOR_URL", "")`."""
+    from app.m365 import auth as m365_auth
+
+    monkeypatch.setattr(m365_auth, "CONNECTOR_URL", "https://conector-m365.test")
+    yield

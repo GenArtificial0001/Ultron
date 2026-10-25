@@ -9,6 +9,7 @@ from __future__ import annotations
 from app.tools.base import ToolRegistry
 from app.tools.bash import bash_tool
 from app.tools.chart import render_chart_tool
+from app.tools.confluence import CONFLUENCE_TOOLS
 from app.tools.dbquery import (
     bigquery_list_tables_tool,
     bigquery_query_tool,
@@ -20,6 +21,7 @@ from app.tools.dbquery import (
     sharepoint_list_items_tool,
     sharepoint_list_lists_tool,
 )
+from app.tools.dashboard_export import exportar_dashboard_tool
 from app.tools.decisions import record_decision_tool
 from app.tools.filesystem import edit_tool, glob_tool, grep_tool, read_tool, write_tool
 from app.tools.question import question_tool
@@ -29,6 +31,10 @@ from app.tools.webfetch import webfetch_tool
 
 
 def build_registry() -> ToolRegistry:
+    # spec office-outlook-teams-mcp: import DIFERIDO. `app.m365.tools` importa `app.tools.base` (que carga este paquete); importarlo arriba armaria un ciclo.
+    from app.m365.tools import M365_TOOLS
+    from app.office.tools import OFFICE_TOOLS  # spec office-com-automatizacion: tambien diferido, mismo motivo que M365_TOOLS
+
     registry = ToolRegistry()
     for tool in (
         read_tool,
@@ -52,6 +58,10 @@ def build_registry() -> ToolRegistry:
         graph_directory_manager_tool,
         render_chart_tool,
         record_decision_tool,
+        exportar_dashboard_tool,
+        *CONFLUENCE_TOOLS,
+        *M365_TOOLS,
+        *OFFICE_TOOLS,
     ):
         registry.register(tool)
     return registry

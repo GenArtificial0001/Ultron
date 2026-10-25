@@ -141,6 +141,13 @@ def list_available_skills_xml(session_id: str | None = None) -> str:
         for s in discover_local_skills(session_id):
             by_name[s["name"]] = s  # local pisa global en caso de colision de nombre
         skills = sorted(by_name.values(), key=lambda s: s["name"])
+    # spec interruptores-conexiones-skills REQ-009: una skill apagada no se le muestra al modelo (ni nombre ni descripcion). El interruptor GENERAL de las globales
+    # sigue mandando antes (en `discover_skills`); este filtro es POR skill y tambien alcanza a las locales de la sesion.
+    from app import switches  # import diferido: `switches` importa conexiones, que importan tools
+
+    off = switches.disabled_skill_names()
+    if off:
+        skills = [s for s in skills if s["name"] not in off]
     if not skills:
         return ""
     items = "\n".join(
@@ -340,6 +347,12 @@ def _skill_execute(args: dict, session: Any = None) -> str:
         all_skills = discover_skills()
         if session_id:
             all_skills = all_skills + discover_local_skills(session_id)
+        from app import switches
+
+        if not switches.is_skill_enabled(name):
+            return (
+                f"Error: la skill '{name}' esta desactivada. Pedile al usuario que la active en el panel rapido > Skills si quiere usarla."
+            )
         for s in reversed(all_skills):
             if s["name"] == name:
                 skill_file = Path(s["path"])
@@ -357,7 +370,7 @@ def _skill_execute(args: dict, session: Any = None) -> str:
                 )
                 return f'<skill_content name="{name}">\n{body}\n</skill_content>{siblings_txt}'
 
-        disponibles = ", ".join(s["name"] for s in all_skills) or "(ninguna)"
+        disponibles = ", ".join(s["name"] for s in all_skills if switches.is_skill_enabled(s["name"])) or "(ninguna)"
         return f"Error: no existe la skill '{name}'. Disponibles: {disponibles}"
     finally:
         elapsed_ms = (time.monotonic() - start) * 1000

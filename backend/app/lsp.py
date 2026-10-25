@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,19 @@ logger = logging.getLogger(__name__)
 LANGUAGE_SERVERS: dict[str, str] = {".py": "pylsp"}
 MAX_DIAGNOSTICS_PER_FILE = 20
 _DIAGNOSTICS_TIMEOUT = 5.0
+# ULTRON (hallazgo 2026-10-25): en una PC lenta o con el antivirus revisando un entorno recien instalado, pylsp tardo 10 s en
+# responder `initialize`. El cliente mandaba el archivo sin esperarlo y los 5 s de arriba se iban en el arranque: el primer
+# diagnostico salia vacio siempre. Ahora espera la respuesta del `initialize` con su propio margen, aparte del de cada archivo.
+_INIT_TIMEOUT = 30.0
+# lsp-se-recupera-solo REQ-002: si pylsp muere se reinicia, pero acotado -- como mucho MAX_RESTARTS veces dentro de
+# RESTART_WINDOW_S segundos, para que un pylsp que no logra arrancar no entre en un bucle de lanzamientos.
+MAX_RESTARTS = 3
+RESTART_WINDOW_S = 60.0
+
+
+def _now() -> float:
+    """Reloj del cliente (separado para poder simular el paso del tiempo en los tests sin tocar el de asyncio)."""
+    return time.monotonic()
 
 
 def _find_pylsp_command() -> list[str] | None:
@@ -68,10 +82,17 @@ class _LspClient:
         self._diagnostics_by_uri: dict[str, list[dict[str, Any]]] = {}
         self._reader_thread: threading.Thread | None = None
         self._command = _find_pylsp_command()
+        self._restarts: list[float] = []  # instantes (monotonic) de los reinicios recientes
+        self._ever_started = False  # distingue "murio" de "todavia no arranco" (evita lanzar dos a la vez)
+        self._stopped = False  # REQ-004: tras stop() no se reinicia nada
+        self._init_id: int | None = None  # id del `initialize` del proceso actual
+        self._initialized = threading.Event()  # lo prende el thread lector al llegar la respuesta del `initialize`
 
     @property
     def available(self) -> bool:
-        return self._command is not None and self._proc is not None
+        # REQ-003: refleja la realidad. Antes era True mientras existiera el objeto Popen, aunque el proceso
+        # ya hubiera muerto -- por eso nunca se enteraba de que tenia que reiniciarlo.
+        return self._command is not None and self._proc is not None and self._proc.poll() is None
 
     async def start(self) -> None:
         """REQ-002: inicia pylsp o degrada silenciosamente si falta."""
@@ -91,11 +112,14 @@ class _LspClient:
             self._proc = None
             return
 
+        self._ever_started = True
+        self._initialized = threading.Event()  # uno nuevo por proceso: el de un pylsp anterior no cuenta
         self._reader_thread = threading.Thread(
             target=self._read_loop_sync, daemon=True, name="pylsp-reader"
         )
         self._reader_thread.start()
         self._request_id += 1
+        self._init_id = self._request_id
         try:
             await self._send(
                 {
@@ -145,6 +169,8 @@ class _LspClient:
                 if len(raw) < content_length:
                     return  # el proceso cerro el stream a mitad del mensaje
                 message = json.loads(raw)
+                if self._init_id is not None and message.get("id") == self._init_id and "method" not in message:
+                    self._initialized.set()
                 if message.get("method") == "textDocument/publishDiagnostics":
                     params = message.get("params", {})
                     self._diagnostics_by_uri[params.get("uri", "")] = params.get(
@@ -154,46 +180,107 @@ class _LspClient:
             return
         except Exception:
             logger.warning("Error leyendo mensajes de pylsp", exc_info=True)
+        finally:
+            with contextlib.suppress(OSError, ValueError):
+                stream.close()
+
+    def _restart_count_in_window(self) -> int:
+        horizon = _now() - RESTART_WINDOW_S
+        self._restarts = [t for t in self._restarts if t > horizon]
+        return len(self._restarts)
+
+    def _close_stdin(self) -> None:
+        """Cierra el pipe de escritura de un proceso que ya no esta. Sin esto el `BufferedWriter` queda abierto y,
+        al recolectarse, intenta vaciarse contra un pipe roto (`OSError: Invalid argument` ignorada en silencio)."""
+        proc = self._proc
+        if proc is not None and proc.stdin is not None:
+            with contextlib.suppress(OSError, ValueError):
+                proc.stdin.close()
+
+    def _kill_sync(self) -> None:
+        proc = self._proc
+        if proc is not None:
+            with contextlib.suppress(OSError):
+                proc.kill()
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=2)
+        self._close_stdin()
+
+    async def _ensure_running(self) -> bool:
+        """REQ-001/002/004/005: devuelve True si hay un pylsp vivo, reiniciandolo si hizo falta y esta permitido."""
+        if self.available:
+            return True
+        if self._stopped or self._command is None or not self._ever_started:
+            return False
+        self._close_stdin()
+        if self._restart_count_in_window() >= MAX_RESTARTS:
+            return False
+        self._restarts.append(_now())
+        logger.warning("pylsp se reinicio (el proceso habia terminado)")  # REQ-006: una linea, sin traza
+        await self.start()
+        return self.available
+
+    async def _wait_until_initialized(self) -> None:
+        """Espera (sin bloquear el loop) a que pylsp responda el `initialize`, hasta `_INIT_TIMEOUT`. Si no llega, o el proceso
+        muere mientras tanto, sigue igual que antes: el pedido del archivo decide."""
+        waited = 0.0
+        while not self._initialized.is_set() and waited < _INIT_TIMEOUT and self.available:
+            await asyncio.sleep(0.1)
+            waited += 0.1
 
     async def diagnose(self, path: Path) -> list[dict[str, Any]]:
-        """REQ-001/002: pide diagnosticos frescos sin propagar fallos."""
-        if not self.available:
+        """REQ-001/002: pide diagnosticos frescos sin propagar fallos. Si pylsp murio lo reinicia (acotado) y
+        entrega los diagnosticos de ESTA misma llamada, asi el agente no pierde el aviso del archivo que acaba de
+        escribir; antes se quedaba mudo hasta reiniciar Vision."""
+        if self._command is None or self._stopped:
             return []
         uri = path.resolve().as_uri()
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return []  # problema del archivo, no de pylsp: no hay nada que reiniciar
         async with self._lock:
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace")
-                self._diagnostics_by_uri.pop(uri, None)
-                await self._send(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": "textDocument/didOpen",
-                        "params": {
-                            "textDocument": {
-                                "uri": uri,
-                                "languageId": "python",
-                                "version": 1,
-                                "text": text,
-                            }
-                        },
-                    }
-                )
-                waited = 0.0
-                while (
-                    uri not in self._diagnostics_by_uri
-                    and waited < _DIAGNOSTICS_TIMEOUT
-                ):
-                    await asyncio.sleep(0.1)
-                    waited += 0.1
-                return self._diagnostics_by_uri.get(uri, [])
-            except (OSError, ValueError, ConnectionResetError):
-                logger.warning("pylsp dejo de responder", exc_info=True)
-                return []
+            for attempt in range(2):
+                if not await self._ensure_running():
+                    return []
+                await self._wait_until_initialized()
+                try:
+                    self._diagnostics_by_uri.pop(uri, None)
+                    await self._send(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "textDocument/didOpen",
+                            "params": {
+                                "textDocument": {
+                                    "uri": uri,
+                                    "languageId": "python",
+                                    "version": 1,
+                                    "text": text,
+                                }
+                            },
+                        }
+                    )
+                    waited = 0.0
+                    while (
+                        uri not in self._diagnostics_by_uri
+                        and waited < _DIAGNOSTICS_TIMEOUT
+                    ):
+                        await asyncio.sleep(0.1)
+                        waited += 0.1
+                    return self._diagnostics_by_uri.get(uri, [])
+                except (OSError, ValueError, ConnectionResetError):
+                    # Pipe roto: el proceso murio entre el chequeo y la escritura. Se lo remata (para que
+                    # `available` sea False) y el segundo intento lo reinicia; solo el 2o fallo deja traza.
+                    logger.warning("pylsp dejo de responder", exc_info=attempt == 1)
+                    await asyncio.to_thread(self._kill_sync)
+            return []
 
     async def stop(self) -> None:
+        self._stopped = True
         if self._proc is not None:
             with contextlib.suppress(ProcessLookupError, OSError):
                 self._proc.terminate()
+            self._close_stdin()
         # El thread lector es daemon=True: no hace falta unirlo, muere solo
         # apenas `stream.readline()` devuelve vacio (proceso terminado) o el
         # proceso Python principal termina.

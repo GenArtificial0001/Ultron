@@ -19,6 +19,13 @@ openai>=1.50
 pandas>=2.3
 numpy>=2.5
 
+# DuckDB: SQL analitico en proceso para cuando pandas no aguanta el volumen (pedido 2026-10-04).
+# Lee CSV/Parquet/Excel directo del disco sin cargarlo entero en memoria, y consulta DataFrames
+# de pandas con SQL. Rueda de ~12 MB, sin Java ni servidor. PySpark NO se agrega: pesa ~318 MB,
+# exige Java y viajaria a todos los usuarios; solo tendria sentido con un cluster.
+duckdb>=1.4
+
+
 # --- Conector Oracle ---
 oracledb>=3.3
 
@@ -77,3 +84,28 @@ playwright>=1.62
 # (si el indice de pip de tu empresa no lo tiene, instalar con
 # --index-url https://pypi.org/simple)
 win11toast>=0.36
+
+# --- spec adjuntar-archivos-chat REQ-011: leer PDF / Word / renderizar PDF escaneado ---
+# pypdf: texto de PDF digital. python-docx: parrafos y tablas de .docx.
+# pypdfium2: renderiza paginas de un PDF escaneado a imagen (REQ-006).
+# NO se agrega python-multipart: la subida es en streaming del cuerpo crudo.
+pypdf>=5.0
+python-docx>=1.1
+pypdfium2>=4.30
+
+# --- Leer presentaciones PowerPoint (.pptx) (pedido del usuario 2026-10-15) ---
+# A un companero se la tuvieron que instalar a mano: tiene que venir en TODAS las instalaciones (dev, prod y el .exe).
+# Rueda universal de ~470 KB (lxml, Pillow, XlsxWriter). Para que la tool `bash` y las skills (p. ej. skill-interna, SPL en .pptx) puedan leer .pptx sin instalar nada a mano.
+python-pptx>=1.0
+
+# --- Cliente del Model Context Protocol (spec office-outlook-teams-mcp REQ-M01, pedido del usuario 2026-10-17) ---
+# Vision pasa a ser cliente MCP del conector de la empresa (EAKC `mcp-msgraph`: Outlook y Teams) por Streamable HTTP + OAuth con PKCE.
+# Tiene que venir en TODAS las instalaciones (dev, prod y el .exe). Suma httpx, httpx-sse y httpcore (chicos, universales).
+# Piso 1.25 (trae el cliente OAuth) y tope <2: la 2.0.0 existe en el indice de la empresa y NO se probo; se probo la 1.30.0 contra el servidor real.
+mcp>=1.25,<2
+
+# --- Automatizacion de Office por COM (spec office-com-automatizacion REQ-001, pedido del usuario 2026-10-17) ---
+# Vision controla el Excel y el Word que la persona tiene abiertos en SU PC: leer y escribir celdas, convertir .doc/.xls viejos y exportar a PDF.
+# `pywin32` es la puerta a COM en Python. SOLO Windows (el marcador evita que `pip install -r` falle entero en otro sistema por un paquete que no se usa).
+# Se importa de forma diferida: una PC sin pywin32 u Office no rompe el arranque, las herramientas de Office dicen que falta (REQ-010).
+pywin32>=306 ; sys_platform == "win32"

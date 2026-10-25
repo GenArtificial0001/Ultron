@@ -1,0 +1,17 @@
+# Configuracion de ruff de Vision (BL-002, ver .agent/DECISIONS.md ADR-005). SOLO desarrollo: no viaja a prod.
+# Uso (desde backend/):  .venv\Scripts\python.exe -m ruff check app
+#
+# Reglas elegidas por lo que detectan, no por completitud:
+#   F   errores reales de pyflakes (import sin usar, variable que nunca se lee, nombre indefinido)
+#   E9  errores de sintaxis / E902 de E/S
+#   B   bugs probables de bugbear (zip sin strict, raise dentro de except sin encadenar, mutables por defecto...)
+# FUERA a proposito:
+#   BLE001  el repo captura `Exception` generica en el registro de tools y el loop (AGENTS.md: "tools nunca lanzan") y lo suprime con noqa
+#   I001    main.py coloca codigo ENTRE imports (fija la politica de asyncio antes de importar uvicorn): ordenarlos lo rompe
+#   RUF100  ruido de los noqa anteriores
+target-version = "py313"
+line-length = 120
+extend-exclude = [".venv", "__pycache__", "workspace", "browser", "data", "logs"]
+
+[lint]
+select = ["F", "E9", "B"]

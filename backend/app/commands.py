@@ -28,6 +28,70 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# REQ-006 (spec quick-panel-labels-comandos, QA-032): caracteres de Windows
+# invalidos en un nombre de archivo, mas los que ya bloqueaba el import.
+_INVALID_NAME_CHARS = set('\\/:*?"<>|')
+# Nombres reservados del DISPOSITIVO en Windows (distinto de RESERVED_NAMES,
+# que son los comandos del sistema como /init -- estos son a nivel
+# filesystem: "con.md" ni siquiera se puede crear normalmente en NTFS).
+_RESERVED_DEVICE_NAMES = {
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+}
+_MAX_COMMAND_NAME_LENGTH = 64
+# REQ-005 f: tope de tamaño por archivo `.md` importado.
+_MAX_IMPORT_FILE_BYTES = 256 * 1024
+
+
+def validate_command_name(name: str) -> str:
+    """REQ-006: validador UNICO de nombre de comando, compartido por el alta
+    manual, la baja manual y el import -- antes cada camino validaba (o no)
+    por su cuenta y `save_custom_command`/`delete_custom_command` aceptaban
+    `..\\`, escribiendo o borrando fuera de `commands/` (QA-032, reproducido
+    tambien por HTTP porque el DELETE recibe el nombre ya decodificado).
+
+    Es una lista de BLOQUEO, no de permitidos: nombres con tildes, espacios
+    o guiones que ya existen siguen siendo validos -- no rompe comandos ya
+    creados. Devuelve el nombre normalizado (trim + minuscula) o lanza
+    ValueError con un motivo para personas."""
+    normalized = name.strip().lower()
+    if not normalized:
+        raise ValueError("El nombre del comando no puede estar vacío.")
+    if ".." in normalized:
+        raise ValueError(
+            f"'{name}' no es un nombre de comando válido: no puede contener '..'."
+        )
+    if "\\" in normalized or "/" in normalized:
+        raise ValueError(
+            f"'{name}' no es un nombre de comando válido: no puede tener separadores de ruta (\\ o /)."
+        )
+    if any(ch in _INVALID_NAME_CHARS for ch in normalized):
+        raise ValueError(
+            f"'{name}' no es un nombre de comando válido: no puede contener \\ / : * ? \" < > |."
+        )
+    if any(ord(ch) < 32 for ch in normalized):
+        raise ValueError(
+            f"'{name}' no es un nombre de comando válido: tiene caracteres de control."
+        )
+    if normalized.endswith(".") or normalized.endswith(" "):
+        raise ValueError(
+            f"'{name}' no es un nombre de comando válido: no puede terminar en punto o espacio."
+        )
+    if normalized in _RESERVED_DEVICE_NAMES:
+        raise ValueError(
+            f"'{name}' es un nombre reservado del sistema operativo y no se puede usar."
+        )
+    if len(normalized) > _MAX_COMMAND_NAME_LENGTH:
+        raise ValueError(
+            f"El nombre del comando es demasiado largo (máximo {_MAX_COMMAND_NAME_LENGTH} caracteres)."
+        )
+    return normalized
+
+
 # REQ-001/003/004/005/006/007: definicion de los comandos de
 # OpenCode + `/rename` (agregado por pedido explicito, no existe en
 # OpenCode). `kind` determina que tipo de modal arma el frontend:
@@ -72,6 +136,18 @@ SYSTEM_COMMANDS: list[dict[str, Any]] = [
     # (`POST /api/commands/qa-audit/{session_id}` en main.py) para quien
     # este desarrollando Vision -- solo deja de ofrecerse en el menu "/".
     {
+        # spec comando-update-sesiones-publicas REQ-010: SOLO se ofrece (lo filtra `list_commands_endpoint`) si la carpeta de la sesion tiene alguna
+        # conversacion publica de otra persona. Resume lo NUEVO de cada una, etiquetado con el CSID de quien la publico, y lista sus archivos.
+        "name": "update",
+        "description": "Trae lo nuevo de las conversaciones públicas de esta carpeta",
+        "kind": "confirm",
+        "confirm_message": (
+            "Se va a resumir lo nuevo que otras personas escribieron en sus conversaciones públicas de esta carpeta, con el nombre de quien lo "
+            "escribió, y a listar los archivos que crearon o editaron. Solo ve lo que OneDrive ya sincronizó a esta PC."
+        ),
+        "action": "update",
+    },
+    {
         "name": "exit",
         "description": "Cierra esta conversación y empieza una nueva",
         "kind": "confirm",
@@ -112,6 +188,16 @@ SYSTEM_COMMANDS: list[dict[str, Any]] = [
         "description": "Lista las skills locales de la carpeta de esta sesión",
         "kind": "local-skills",
     },
+    {
+        # spec adjuntar-archivos-chat REQ-009 f: libera espacio de los adjuntos de
+        # la sesion. `kind` propio: el frontend abre una vista previa con un
+        # checkbox "Conservar" por archivo (GET .../attachments/cleanup-preview) y
+        # recien despues borra (POST .../attachments/cleanup) -- es destructivo y
+        # borra del DISCO (decision del usuario). Pasa a ser nombre reservado.
+        "name": "limpiar-adjuntos",
+        "description": "Libera espacio: borra los archivos e imágenes adjuntos de esta sesión",
+        "kind": "attachments-cleanup",
+    },
 ]
 
 # REQ-006: nombres reservados -- un comando propio no puede pisar uno de
@@ -146,10 +232,18 @@ def list_custom_commands(project_path: str | None) -> list[dict[str, str]]:
     try:
         for md_file in sorted(directory.glob("*.md")):
             try:
-                prompt = md_file.read_text(encoding="utf-8")
+                # QA-030: "utf-8-sig" tolera el BOM que agregan PowerShell 5.1
+                # y varios editores -- decodifica igual los .md sin BOM.
+                prompt = md_file.read_text(encoding="utf-8-sig")
             except OSError:
                 continue
-            commands.append({"name": md_file.stem, "prompt": prompt})
+            # QA-029: el nombre se normaliza a minuscula aca (regla de
+            # negocio: "el nombre del archivo es el nombre, normalizado a
+            # minuscula"). Antes se devolvia el stem TAL CUAL, asi que un
+            # archivo creado a mano con mayusculas (Resumen.md) no
+            # coincidia con el nombre en minuscula que compara el import,
+            # y lo pisaba sin pedir confirmacion.
+            commands.append({"name": md_file.stem.strip().lower(), "prompt": prompt})
     except OSError:
         logger.warning("No se pudo listar comandos en '%s'", directory, exc_info=True)
         return []
@@ -160,13 +254,12 @@ def save_custom_command(
     project_path: str, name: str, prompt: str
 ) -> list[dict[str, str]]:
     """REQ-008/009: crea o actualiza (mismo nombre = edicion, sobrescribe
-    el .md) un comando propio. Lanza ValueError si el nombre esta vacio,
-    es un nombre reservado del sistema, o el prompt esta vacio -- el
-    endpoint FastAPI traduce esto a un HTTPException 400."""
-    name = name.strip().lower()
+    el .md) un comando propio. Lanza ValueError si el nombre no es valido
+    (REQ-006, `validate_command_name`), es un nombre reservado del sistema,
+    o el prompt esta vacio -- el endpoint FastAPI traduce esto a un
+    HTTPException 400."""
+    name = validate_command_name(name)
     prompt = prompt.strip()
-    if not name:
-        raise ValueError("El nombre del comando no puede estar vacío.")
     if name in RESERVED_NAMES:
         raise ValueError(
             f"'/{name}' es un comando del sistema y no se puede reemplazar."
@@ -183,11 +276,102 @@ def save_custom_command(
 def delete_custom_command(project_path: str, name: str) -> list[dict[str, str]]:
     """REQ-009: borra el .md de un comando propio por nombre. No-op (sin
     error) si no existia -- borrar dos veces lo mismo no deberia romper la
-    UI."""
+    UI. REQ-006: un nombre invalido (ej. '..\\..\\victima') se rechaza con
+    ValueError en vez de intentar borrar fuera de `commands/` -- antes no
+    se validaba nada acá (QA-032)."""
     if project_path:
-        path = _command_file(project_path, name.strip().lower())
+        name = validate_command_name(name)
+        path = _command_file(project_path, name)
         path.unlink(missing_ok=True)
     return list_custom_commands(project_path)
+
+
+def import_commands_from_folder(
+    project_path: str, source_dir: str, overwrite: list[str] | None = None
+) -> dict[str, Any]:
+    """REQ-005 (spec quick-panel-labels-comandos): importa comandos propios
+    desde una carpeta local con un `<nombre>.md` por comando (mismo formato
+    que `commands/` -- el nombre del archivo es el nombre del comando y el
+    contenido es el prompt). NO recursivo: solo los `.md` de la raiz de
+    `source_dir` (regla de negocio de la spec, evita importar por accidente
+    documentacion de subcarpetas).
+
+    Flujo en 2 pasos para no sobrescribir en silencio: un nombre que YA
+    existe en la sesion (comparado SIN distinguir mayusculas, QA-029) se
+    devuelve en `conflicts` y NO se copia, salvo que el llamador lo incluya
+    explicitamente en `overwrite` (el frontend pide confirmacion al usuario
+    y reintenta). Nombres reservados del sistema se rechazan siempre
+    (`reserved`); `.md` invalidos (nombre, vacios, ilegibles o demasiado
+    grandes) van a `invalid`. Dos archivos del mismo lote que dan el mismo
+    nombre normalizado (ej. "Resumen.md" y "resumen .md") NUNCA se pisan
+    entre si: el segundo cae en `conflicts`. Lanza ValueError si la carpeta
+    de origen no existe."""
+    src = Path(source_dir).expanduser()
+    if not src.is_dir():
+        raise ValueError("La carpeta elegida no existe o no es una carpeta.")
+
+    overwrite_set = {n.strip().lower() for n in (overwrite or [])}
+    # QA-029: se compara en minuscula -- `list_custom_commands` ya devuelve
+    # el nombre normalizado, pero el chequeo queda explicito aca tambien
+    # para no depender en silencio de ese detalle si cambia mas adelante.
+    existing = {c["name"].strip().lower() for c in list_custom_commands(project_path)}
+    imported: list[str] = []
+    conflicts: list[str] = []
+    reserved: list[str] = []
+    invalid: list[str] = []
+    seen_in_batch: set[str] = set()
+
+    for md_file in sorted(src.glob("*.md")):
+        if not md_file.is_file():
+            continue
+        try:
+            name = validate_command_name(md_file.stem)
+        except ValueError:
+            invalid.append(md_file.name)
+            continue
+        if name in RESERVED_NAMES:
+            reserved.append(name)
+            continue
+        try:
+            size = md_file.stat().st_size
+        except OSError:
+            invalid.append(md_file.name)
+            continue
+        if size > _MAX_IMPORT_FILE_BYTES:
+            invalid.append(md_file.name)
+            continue
+        try:
+            # QA-030: "utf-8-sig" para que el BOM de PowerShell/otros
+            # editores no quede pegado al inicio del prompt.
+            prompt = md_file.read_text(encoding="utf-8-sig").strip()
+        except (OSError, UnicodeDecodeError):
+            invalid.append(md_file.name)
+            continue
+        if not prompt:
+            invalid.append(md_file.name)
+            continue
+        # Duplicado DENTRO del mismo lote (ej. "Resumen.md" y "resumen .md"
+        # normalizan al mismo nombre): el segundo nunca pisa al primero
+        # que ya se importo en esta misma corrida, va a conflicts.
+        if name in seen_in_batch:
+            conflicts.append(name)
+            continue
+        if name in existing and name not in overwrite_set:
+            conflicts.append(name)
+            continue
+        target = _command_file(project_path, name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(prompt, encoding="utf-8")
+        imported.append(name)
+        seen_in_batch.add(name)
+
+    return {
+        "imported": imported,
+        "conflicts": conflicts,
+        "reserved": reserved,
+        "invalid": invalid,
+        "custom": list_custom_commands(project_path),
+    }
 
 
 # REQ-003: prompt REAL de OpenCode (packages/opencode/src/command/template/

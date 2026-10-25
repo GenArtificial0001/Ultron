@@ -8,8 +8,17 @@
 import { renderMarkdown, toPlainText } from "./markdown.js";
 import { initVoiceEye, destroyVoiceEye } from "./voice-eye.js";
 import { initSplashScreen } from "./splash-screen.js";
-import { isTtsEnabled, setTtsEnabled, isTechReportEnabled, setTechReportEnabled, speak, cancelSpeech, speakTestPhrase, pickBestSpanishMaleVoice, getAvailableSpanishVoices, setSavedVoiceURI, playActivationSound, isVoiceMuted, setVoiceMuted, onSpeechEnd, isSpeaking, configureVoiceBackend, applyVoiceConfig, playVoiceSample, TEST_PHRASE } from "./tts.js";
+import { isTtsEnabled, setTtsEnabled, isTechReportEnabled, setTechReportEnabled, getTechReportLevel, setTechReportLevel, speak, cancelSpeech, speakTestPhrase, pickBestSpanishMaleVoice, getAvailableSpanishVoices, setSavedVoiceURI, playActivationSound, isVoiceMuted, setVoiceMuted, onSpeechEnd, isSpeaking, configureVoiceBackend, applyVoiceConfig, playVoiceSample, TEST_PHRASE } from "./tts.js";
 import { typesetMath } from "./math.js";
+import { initVault, refreshVault } from "./vault.js";
+import { initMicControl, refreshAudioPanel, startWithMicCheck, maybeWatchNoSignal, pendingVoiceMode } from "./mic-control.js";
+import {
+  initMeetingSource,
+  requestMeetingSource,
+  buildMeetingAudio,
+  refreshMeetingSourceSettings,
+  meetingSourceLabel,
+} from "./meeting-source.js";
 import { convertLatexFormulasToUnicode } from "./latex-to-unicode.js";
 
 // spec jarvis-mobile-pwa: API_BASE ya no es una constante fija a
@@ -83,31 +92,26 @@ function apiFetch(url, options = {}) {
   return window.fetch(url, { ...options, headers });
 }
 
-// spec voz-fish-audio REQ-001/003: tts.js pide el audio de cada frase al
-// backend con este mismo fetch (lleva el token de acceso) y los avisos de
-// "esta voz fallo, sigo con otra" van al chat como nota del sistema.
-configureVoiceBackend({
-  fetchFn: apiFetch,
-  apiBase: API_BASE,
-  onNotice: (text) => appendMessage("system-note", text, { persist: false }),
-});
-
 // -------------------------------------------------------------------------
 // spec informe-tecnico-hablado: todas las frases del informe van por la misma
 // cola con un tope de 3 esperando (REQ-004: en orden, sin atrasarse), y si
 // pasan ~15 s sin ninguna, se dice en que tarea sigue (REQ-011: nunca callado).
 // -------------------------------------------------------------------------
+// REQ-004/012: tope de frases del informe esperando su turno. En Detallado se cuentan muchas mas
+// cosas por acorde, y con solo 3 se perderia el recorrido; las mas viejas se descartan igual.
 const TECH_REPORT_PENDING_LIMIT = 3;
+const TECH_REPORT_PENDING_LIMIT_DETAILED = 6;
 const TECH_REPORT_KEEPALIVE_MS = 15_000;
 let _techKeepAliveTimer = null;
 let _techKeepAliveSessionId = null;
 let _techLastSpokenAt = 0;
 let _techCurrentTask = "";
 
-function speakTechReport(text) {
+function speakTechReport(text, { lead = false } = {}) {
   if (!text) return;
   _techLastSpokenAt = Date.now();
-  speak(text, { limitKey: "tech-report", limit: TECH_REPORT_PENDING_LIMIT });
+  const limit = getTechReportLevel() === "detailed" ? TECH_REPORT_PENDING_LIMIT_DETAILED : TECH_REPORT_PENDING_LIMIT;
+  speak(text, { limitKey: "tech-report", limit, lead });
 }
 
 // La tarea mas especifica en curso del plan (una sub-tarea gana a su madre).
@@ -148,6 +152,15 @@ function stopTechKeepAlive(sessionId = null) {
   _techCurrentTask = "";
 }
 
+// spec voz-fish-audio REQ-001/003: tts.js pide el audio de cada frase al
+// backend con este mismo fetch (lleva el token de acceso) y los avisos de
+// "esta voz fallo, sigo con otra" van al chat como nota del sistema.
+configureVoiceBackend({
+  fetchFn: apiFetch,
+  apiBase: API_BASE,
+  onNotice: (text) => appendMessage("system-note", text, { persist: false }),
+});
+
 // -------------------------------------------------------------------------
 // Errores entendibles para personas no técnicas (pedido del usuario
 // 2026-09-24: "mejora el manejo de errores para que los mensajes lo
@@ -167,7 +180,7 @@ const UNEXPECTED_ERROR_MESSAGE =
 
 const HTTP_STATUS_MESSAGES = {
   400: "Vision no pudo procesar el pedido: falta un dato o alguno no es válido. Revisalo y volvé a intentar.",
-  401: "Este navegador no tiene la clave de acceso de Vision, o no es la correcta. Cargala en Configuración > Servidor, en «Token de acceso».",
+  401: "Este navegador no tiene la clave de acceso de Vision, o no es la correcta. Cargala en Configuración > Red, en «Token de acceso».",
   403: "No tenés permiso para hacer esto. Si lo necesitás, avisá a soporte.",
   404: "No se encontró lo que buscabas: puede que se haya borrado o movido. Recargá la página y volvé a intentar.",
   408: "La operación tardó demasiado. Volvé a intentar.",
@@ -325,19 +338,77 @@ const state = {
 // referencien sin depender del orden de ejecucion del resto del archivo.
 let _toolsExecutedCount = 0;
 
-// Limite de caché en localStorage para ESTA sesion (aprox., en caracteres
-// UTF-16 -- localStorage tipicamente permite ~5MB por origen = ~5,000,000
-// caracteres; se usa un limite mas chico y conservador pensado para el
-// futuro despliegue como SharePoint Full-Page App, donde el origen puede
-// compartirse con otras apps del mismo sitio).
-const CACHE_SOFT_LIMIT_CHARS = 300_000;
-// Antes era un `const` fijo a state.sessionId -- ahora es una funcion,
-// porque cambiar de sesion (ver switchToSession) actualiza state.sessionId
-// en caliente sin recargar la pagina, y cada sesion necesita su propia
-// clave de historial en localStorage.
-function cacheStorageKey() {
-  return cacheStorageKeyForSession(state.sessionId);
+// -------------------------------------------------------------------------
+// REQ-016 (spec fix-detener-y-progreso-visible): preferencias del navegador (tema, «Leer en voz alta», auto-envío, micrófono,
+// alarma del loop...). Con el almacenamiento del navegador lleno o bloqueado, `setItem` tira (QuotaExceededError) y antes cada
+// lugar lo tragaba en silencio: la preferencia no se guardaba y, en las que se releen de localStorage cada vez («Leer en voz
+// alta», auto-envío, idioma), ni siquiera regía en esta carga («Leer en voz alta» quedaba tildado y no leía; medido en la spec,
+// sección D). Ahora pasan todas por acá: si no se puede guardar, el valor vale EN MEMORIA hasta recargar y se avisa UNA vez en
+// pantalla. `tts.js` (módulo sin dependencias de app.js) hace lo mismo con su propio respaldo y avisa con el mismo evento.
+// -------------------------------------------------------------------------
+const PREF_NOT_SAVED_EVENT = "vision:preference-not-saved";
+const PREF_NOT_SAVED_TEXT =
+  "No se pudo guardar tu preferencia en este navegador (su espacio de guardado está lleno o bloqueado). El cambio vale hasta que recargues la página.";
+const _unsavedPrefs = new Map();
+
+function readPreference(key) {
+  if (_unsavedPrefs.has(key)) return _unsavedPrefs.get(key);
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null; // localStorage inaccesible: cada preferencia cae a su valor por defecto
+  }
 }
+
+function savePreference(key, value) {
+  const text = String(value);
+  try {
+    localStorage.setItem(key, text);
+    _unsavedPrefs.delete(key);
+    return true;
+  } catch {
+    _unsavedPrefs.set(key, text);
+    window.dispatchEvent(new CustomEvent(PREF_NOT_SAVED_EVENT, { detail: { key } }));
+    return false;
+  }
+}
+
+function forgetPreference(key) {
+  _unsavedPrefs.delete(key);
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // noop -- sin localStorage no habia nada guardado que borrar
+  }
+}
+
+// Una sola vez por carga aunque fallen varias (cada arrastre del panel Navegador, por ejemplo, vuelve a intentar guardar).
+// Se busca el aviso recien al necesitarlo: la primera falla puede llegar mientras el modulo todavia se esta evaluando.
+let _prefNoticeShown = false;
+window.addEventListener(PREF_NOT_SAVED_EVENT, () => {
+  const noticeEl = document.getElementById("pref-save-notice");
+  if (_prefNoticeShown || !noticeEl) return;
+  _prefNoticeShown = true;
+  document.getElementById("pref-save-notice-text").textContent = PREF_NOT_SAVED_TEXT;
+  noticeEl.classList.remove("hidden");
+});
+document.getElementById("pref-save-notice-close").addEventListener("click", () => {
+  document.getElementById("pref-save-notice").classList.add("hidden");
+});
+
+// REQ-016 (D2 del usuario: «el chat se lee siempre de SQLite»): la conversacion vive en SQLite (`<carpeta>/session/vision.db`) y
+// el navegador ya NO guarda una copia de las sesiones CON carpeta. Antes copiaba TODAS, enteras y sin limite (cada sesion que se
+// abria), y el medidor «Caché local» sumaba esas copias contra 300 000 caracteres (el 5,7 % de la cuota real del navegador)
+// diciendo ser «de esta conversación»; «Liberar caché» borraba solo la abierta. Queda una copia CHICA solo para las sesiones SIN
+// carpeta: sus mensajes NO estan en SQLite (viven en la memoria del backend, spec carpeta-por-sesion REQ-008 y
+// `persistence/service.py:_db_path_for_session`, que devuelve None) y sin copia un F5 las dejaria vacias.
+const SESSION_COPY_PREFIX = "vision.session.";
+const LOCAL_COPY_MAX_MESSAGES = 50;
+const LOCAL_COPY_MAX_CHARS = 200_000;
+const LOCAL_COPY_ROLES = new Set(["user", "assistant", "system-note", "error"]);
+// sessionId -> true (tiene carpeta) / false (no tiene): sale de /status (`persistence_available`), de asignarle una carpeta y de
+// la lista de sesiones del backend. Mientras no se sabe, no se escribe ninguna copia.
+const _sessionHasFolder = new Map();
 
 // Escapa a una clave PASADA explicitamente, no a la sesion activa en vivo.
 // Necesario para persistir el resultado de un turno en la sesion que LO
@@ -346,13 +417,21 @@ function cacheStorageKey() {
 // sesion equivocada porque el bloque de completado leia state.sessionId
 // en vivo -- ver el bloque de completado de renderIncomingStream).
 function cacheStorageKeyForSession(sessionId) {
-  return `vision.session.${sessionId}`;
+  return `${SESSION_COPY_PREFIX}${sessionId}`;
 }
 
 const messagesEl = document.getElementById("messages");
 const todoListEl = document.getElementById("todo-list");
 const toolLogEl = document.getElementById("tool-log");
 const questionPanelEl = document.getElementById("question-panel");
+// REQ-018 (spec fix-detener-y-progreso-visible): la pregunta (tool `question`) que cada sesion dejo esperando respuesta. El panel es uno
+// solo para toda la pagina: la pregunta se ve y se contesta SOLO en su sesion; si llega con el usuario en otra, queda aca hasta que
+// vuelva, y la lista de sesiones la marca («❓ te hizo una pregunta», D5). Vive en la memoria de esta pestaña; con F5 la de la sesion que
+// se abre se recupera de SQLite (`pending_question` de GET /api/sessions/{id}/messages, ver rememberQuestionFromHistory).
+// `_questionSessionsSeen`: sesiones de las que esta pestaña ya sabe que paso con su pregunta (llego en vivo, se contesto, se descarto):
+// para esas manda lo de aca, no lo de SQLite.
+const _pendingQuestions = new Map(); // sessionId -> { question, options }
+const _questionSessionsSeen = new Set();
 const devVersionEl = document.getElementById("dev-version");
 const formEl = document.getElementById("chat-form");
 const inputEl = document.getElementById("chat-input");
@@ -373,10 +452,6 @@ const sidebarEl = document.getElementById("sidebar");
 const scrimEl = document.getElementById("scrim");
 const menuBtnEl = document.getElementById("menu-btn");
 const sidebarCloseEl = document.getElementById("sidebar-close");
-const cachePctEl = document.getElementById("cache-pct");
-const cacheFillEl = document.getElementById("cache-fill");
-const cacheMeterEl = document.querySelector(".cache-meter");
-const cacheClearBtnEl = document.getElementById("cache-clear-btn");
 const dashboardOverlayEl = document.getElementById("dashboard-overlay");
 const dashboardTitleEl = document.getElementById("dashboard-title");
 const dashboardCloseEl = document.getElementById("dashboard-close");
@@ -426,12 +501,25 @@ function setConnStatus(stateName, text) {
 //     la operacion termino, quedarse en 99% esperando es honesto; llegar
 //     a 100% y seguir cargando es exactamente la mentira que genera
 //     desconfianza en una barra de progreso.
-//   - El % NUNCA retrocede (`Math.max` contra el ultimo valor mostrado),
-//     aunque cambie la operacion o el presupuesto a mitad de camino.
-//   - Al superar el presupuesto por OVERRUN_FACTOR, se pasa a modo
-//     "sobrepasado" (sigue trabajando, mas de lo esperado) en vez de
-//     fingir precision -- umbral que la spec §6 dejo abierto para ajustar
-//     empiricamente.
+//   - Dentro de una MISMA operacion el % nunca retrocede (`Math.max`).
+//   - Al superar el presupuesto, se pasa a modo "sobrepasado" (sigue
+//     trabajando, mas de lo esperado) en vez de fingir precision.
+//
+// spec fix-detener-y-progreso-visible (reporte del usuario 2026-10-11: «se
+// quedo en este proceso y no avanzó o si estaba avanzando me dio la idea de
+// que estaba congelado», captura «Ejecutando comando… 91%» quieta; el turno
+// avanzaba, la pantalla no lo decia):
+//   - REQ-001: la tarjeta muestra SIEMPRE cuanto lleva la operacion actual
+//     («lleva 12 s», «lleva 1 min 05 s»), en todos los modos (tambien sin
+//     historial y con % real), con un latido; pasado lo estimado dice
+//     «… · sigue trabajando · lleva X» sin % y sin el relleno clavado.
+//   - REQ-002: cada operacion nueva arranca de 0 % (antes el % se
+//     arrastraba entre operaciones: una vez en 91 %, todo lo que seguia
+//     arrancaba en 91 % fijo); el resultado de una herramienta cierra su
+//     operacion, y un cierre pendiente nunca borra la operacion siguiente.
+//   - REQ-003: «Escribiendo <archivo>… N KB» mientras el modelo escribe los
+//     argumentos de una herramienta (`tool-writing`).
+//   - REQ-004: «Salida en vivo» del bash (`tool-output`), como TEXTO.
 // -------------------------------------------------------------------------
 
 // Cada cuanto se repinta la barra. 100ms es suficientemente fluido para el
@@ -439,10 +527,12 @@ function setConnStatus(stateName, text) {
 const PROGRESS_TICK_MS = 100;
 
 // Cuanto se puede pasar del presupuesto estimado antes de admitir que la
-// estimacion fallo y pasar a modo "sobrepasado" (spec §6, a ajustar con
-// uso real). 2x es el punto donde el usuario ya siente que "tarda mas de
-// lo normal", pero todavia no que se colgo.
-const OVERRUN_FACTOR = 2;
+// estimacion fallo y pasar a modo "sobrepasado".
+// REQ-001 (spec fix-detener-y-progreso-visible): antes era 2x, y entre 1x y
+// 2x la curva mostraba un % que ya se sabia inventado (81-91 %) y despues el
+// numero desaparecia con el relleno clavado en 91 %. Ahora, apenas se pasa
+// lo estimado, la tarjeta lo dice: «sigue trabajando · lleva X», sin %.
+const OVERRUN_FACTOR = 1;
 
 // Techo del avance estimado: la barra se acerca asintoticamente a esto y
 // solo llega a 100% cuando el turno REALMENTE termina.
@@ -454,9 +544,34 @@ const PROGRESS_CEILING = 92;
 // dura menos que un frame produce un parpadeo que se lee como un glitch,
 // no como progreso. Solo se aplica cuando HAY historial: sin historial no
 // se sabe si va a ser rapida, y ahi si corresponde el modo indeterminado.
+// REQ-001/004 (spec fix-detener-y-progreso-visible): una operacion "rapida"
+// que NO termina en este plazo (p. ej. un bash largo despues de muchos
+// comandos cortos: la mediana queda chica) igual se muestra, ya como
+// «sigue trabajando», con su tiempo real y su salida en vivo.
 const MIN_VISIBLE_BUDGET_MS = 250;
 
-const progressState = { timer: null, startedAt: 0, budgetMs: 0, pct: 0, indeterminate: false };
+// REQ-002: cuanto se ve el 100 % de una operacion terminada antes de quitar la tarjeta.
+const PROGRESS_DONE_LINGER_MS = 400;
+
+// mode: "estimate" (curva con %) | "indeterminate" (sin historial / escribiendo argumentos) |
+// "real" (% real de un PDF) | "overrun" (se paso de lo estimado) | "done".
+const progressState = {
+  timer: null,
+  startedAt: 0,
+  budgetMs: 0,
+  pct: 0,
+  mode: "idle",
+  opId: null,
+  resetTimer: null,
+  pending: null,
+  pendingTimer: null,
+};
+
+// REQ-003: cuando empezo a escribir los argumentos cada tool-call (por id), para que el tiempo no vuelva a 0 si la tarjeta alterna.
+const _writingStartedAt = new Map();
+
+// REQ-004: si el usuario pliega «Salida en vivo», queda plegada para las proximas operaciones (solo en memoria de esta pestaña).
+let _liveOutputOpen = true;
 
 // Referencia a la barra montada del turno actual -- null cuando no hay
 // ninguna operacion en curso (mismo patron que `activeToolRow`).
@@ -471,6 +586,10 @@ function getOrCreateProgressBar(mountEl) {
     target.appendChild(activeProgressBar.root);
     return activeProgressBar;
   }
+  // REQ-002 (spec fix-detener-y-progreso-visible, revision F4): la tarjeta TERMINADA del turno anterior vive en el lugar de OTRO mensaje
+  // (el siguiente de la cola arranco antes de los 400 ms de su cierre diferido, que la operacion nueva cancela): se quita aca. Antes
+  // quedaba pegada para siempre («… · tardó X 100%») debajo de una respuesta ya terminada.
+  if (activeProgressBar && progressState.mode === "done") activeProgressBar.root.remove();
   const root = document.createElement("div");
   root.className = "command-progress hidden";
   root.dataset.state = "idle";
@@ -479,11 +598,20 @@ function getOrCreateProgressBar(mountEl) {
 
   const head = document.createElement("div");
   head.className = "progress-head";
+  // REQ-001: latido -- un punto que pulsa mientras la operacion sigue viva (quieto con animaciones reducidas: el tiempo de al lado
+  // sigue cambiando igual, porque lo mueve el timer de JS, no la animacion).
+  const beat = document.createElement("span");
+  beat.className = "progress-beat";
+  beat.setAttribute("aria-hidden", "true");
   const label = document.createElement("span");
   label.className = "progress-label";
+  const elapsed = document.createElement("span");
+  elapsed.className = "progress-elapsed";
+  // La tarjeta es una region `aria-live`: un reloj que cambia cada segundo no se anuncia (seria un lector de pantalla hablando sin parar).
+  elapsed.setAttribute("aria-live", "off");
   const pct = document.createElement("span");
   pct.className = "progress-pct";
-  head.append(label, pct);
+  head.append(beat, label, elapsed, pct);
 
   const track = document.createElement("div");
   track.className = "progress-track";
@@ -494,69 +622,207 @@ function getOrCreateProgressBar(mountEl) {
   root.append(head, track);
   target.appendChild(root);
 
-  activeProgressBar = { root, labelEl: label, pctEl: pct, fillEl: fill };
+  activeProgressBar = { root, labelEl: label, elapsedEl: elapsed, pctEl: pct, fillEl: fill, liveEl: null, livePreEl: null };
   return activeProgressBar;
 }
 
-function startProgress({ label, budgetMs, hasHistory }, mountEl) {
-  // Operacion conocida y sub-perceptual: no se toca la barra. Si ya hay
-  // una visible de una operacion anterior mas lenta, se la deja seguir en
-  // vez de pisarla con una que va a durar 1ms.
-  if (hasHistory && budgetMs < MIN_VISIBLE_BUDGET_MS) return;
+/** «12 s», «1 min 05 s», «1 h 02 min» (REQ-001). */
+function formatElapsed(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  if (total < 60) return `${total} s`;
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = String(total % 60).padStart(2, "0");
+  if (h > 0) return `${h} h ${String(m).padStart(2, "0")} min`;
+  return `${m} min ${s} s`;
+}
 
+function cancelPendingProgress() {
+  clearTimeout(progressState.pendingTimer);
+  progressState.pendingTimer = null;
+  progressState.pending = null;
+}
+
+/**
+ * REQ-002 (spec fix-detener-y-progreso-visible): arranca una operacion NUEVA en la tarjeta. Siempre de 0 %, con su propio reloj, y
+ * cancelando cualquier cierre pendiente de la anterior (sin esto, el `finishProgress` del resultado de una herramienta borraba a los
+ * 400 ms la tarjeta de la operacion que arrancaba enseguida).
+ */
+function beginProgressOp({ opId = null, label, budgetMs = 0, mode, startedAt = null }, mountEl) {
+  cancelPendingProgress();
+  clearTimeout(progressState.resetTimer);
+  progressState.resetTimer = null;
   const bar = getOrCreateProgressBar(mountEl);
   bar.labelEl.textContent = label || "Trabajando…";
   bar.root.classList.remove("hidden");
-
-  // REQ-004: sin ninguna medicion previa de esta operacion no hay base
-  // para inventar un %. Se muestra animacion indeterminada + el texto
-  // contextual, que es informacion honesta y util igual.
-  progressState.indeterminate = !hasHistory;
-  progressState.startedAt = performance.now();
+  removeLiveOutput(bar);
+  progressState.opId = opId;
+  progressState.mode = mode;
+  progressState.pct = 0;
+  progressState.startedAt = startedAt ?? performance.now();
   progressState.budgetMs = budgetMs > 0 ? budgetMs : 4000;
-
-  if (progressState.indeterminate) {
-    bar.root.dataset.state = "indeterminate";
-    bar.pctEl.textContent = "";
-    bar.fillEl.style.width = "";
-    stopProgressTimer();
-    return;
-  }
-
-  // Operacion nueva dentro del mismo turno: el % arranca desde donde
-  // estaba, no vuelve a cero (retroceder visualmente se lee como un
-  // error del sistema, aunque internamente sea una operacion distinta).
-  bar.root.dataset.state = "running";
+  bar.root.dataset.state = mode === "indeterminate" ? "indeterminate" : "running";
+  bar.pctEl.textContent = "";
+  bar.fillEl.style.width = mode === "indeterminate" ? "" : "0%";
   if (!progressState.timer) {
     progressState.timer = setInterval(tickProgress, PROGRESS_TICK_MS);
   }
   tickProgress();
 }
 
-function tickProgress() {
-  if (!activeProgressBar) return;
-  const elapsed = performance.now() - progressState.startedAt;
-  const ratio = elapsed / progressState.budgetMs;
-
-  if (ratio >= OVERRUN_FACTOR) {
-    // REQ-003: tarda mucho mas de lo estimado. No se miente con un % que
-    // ya se sabe malo: se congela el avance y se avisa. El registro de
-    // esta duracion real (que el backend hace igual) hara que la proxima
-    // estimacion de esta misma operacion sea mas generosa.
-    activeProgressBar.root.dataset.state = "overrun";
-    activeProgressBar.pctEl.textContent = "";
+function startProgress({ label, budgetMs, hasHistory, opId = null }, mountEl) {
+  const startedAt = performance.now();
+  // Operacion conocida y sub-perceptual: no se toca la barra todavia. Si ya hay
+  // una visible de una operacion anterior, se la deja seguir en vez de pisarla
+  // con una que va a durar 1ms. Pero si NO termina en el plazo (REQ-001/004),
+  // se muestra con su tiempo real (ya pasada de lo estimado).
+  if (hasHistory && budgetMs < MIN_VISIBLE_BUDGET_MS) {
+    cancelPendingProgress();
+    progressState.pending = { opId, label, budgetMs, mode: "estimate", startedAt, mountEl };
+    progressState.pendingTimer = setTimeout(adoptPendingProgress, MIN_VISIBLE_BUDGET_MS);
     return;
   }
+  // REQ-004: sin ninguna medicion previa de esta operacion no hay base
+  // para inventar un %. Se muestra animacion indeterminada + el texto
+  // contextual, que es informacion honesta y util igual.
+  beginProgressOp({ opId, label, budgetMs, mode: hasHistory ? "estimate" : "indeterminate", startedAt }, mountEl);
+}
+
+function adoptPendingProgress() {
+  const pending = progressState.pending;
+  progressState.pendingTimer = null;
+  if (!pending) return;
+  // Si mientras tanto se cambio de sesion, el slot de ese turno ya no esta en pantalla: no se dibuja nada huerfano.
+  if (pending.mountEl && !pending.mountEl.isConnected) {
+    progressState.pending = null;
+    return;
+  }
+  beginProgressOp(pending, pending.mountEl);
+}
+
+function tickProgress() {
+  if (!activeProgressBar) return;
+  const bar = activeProgressBar;
+  const elapsed = performance.now() - progressState.startedAt;
+  const mode = progressState.mode;
+  if (mode === "done") return;
+
+  if (mode === "estimate" && elapsed / progressState.budgetMs >= OVERRUN_FACTOR) {
+    // REQ-003 (barra-progreso-adaptativa) + REQ-001 (fix-detener-y-progreso-visible): tarda mas de lo estimado. No se miente con un
+    // % que ya se sabe malo: sin numero, el relleno pasa a un barrido (nunca clavado en 91 %) y el texto dice que sigue trabajando y
+    // cuanto lleva. El registro de esta duracion real (que el backend hace igual) hara que la proxima estimacion sea mas generosa.
+    progressState.mode = "overrun";
+    bar.root.dataset.state = "overrun";
+    bar.pctEl.textContent = "";
+    bar.fillEl.style.width = "";
+  }
+
+  // REQ-001: el tiempo transcurrido de la operacion actual, en TODOS los modos.
+  const overrun = progressState.mode === "overrun";
+  bar.elapsedEl.textContent = `${overrun ? " · sigue trabajando" : ""} · lleva ${formatElapsed(elapsed)}`;
+  if (progressState.mode !== "estimate") return;
 
   // Curva asintotica: 1 - e^(-k·t). Avanza rapido al principio (donde el
   // usuario mas necesita feedback de que algo pasa) y desacelera cerca
   // del techo, sin llegar nunca solo al 100%.
+  const ratio = elapsed / progressState.budgetMs;
   const target = PROGRESS_CEILING * (1 - Math.exp(-2.2 * ratio));
   progressState.pct = Math.max(progressState.pct, target);
 
   const shown = Math.round(progressState.pct);
-  activeProgressBar.fillEl.style.width = `${shown}%`;
-  activeProgressBar.pctEl.textContent = `${shown}%`;
+  bar.fillEl.style.width = `${shown}%`;
+  bar.pctEl.textContent = `${shown}%`;
+}
+
+/**
+ * REQ-008 b (spec adjuntar-archivos-chat): un `progress-estimate` con `pct` trae un avance REAL
+ * (pagina k de N al leer un PDF), no un presupuesto de tiempo. Se fija ese valor, se detiene la
+ * curva asintotica (que solo adivina) y nunca retrocede dentro de la misma operacion. Sin barra
+ * montada, se crea una. El reloj de la operacion (REQ-001) sigue corriendo.
+ */
+function setRealProgress({ label, pct }, mountEl) {
+  if (!activeProgressBar || progressState.mode !== "real") {
+    // REQ-002 (fix-detener-y-progreso-visible): primera señal REAL de esta operacion: arranca de 0 %, sin heredar el % de la anterior
+    // (p. ej. el «Pensando…» que seguia en pantalla porque la lectura del PDF suele estimarse rapida y no tenia tarjeta propia). El
+    // reloj es el de la herramienta: el de su estimacion pendiente, o el de la operacion en curso si ya era ella.
+    const pending = progressState.pending;
+    const alive = activeProgressBar && progressState.mode !== "done" && progressState.mode !== "idle";
+    beginProgressOp(
+      {
+        opId: pending ? pending.opId : alive ? progressState.opId : null,
+        label,
+        mode: "real",
+        startedAt: pending ? pending.startedAt : alive ? progressState.startedAt : null,
+      },
+      mountEl
+    );
+  }
+  const bar = getOrCreateProgressBar(mountEl);
+  bar.labelEl.textContent = label || "Trabajando…";
+  bar.root.classList.remove("hidden");
+  progressState.pct = Math.max(progressState.pct, Math.min(100, Math.max(0, pct)));
+  const shown = Math.round(progressState.pct);
+  bar.root.dataset.state = "running";
+  bar.fillEl.style.width = `${shown}%`;
+  bar.pctEl.textContent = `${shown}%`;
+}
+
+/**
+ * REQ-003 (spec fix-detener-y-progreso-visible): el modelo esta escribiendo los argumentos de una herramienta (caso real: un `write`
+ * de 15 KB tardo ~69 s sin ninguna señal). «Escribiendo <archivo>… N KB» si se sabe el archivo de un write/edit; si no, «Preparando
+ * <herramienta>… N KB». Sin % (no se sabe cuanto falta), con el tiempo que lleva escribiendo.
+ */
+function writingLabel({ name, chars, path }) {
+  const kb = chars >= 1024 ? ` ${Math.round(chars / 1024)} KB` : "";
+  if (path && (name === "write" || name === "edit")) return `Escribiendo ${path}…${kb}`;
+  return `Preparando ${name || "herramienta"}…${kb}`;
+}
+
+function showWritingProgress(data, mountEl) {
+  const opId = `writing:${data.id}`;
+  const label = writingLabel(data);
+  if (activeProgressBar && progressState.opId === opId && progressState.mode !== "done") {
+    activeProgressBar.labelEl.textContent = label; // misma operacion: solo crece el tamaño, el reloj sigue
+    return;
+  }
+  if (!_writingStartedAt.has(data.id)) _writingStartedAt.set(data.id, performance.now());
+  beginProgressOp({ opId, label, mode: "indeterminate", startedAt: _writingStartedAt.get(data.id) }, mountEl);
+}
+
+function removeLiveOutput(bar) {
+  if (!bar || !bar.liveEl) return;
+  bar.liveEl.remove();
+  bar.liveEl = null;
+  bar.livePreEl = null;
+}
+
+/**
+ * REQ-004 (spec fix-detener-y-progreso-visible): ultimas lineas de la salida del bash que esta corriendo, plegable. SIEMPRE con
+ * textContent: es salida de un comando cualquiera y puede traer HTML. Solo para la operacion de ESE id (una salida atrasada de un
+ * comando que ya termino no se pega a la operacion siguiente).
+ */
+function showLiveOutput({ id, tail }) {
+  if (progressState.pending && progressState.pending.opId === id) adoptPendingProgress(); // hay salida real: se muestra ya
+  const bar = activeProgressBar;
+  if (!bar || progressState.opId !== id || progressState.mode === "done") return;
+  if (!bar.liveEl) {
+    const details = document.createElement("details");
+    details.className = "progress-live";
+    details.setAttribute("aria-live", "off"); // idem el reloj: la salida cambia cada segundo
+    details.open = _liveOutputOpen;
+    details.addEventListener("toggle", () => {
+      _liveOutputOpen = details.open;
+    });
+    const summary = document.createElement("summary");
+    summary.textContent = "Salida en vivo";
+    const pre = document.createElement("pre");
+    details.append(summary, pre);
+    bar.root.appendChild(details);
+    bar.liveEl = details;
+    bar.livePreEl = pre;
+  }
+  bar.livePreEl.textContent = typeof tail === "string" ? tail : "";
+  bar.livePreEl.scrollTop = bar.livePreEl.scrollHeight;
 }
 
 function stopProgressTimer() {
@@ -568,18 +834,33 @@ function stopProgressTimer() {
 
 function finishProgress() {
   stopProgressTimer();
+  cancelPendingProgress();
   // Cierre visual: se completa a 100% y recien ahi se oculta, para que el
   // usuario vea que termino en vez de que la barra desaparezca a mitad.
-  if (activeProgressBar && !progressState.indeterminate) {
-    activeProgressBar.root.dataset.state = "done";
-    activeProgressBar.fillEl.style.width = "100%";
-    activeProgressBar.pctEl.textContent = "100%";
+  const bar = activeProgressBar;
+  if (bar && progressState.mode !== "indeterminate" && progressState.mode !== "idle") {
+    bar.root.dataset.state = "done";
+    bar.fillEl.style.width = "100%";
+    bar.pctEl.textContent = "100%";
   }
-  setTimeout(resetProgress, 400);
+  if (bar && progressState.mode !== "idle" && progressState.mode !== "done") {
+    // REQ-001: termino -- ni «sigue trabajando» ni un reloj que ya no corre al lado del 100 %.
+    bar.elapsedEl.textContent = ` · tardó ${formatElapsed(performance.now() - progressState.startedAt)}`;
+  }
+  progressState.mode = "done";
+  clearTimeout(progressState.resetTimer);
+  // REQ-002: el cierre diferido queda atado a ESTA tarjeta: si mientras tanto arranco otra operacion (o se cambio de sesion), no la borra.
+  progressState.resetTimer = setTimeout(() => {
+    progressState.resetTimer = null;
+    if (activeProgressBar === bar && progressState.mode === "done") resetProgress();
+  }, PROGRESS_DONE_LINGER_MS);
 }
 
 function resetProgress() {
   stopProgressTimer();
+  cancelPendingProgress();
+  clearTimeout(progressState.resetTimer);
+  progressState.resetTimer = null;
   // A diferencia de resetToolRow (que solo limpia la referencia y deja
   // los badges "done" visibles como historial del turno), la barra de
   // progreso SI se remueve del DOM al terminar -- es un indicador
@@ -589,7 +870,9 @@ function resetProgress() {
     activeProgressBar = null;
   }
   progressState.pct = 0;
-  progressState.indeterminate = false;
+  progressState.mode = "idle";
+  progressState.opId = null;
+  _writingStartedAt.clear();
 }
 
 function openSidebar() {
@@ -653,6 +936,50 @@ async function checkBackendStatus() {
     setConnStatus("error", "Sin conexión al backend");
   }
 }
+
+// spec estado-conexion-en-vivo (pedido del usuario 2026-10-19: «ni bien se cierre la consola tendria que mostrarse en rojo»): el indicador se
+// consultaba UNA sola vez al cargar y quedaba verde para siempre. Ahora un latido liviano a /api/status cada 3 s lo mantiene fiel:
+// 2 fallos seguidos (~6 s) = rojo con la causa probable en palabras; 1 acierto = vuelve (y se reconsultan modelo y version).
+// No consulta con la pestaña oculta; nunca hay dos latidos a la vez; cada uno vence a los 2,5 s. El estado «trabajando» no se pisa a verde.
+const CONN_BEAT_MS = 3000;
+const CONN_BEAT_TIMEOUT_MS = 2500;
+const CONN_BEAT_FAILS_TO_RED = 2;
+const CONN_LOST_TEXT = "Sin conexión con Vision. ¿Cerraste la ventana del servidor?";
+let connBeatInFlight = false;
+let connBeatFails = 0;
+
+async function connHeartbeat() {
+  if (connBeatInFlight || document.hidden) return;
+  connBeatInFlight = true;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CONN_BEAT_TIMEOUT_MS);
+  let alive = false;
+  try {
+    const resp = await apiFetch(`${API_BASE}/api/status`, { signal: controller.signal, cache: "no-store" });
+    alive = resp.ok;
+  } catch {
+    alive = false; // servidor cerrado, red caida o plazo vencido: es justamente lo que el latido viene a detectar
+  } finally {
+    clearTimeout(timer);
+    connBeatInFlight = false;
+  }
+  if (alive) {
+    connBeatFails = 0;
+    // Solo el rojo vuelve por este camino: «conectando», «en linea» y «trabajando» ya son correctos y el turno decide cuando termina.
+    if (connStatusEl.dataset.state === "error") checkBackendStatus();
+    return;
+  }
+  connBeatFails += 1;
+  if (connBeatFails >= CONN_BEAT_FAILS_TO_RED && connStatusTextEl.textContent !== CONN_LOST_TEXT) {
+    setConnStatus("error", CONN_LOST_TEXT); // tambien estando «trabajando»: si el servidor murio, ya no esta trabajando
+  }
+}
+
+const connBeatTimer = setInterval(connHeartbeat, CONN_BEAT_MS);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) connHeartbeat(); // al volver a la pestaña se muestra la verdad al instante
+});
+window.addEventListener("pagehide", () => clearInterval(connBeatTimer));
 
 // -------------------------------------------------------------------------
 // Selector de modelo: el chip MODELO del command-bar despliega la lista de
@@ -720,11 +1047,7 @@ function selectedModelForRequest() {
 }
 
 function loadSelectedModel() {
-  try {
-    return localStorage.getItem(MODEL_STORAGE_KEY) || "";
-  } catch {
-    return "";
-  }
+  return readPreference(MODEL_STORAGE_KEY) || "";
 }
 
 function saveSelectedModel(modelId) {
@@ -732,11 +1055,7 @@ function saveSelectedModel(modelId) {
   state.activeModel = "";
   state.activeModelJumped = false;
   renderModelChip();
-  try {
-    localStorage.setItem(MODEL_STORAGE_KEY, modelId);
-  } catch {
-    // noop
-  }
+  savePreference(MODEL_STORAGE_KEY, modelId); // REQ-016: si no se guarda, rige igual (state) y se avisa una vez
 }
 
 async function openModelDropdown() {
@@ -841,81 +1160,136 @@ document.addEventListener("click", (e) => {
 });
 
 // -------------------------------------------------------------------------
-// Persistencia local (localStorage): pensado para el futuro despliegue como
-// SharePoint Full-Page App (sin backend de sesion propio accesible desde
-// cualquier equipo) -- el historial de ESTA conversacion vive en el
-// navegador, no en el servidor. `chatHistory` guarda los mensajes ya
-// renderizados (rol + texto) para poder restaurarlos si se recarga la
-// pagina en la misma sesion de navegador.
+// Historial en pantalla. `chatHistory` = los mensajes ya pintados de la sesion ACTIVA (rol + texto + id + hora). REQ-016 (spec
+// fix-detener-y-progreso-visible): se llena SIEMPRE desde SQLite -- al abrir la pagina o con F5 (restoreActiveSessionOnLoad) y al
+// cambiar de sesion (activateSession), los dos por `fetchSessionHistory` --, y la copia en el navegador solo existe para las
+// sesiones sin carpeta (ver SESSION_COPY_PREFIX arriba). Antes F5 leia SOLO esa copia y cambiar de sesion leia SQLite: dos
+// fuentes para lo mismo (spec, seccion D).
 // -------------------------------------------------------------------------
-const chatHistory = loadChatHistory();
+const chatHistory = [];
 
-function loadChatHistory() {
-  return loadChatHistoryForSession(state.sessionId);
+function sessionHasFolder(sessionId) {
+  if (_sessionHasFolder.has(sessionId)) return _sessionHasFolder.get(sessionId);
+  // La lista de sesiones del backend (refreshSessionsFromBackend) deja la carpeta en el indice liviano: si esta, la tiene.
+  return loadSessionsIndex()[sessionId]?.projectPath ? true : undefined;
 }
 
-// Carga el historial de localStorage para UNA sesion puntual (no la
-// sesion activa) -- parte del fix del bug de cambiar de sesion a mitad de
-// turno: al completarse el turno con la sesion ya cambiada, el bloque de
-// completado necesita leer/escribir el slot de la sesion que ORIGINO el
-// turno, no el de la sesion que hay en pantalla en ese momento.
-function loadChatHistoryForSession(sessionId) {
+function rememberSessionFolder(sessionId, hasFolder) {
+  if (typeof hasFolder !== "boolean") return;
+  _sessionHasFolder.set(sessionId, hasFolder);
+  // Recien ahora se sabe si a esta sesion le corresponde copia: si es la abierta y no tiene carpeta, se guarda la suya.
+  if (!hasFolder && sessionId === state.sessionId) persistChatHistory();
+}
+
+// Lee la copia del navegador de UNA sesion (no necesariamente la activa: el bloque de completado de renderIncomingStream la usa
+// para la sesion que ORIGINO el turno aunque el usuario ya este mirando otra). Una copia rota o con otra forma se ignora: antes
+// un `{...}` en vez de una lista rompia la pagina entera al cargar (`chatHistory` no era iterable).
+function readLocalCopy(sessionId) {
   try {
-    const raw = localStorage.getItem(cacheStorageKeyForSession(sessionId));
-    return raw ? JSON.parse(raw) : [];
+    return parseLocalCopy(localStorage.getItem(cacheStorageKeyForSession(sessionId)));
   } catch {
-    return [];
+    return []; // localStorage inaccesible
   }
+}
+
+function parseLocalCopy(raw) {
+  if (!raw) return [];
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return []; // copia rota: se ignora
+  }
+  if (!Array.isArray(data)) return [];
+  return data.filter((e) => e && typeof e === "object" && LOCAL_COPY_ROLES.has(e.role) && typeof e.text === "string");
+}
+
+function removeLocalCopy(sessionId) {
+  try {
+    localStorage.removeItem(cacheStorageKeyForSession(sessionId));
+  } catch {
+    // noop -- sin localStorage no hay copia que borrar
+  }
+}
+
+// La copia acotada: los ultimos LOCAL_COPY_MAX_MESSAGES mensajes y, si aun asi pasan de LOCAL_COPY_MAX_CHARS, se sueltan los mas
+// viejos. Un unico mensaje mas grande que el tope se guarda recortado (su principio).
+function boundedLocalCopy(history) {
+  const tail = history.slice(-LOCAL_COPY_MAX_MESSAGES);
+  const sizes = tail.map((entry) => JSON.stringify(entry).length + 1); // +1: la coma entre elementos
+  let total = sizes.reduce((sum, n) => sum + n, 1); // +1: los corchetes (menos la coma que sobra)
+  let start = 0;
+  while (total > LOCAL_COPY_MAX_CHARS && start < tail.length - 1) total -= sizes[start++];
+  const kept = tail.slice(start);
+  let json = JSON.stringify(kept);
+  if (json.length > LOCAL_COPY_MAX_CHARS && kept.length === 1) {
+    const only = kept[0];
+    let cut = LOCAL_COPY_MAX_CHARS;
+    do {
+      cut = Math.floor(cut * 0.8);
+      json = JSON.stringify([{ ...only, text: `${String(only.text).slice(0, cut)}…` }]);
+    } while (json.length > LOCAL_COPY_MAX_CHARS);
+  }
+  return json;
 }
 
 function persistChatHistory() {
   persistHistoryForSession(state.sessionId, chatHistory);
 }
 
-// Persiste `history` en el slot de localStorage de UNA sesion puntual
-// (no necesariamente la activa) -- centro del fix del bug de cambiar de
-// sesion a mitad de turno (ver loadChatHistoryForSession arriba).
+// Guarda la copia acotada de UNA sesion puntual (no necesariamente la activa) -- centro del fix del bug de cambiar de sesion a
+// mitad de turno. REQ-016: con carpeta (o sin saberlo todavia) no se copia nada, el chat esta en SQLite. Una copia que quedo de
+// antes de asignarle carpeta se conserva hasta que SQLite devuelva mensajes (fetchSessionHistory la borra ahi): asi un F5 justo
+// despues de asignarla no deja el chat vacio.
 function persistHistoryForSession(sessionId, history) {
-  try {
-    localStorage.setItem(cacheStorageKeyForSession(sessionId), JSON.stringify(history));
-  } catch (err) {
-    // localStorage lleno (QuotaExceededError) -- no rompe el chat, solo
-    // deja de persistir hasta que el usuario libere cache.
-    console.warn("No se pudo persistir en localStorage:", err);
+  if (sessionHasFolder(sessionId) !== false) return;
+  if (history.length === 0) {
+    removeLocalCopy(sessionId);
+    return;
   }
-  updateCacheMeter();
+  try {
+    localStorage.setItem(cacheStorageKeyForSession(sessionId), boundedLocalCopy(history));
+  } catch (err) {
+    // Navegador lleno o bloqueado: el chat sigue andando (el backend tiene la conversacion en memoria); lo unico que se pierde es
+    // que un F5 de esta sesion SIN carpeta la muestre -- eso ya lo avisa el banner «sin carpeta de proyecto».
+    console.warn("No se pudo guardar la copia local de esta conversación:", err);
+  }
 }
 
-function updateCacheMeter() {
-  let totalChars = 0;
+// SQLite le da a cada respuesta del asistente su PROPIO id, pero en pantalla (en vivo, ver closeCurrentAssistantTurn, y en la
+// copia vieja) la respuesta lleva el id del mensaje de USUARIO que la origino: con ese id ↻ (volver a generar) y 🗑 de la
+// respuesta encuentran su turno. Sin esto, tras cambiar de sesion -- y desde REQ-016 tambien tras F5 -- ↻ buscaba el turno por
+// el id de la respuesta y tomaba la propia respuesta como si fuera la pregunta.
+function withTurnIds(messages) {
+  let turnId = null;
+  return messages.map((m) => {
+    if (m.role === "user") {
+      turnId = m.messageId || null;
+      return m;
+    }
+    return m.role === "assistant" && turnId ? { ...m, messageId: turnId } : m;
+  });
+}
+
+// REQ-016: EL camino para traer el chat de una sesion -- lo usan F5/abrir la pagina y cambiar de sesion. SQLite es la autoridad
+// (`GET /api/sessions/{id}/messages`); la copia del navegador es solo la red de seguridad cuando SQLite no tiene nada (sesion sin
+// carpeta, que vive en memoria) o Vision no responde. Cuando SQLite SI trae mensajes, la copia sobra y se borra.
+async function fetchSessionHistory(sessionId) {
   try {
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (!key || !key.startsWith("vision.")) continue;
-      totalChars += (localStorage.getItem(key) || "").length;
+    const resp = await apiFetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/messages`);
+    const data = resp.ok ? await resp.json() : null;
+    const messages = Array.isArray(data?.messages) ? data.messages : [];
+    if (data) rememberQuestionFromHistory(sessionId, data.pending_question); // REQ-018: la pregunta que quedo sin contestar (p. ej. tras F5)
+    if (messages.length > 0) {
+      _sessionHasFolder.set(sessionId, true); // solo una sesion con carpeta tiene mensajes en SQLite
+      removeLocalCopy(sessionId);
+      return withTurnIds(messages);
     }
   } catch {
-    // localStorage inaccesible (ej. modo privado estricto) -- medidor en 0
+    // Sin conexion con Vision: se cae a la copia de abajo (si la hay), sin romper la pantalla.
   }
-
-  const pct = Math.min(100, Math.round((totalChars / CACHE_SOFT_LIMIT_CHARS) * 100));
-  cachePctEl.textContent = `${pct}%`;
-  cacheFillEl.style.width = `${pct}%`;
-  cacheMeterEl.classList.toggle("warn", pct >= 60 && pct < 85);
-  cacheMeterEl.classList.toggle("critical", pct >= 85);
+  return readLocalCopy(sessionId);
 }
-
-function clearSessionCache() {
-  try {
-    localStorage.removeItem(cacheStorageKey());
-  } catch {
-    // noop
-  }
-  chatHistory.length = 0;
-  updateCacheMeter();
-  appendMessage("system-note", "Caché de esta conversación liberada.");
-}
-cacheClearBtnEl.addEventListener("click", clearSessionCache);
 
 // Solo los mensajes del asistente se interpretan como Markdown (headers,
 // negrita, listas, bloques de codigo, tablas, links...) -- ver
@@ -1096,7 +1470,7 @@ function setPlayBtnState(btn, playing) {
 const TTS_LOOP_KEY = "vision.tts.loop";
 
 function _loadLoopPref() {
-  try { return localStorage.getItem(TTS_LOOP_KEY) === "true"; } catch { return false; }
+  return readPreference(TTS_LOOP_KEY) === "true";
 }
 let _loopEnabled = _loadLoopPref();
 let _looping = false;
@@ -1447,7 +1821,7 @@ const turnContainers = new Map();
 // pedirle al backend que lo detenga/edite/elimine/reordene sin ambiguedad
 // -- ver ChatRequest.message_id en app/main.py. Mensajes de otros roles
 // (assistant/system-note/error) no lo necesitan.
-function appendMessage(role, text, { persist = true, messageId = null, mountEl = null, time = null, images = null, responseType = null, technical = null, errorKind = null } = {}) {
+function appendMessage(role, text, { persist = true, messageId = null, mountEl = null, time = null, images = null, attachments = null, responseType = null, technical = null, errorKind = null } = {}) {
   // REQ-001/003 (spec timestamps-mensajes): se captura UNA sola vez aca
   // (no en cada punto donde se hace chatHistory.push mas abajo) para que
   // el mismo valor se use tanto en el <span> visible como en lo que se
@@ -1474,6 +1848,12 @@ function appendMessage(role, text, { persist = true, messageId = null, mountEl =
       imagesRow.appendChild(thumb);
     }
     div.appendChild(imagesRow);
+  }
+
+  // REQ-004/010 (spec adjuntar-archivos-chat): chips de los archivos adjuntos, tambien
+  // al reconstruir el historial tras recargar (estado no encontrado / eliminado).
+  if (role === "user" && attachments && attachments.length > 0) {
+    div.appendChild(buildMessageAttachmentsRow(attachments));
   }
 
   // BUG PREEXISTENTE corregido de paso (detectado al construir la spec
@@ -1551,7 +1931,7 @@ if (role === "error" || role === "assistant") {
     mountEl.appendChild(div);
     messagesEl.scrollTop = messagesEl.scrollHeight;
     if (persist) {
-      chatHistory.push({ role, text, messageId: messageId || undefined, time: msgTime || undefined });
+      chatHistory.push({ role, text, messageId: messageId || undefined, time: msgTime || undefined, attachments: attachments && attachments.length > 0 ? attachments : undefined });
       persistChatHistory();
     }
     return div;
@@ -1579,7 +1959,7 @@ const wrap = document.createElement("div");
     if (messageId) turnContainers.set(messageId, { container, responseSlot });
 
     if (persist) {
-      chatHistory.push({ role, text, messageId: messageId || undefined, time: msgTime || undefined });
+      chatHistory.push({ role, text, messageId: messageId || undefined, time: msgTime || undefined, attachments: attachments && attachments.length > 0 ? attachments : undefined });
       persistChatHistory();
     }
     return wrap;
@@ -1762,10 +2142,105 @@ function renderTodos(todos) {
 // solo (ver comentario en el caso "question" de handleEvent) -- si viene
 // seteado, el panel se pinta como INFORMATIVO (nada que clickear, ya se
 // resolvio) en vez de como una pausa real esperando al usuario.
-function renderQuestion(question, options, autoAnswered) {
+// spec conexiones-con-nombre Fase B (REQ-006): el backend emite `confluence-tree` (arbol, resultados de busqueda o pagina abierta) y el chat lo pinta como un
+// bloque seleccionable. Click en una pagina = pedirle a Vision que la abra (mismo camino que las opciones de una pregunta). Cada nodo lleva «Abrir en Confluence».
+// TODO el texto viene del wiki y es dato no confiable: textContent siempre, y los links solo si son https (un `javascript:` en una URL no se vuelve un link).
+function _safeHttpUrl(url) {
+  try {
+    const parsed = new URL(url, window.location.href);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.href : "";
+  } catch {
+    return "";
+  }
+}
+
+function _buildCfNode(node, depth) {
+  const li = document.createElement("li");
+  li.className = "cf-chat-node";
+  const row = document.createElement("div");
+  row.className = "cf-chat-row";
+  row.style.paddingLeft = `${depth * 14}px`;
+
+  const hasChildren = Array.isArray(node.children) && node.children.length > 0;
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "cf-chat-toggle";
+  toggle.textContent = hasChildren ? "−" : "·";
+  toggle.disabled = !hasChildren;
+  toggle.setAttribute("aria-label", hasChildren ? "Contraer o expandir" : "Sin subpáginas");
+
+  const title = document.createElement("button");
+  title.type = "button";
+  title.className = "cf-chat-title";
+  title.textContent = node.title || "(sin título)";
+  title.title = node.subtitle ? `Espacio ${node.subtitle}: pedirle a Vision que abra esta página` : "Pedirle a Vision que abra esta página";
+  title.addEventListener("click", () => {
+    if (state.sending > 0) return; // Vision esta ocupada: el clic no encola nada a escondidas
+    sendMessage(`Abrí la página de Confluence «${node.title}» (id ${node.id}) y mostrame su contenido.`);
+  });
+
+  row.append(toggle, title);
+  if (node.subtitle) {
+    const sub = document.createElement("span");
+    sub.className = "cf-chat-sub";
+    sub.textContent = node.subtitle;
+    row.appendChild(sub);
+  }
+  const href = _safeHttpUrl(node.open_url || "");
+  if (href) {
+    const open = document.createElement("a");
+    open.className = "cf-chat-open";
+    open.href = href;
+    open.target = "_blank";
+    open.rel = "noopener noreferrer";
+    open.textContent = "Abrir en Confluence";
+    row.appendChild(open);
+  }
+  li.appendChild(row);
+
+  if (hasChildren) {
+    const sub = document.createElement("ul");
+    sub.className = "cf-chat-children";
+    node.children.forEach((child) => sub.appendChild(_buildCfNode(child, depth + 1)));
+    li.appendChild(sub);
+    toggle.addEventListener("click", () => {
+      const collapsed = sub.classList.toggle("hidden");
+      toggle.textContent = collapsed ? "+" : "−";
+    });
+  }
+  return li;
+}
+
+function renderConfluenceTree(data) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg assistant cf-chat-block";
+  const head = document.createElement("div");
+  head.className = "cf-chat-head";
+  head.textContent = data.kind === "search" ? `🔎 ${data.title || "Resultados"}` : `🌐 ${data.title || "Confluence"}`;
+  const headHref = _safeHttpUrl(data.open_url || "");
+  if (headHref) {
+    const open = document.createElement("a");
+    open.className = "cf-chat-open";
+    open.href = headHref;
+    open.target = "_blank";
+    open.rel = "noopener noreferrer";
+    open.textContent = "Abrir en Confluence";
+    head.appendChild(open);
+  }
+  const list = document.createElement("ul");
+  list.className = "cf-chat-list";
+  (data.nodes || []).forEach((node) => list.appendChild(_buildCfNode(node, 0)));
+  wrap.append(head, list);
+  messagesEl.appendChild(wrap);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+// REQ-018 (spec fix-detener-y-progreso-visible): `questionSessionId` = la sesion que pregunto. Solo se llama con esa sesion activa.
+function renderQuestion(question, options, autoAnswered, questionSessionId = state.sessionId) {
   questionPanelEl.classList.remove("hidden");
   questionPanelEl.classList.toggle("auto-answered", !!autoAnswered);
   questionPanelEl.innerHTML = "";
+  questionPanelEl.dataset.sessionId = questionSessionId;
 
   const qText = document.createElement("div");
   qText.className = "q-text";
@@ -1794,6 +2269,10 @@ function renderQuestion(question, options, autoAnswered) {
     } else {
       btn.onclick = () => {
         questionPanelEl.classList.add("hidden");
+        // REQ-018: la respuesta va SIEMPRE a la sesion que pregunto. Fuera de ella el panel esta oculto, pero conserva sus botones: si
+        // alguno se disparara igual (teclado, un script), no se manda nada. Antes `sendMessage` la mandaba a la sesion ACTIVA.
+        if (state.sessionId !== questionSessionId) return;
+        resolvePendingQuestion(questionSessionId);
         sendMessage(opt.label);
       };
     }
@@ -1811,6 +2290,44 @@ function renderQuestion(question, options, autoAnswered) {
         questionPanelEl.classList.add("hidden");
       }
     }, 7000);
+  }
+}
+
+// REQ-018 (spec fix-detener-y-progreso-visible): evento `question` de un turno de la sesion `sessionId`. Una pregunta real queda
+// pendiente de SU sesion: se dibuja si es la activa; si no, solo se marca en la lista y aparece al volver. Una que el loop autonomo
+// contesto solo (`auto_answered`) se sigue mostrando como siempre, pero solo en su sesion, y no deja nada pendiente.
+function handleQuestionEvent(data, sessionId) {
+  _questionSessionsSeen.add(sessionId);
+  if (data.auto_answered) {
+    if (_pendingQuestions.delete(sessionId)) renderSessionsPanel(); // el turno ya siguio: una pregunta anterior quedo vieja
+    if (sessionId === state.sessionId) renderQuestion(data.question, data.options, data.auto_answered, sessionId);
+    return;
+  }
+  _pendingQuestions.set(sessionId, { question: data.question, options: data.options });
+  if (sessionId === state.sessionId) renderQuestion(data.question, data.options, null, sessionId);
+  else renderSessionsPanel(); // la marca «❓ te hizo una pregunta» en la lista
+}
+
+// REQ-018: la sesion ya contesto (una opcion u otro mensaje cualquiera) o el usuario descarto la pregunta: no queda nada pendiente.
+function resolvePendingQuestion(sessionId) {
+  _questionSessionsSeen.add(sessionId);
+  if (_pendingQuestions.delete(sessionId)) renderSessionsPanel();
+}
+
+// REQ-018: al activar una sesion (o al abrir la pagina), su pregunta pendiente vuelve a aparecer.
+function showPendingQuestionFor(sessionId) {
+  const pending = _pendingQuestions.get(sessionId);
+  if (pending && sessionId === state.sessionId) renderQuestion(pending.question, pending.options, null, sessionId);
+}
+
+// REQ-018: la pregunta sin contestar que dice SQLite (GET /api/sessions/{id}/messages). Solo cuenta si esta pestaña no sabe nada mas
+// nuevo de esa sesion (tipico: despues de F5); lo que llego en vivo, se contesto o se descarto aca manda.
+function rememberQuestionFromHistory(sessionId, pending) {
+  if (_questionSessionsSeen.has(sessionId)) return;
+  if (pending && typeof pending.question === "string" && Array.isArray(pending.options)) {
+    _pendingQuestions.set(sessionId, { question: pending.question, options: pending.options });
+  } else {
+    _pendingQuestions.delete(sessionId); // lo unico que habia era un dato anterior de SQLite, y SQLite ya no la tiene pendiente
   }
 }
 
@@ -1926,6 +2443,28 @@ async function renderIncomingStream(resp, turnMessageId = null, turnSessionId = 
   // assistantText, que son `let` de esta funcion y a los que esta
   // funcion accede por closure) -- asi queda accesible tanto dentro del
   // loop como en la red de seguridad final.
+  // REQ-014 b (spec fix-detener-y-progreso-visible): descarta lo que este turno alcanzo a escribir, sin guardarlo ni leerlo en voz alta
+  // (el usuario borro su mensaje). A diferencia de `resetAssistant` (edicion en curso) no toca la fila de herramientas global: el turno
+  // borrado puede ser de una sesion en segundo plano.
+  const discardAssistant = () => {
+    if (_renderDebounceTimer) {
+      clearTimeout(_renderDebounceTimer);
+      _renderDebounceTimer = null;
+    }
+    if (assistantDiv) assistantDiv.remove();
+    assistantDiv = null;
+    assistantText = "";
+    pendingResponseType = null;
+    toolBadges.clear();
+  };
+
+  // Revision F6 (spec fix-detener-y-progreso-visible): el turno de este stream termino en 'stopped' (el usuario apreto Detener). El
+  // handler de 'stopped' corta la voz; sin esta marca, la red de seguridad del final (abajo, al cerrarse el stream) cerraba la burbuja a
+  // medias y la LEIA en voz alta, justo despues de que el usuario la freno.
+  let stoppedByUser = false;
+
+  // REQ-014 b: si el usuario borro el mensaje de este turno mientras terminaba, "done" llama antes a `discardAssistant` (ver
+  // handleEvent) y aca ya no queda nada que cerrar.
   const closeCurrentAssistantTurn = () => {
     if (!assistantDiv) return;
     scheduleAssistantRender({ immediate: true });
@@ -1937,10 +2476,14 @@ async function renderIncomingStream(resp, turnMessageId = null, turnSessionId = 
     if (stillOnOriginSession) {
       chatHistory.push(assistantEntry);
       persistChatHistory();
-      const spokenMsg = assistantDiv; // spec fix-boton-play-stop: su 🔊 pasa a ⏹ mientras se lee
-      speak(toPlainText(assistantText), { onStart: () => showMessageSpeaking(spokenMsg) });
+      // Revision F6: la respuesta cortada por Detener queda en pantalla y guardada, pero no se lee.
+      if (!stoppedByUser) {
+        const spokenMsg = assistantDiv; // spec fix-boton-play-stop: su 🔊 pasa a ⏹ mientras se lee
+        speak(toPlainText(assistantText), { onStart: () => showMessageSpeaking(spokenMsg) });
+      }
     } else {
-      const originHistory = loadChatHistoryForSession(turnSessionId);
+      // REQ-016: solo hace algo si esa sesion no tiene carpeta (con carpeta, su respuesta ya esta en SQLite).
+      const originHistory = readLocalCopy(turnSessionId);
       originHistory.push(assistantEntry);
       persistHistoryForSession(turnSessionId, originHistory);
     }
@@ -1952,6 +2495,7 @@ async function renderIncomingStream(resp, turnMessageId = null, turnSessionId = 
     assistantText = "";
     pendingResponseType = null;
     toolBadges.clear();
+    stoppedByUser = false; // revision F6: un turno siguiente de esta misma conexion (el loop) se lee como siempre
   };
 
   while (true) {
@@ -2006,6 +2550,8 @@ async function renderIncomingStream(resp, turnMessageId = null, turnSessionId = 
         // bloqueo de escritura en la sesion nueva, 2026-09-12).
         turnSessionId,
         closeCurrentAssistantTurn,
+        // REQ-002 (spec aviso-proceso-terminado): la respuesta del turno tal como llego (el aviso de Windows muestra su comienzo).
+        assistantText: () => assistantText,
         setResponseType: (type) => {
           // El evento suele llegar ANTES del primer text-delta (la burbuja
           // todavia no existe). Se guarda en pendingResponseType y se aplica
@@ -2031,7 +2577,11 @@ async function renderIncomingStream(resp, turnMessageId = null, turnSessionId = 
             // reinsertar el <span> de hora en cada delta (ver abajo, el
             // innerHTML = de cada delta lo borra junto con todo lo demas).
             const assistantTime = Date.now();
-            assistantDiv = appendMessage("assistant", "", { persist: false, mountEl: responseSlot, time: assistantTime });
+            // REQ-018 (spec fix-detener-y-progreso-visible): sin el lugar de su turno en pantalla (`responseSlot` null: reenganche de un
+            // turno cuyo mensaje no esta pintado, o un turno del loop), la burbuja caia al final del chat ACTIVO. Si el turno es de otra
+            // sesion se arma fuera de la pantalla: el texto se sigue juntando para guardarlo en SU copia, pero nunca se ve en esta.
+            const mountEl = responseSlot || (turnSessionId === state.sessionId ? null : document.createElement("div"));
+            assistantDiv = appendMessage("assistant", "", { persist: false, mountEl, time: assistantTime });
             // La barra de progreso de "Pensando..." (step 0) puede haberse
             // montado ANTES de que llegue el primer text-delta -- se
             // re-adjunta para quedar DEBAJO de la burbuja recien creada
@@ -2071,6 +2621,10 @@ async function renderIncomingStream(resp, turnMessageId = null, turnSessionId = 
           assistantText = "";
           resetToolRow();
         },
+        discardAssistant, // REQ-014 b
+        markStopped: () => {
+          stoppedByUser = true; // revision F6: ver closeCurrentAssistantTurn
+        },
         toolBadges,
         responseSlot,
       });
@@ -2100,6 +2654,9 @@ async function renderIncomingStream(resp, turnMessageId = null, turnSessionId = 
 // (2026-09-15): un pedido de optimizacion/calculo tardo 13:44 min de los
 // cuales solo 37ms fueron tools de Vision -- los ~13 minutos restantes el
 // usuario no tenia ninguna señal de que algo seguia en curso.
+// (Desde REQ-002 de fix-detener-y-progreso-visible el backend emite «Pensando
+// el próximo paso… (paso N)» en cada paso; los puntitos quedan como red de
+// seguridad hasta que llega ese evento.)
 let _thinkingEl = null;
 
 function showOptimisticThinking() {
@@ -2164,6 +2721,43 @@ function scheduleThinkingTip() {
   }, THINKING_TIP_DELAY_MS);
 }
 
+// PQ-003 / BL-012 (opcion (a), ADR-018): si el MODELO no empieza a responder en 30 s, se avisa en pantalla y se ofrece esperar o cambiar
+// de modelo. Solo informa: no salta de modelo ni corta el pedido. Medido en perf.log: 7 turnos esperaron mas de 2 min (peor, 733 s) sin
+// ninguna senal de que la demora era del modelo. Se arma en el click de Enviar y de nuevo tras cada resultado de tool (el tramo siguiente
+// tambien es del modelo), y se desarma apenas el modelo produce algo (texto, una tool-call, o -- REQ-005 de fix-detener-y-progreso-visible
+// -- el primer aviso `tool-writing` de que esta escribiendo los argumentos de una herramienta) o el turno termina.
+const SLOW_MODEL_NOTICE_MS = 30_000;
+let _slowModelTimer = null;
+let _slowModelNoticeEl = null;
+
+function armSlowModelNotice() {
+  cancelSlowModelNotice();
+  _slowModelTimer = setTimeout(() => {
+    _slowModelTimer = null;
+    if (state.sending <= 0 || _slowModelNoticeEl) return;
+    const wrap = document.createElement("div");
+    wrap.className = "msg assistant";
+    const note = document.createElement("div");
+    note.className = "msg-slow-model-notice";
+    note.setAttribute("role", "status");
+    // REQ-005 (spec fix-detener-y-progreso-visible): no dice «sin responder» -- en el caso real el modelo SI estaba trabajando (escribia
+    // un archivo de 15 KB como argumento de una herramienta). Solo dice lo que se sabe: que tarda mas de lo normal.
+    note.textContent = "⏳ El modelo está tardando más de lo normal (lleva más de 30 segundos). Podés esperar, o cambiar de modelo desde el selector de modelos y volver a enviar. No cambio nada por mi cuenta.";
+    wrap.appendChild(note);
+    messagesEl.appendChild(wrap);
+    _slowModelNoticeEl = wrap;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }, SLOW_MODEL_NOTICE_MS);
+}
+
+function cancelSlowModelNotice() {
+  clearTimeout(_slowModelTimer);
+  _slowModelTimer = null;
+  if (!_slowModelNoticeEl) return;
+  _slowModelNoticeEl.remove();
+  _slowModelNoticeEl = null;
+}
+
 function cancelThinkingTip() {
   clearTimeout(_thinkingTipTimer);
   _thinkingTipTimer = null;
@@ -2172,10 +2766,11 @@ function cancelThinkingTip() {
   _thinkingTipEl = null;
 }
 
-async function sendMessage(text, { messageId = null, images = null, voiceConfirm = false } = {}) {
+async function sendMessage(text, { messageId = null, images = null, voiceConfirm = false, attachments = null, sentFiles = null } = {}) {
   // spec contexto-multimodal REQ-004: un mensaje con SOLO imagenes (sin
   // texto) es valido -- el chequeo original solo miraba el texto.
-  if (!text.trim() && (!images || images.length === 0)) return;
+  // spec adjuntar-archivos-chat REQ-003: tambien es valido con SOLO archivos.
+  if (!text.trim() && (!images || images.length === 0) && (!attachments || attachments.length === 0)) return;
   // NOTA sobre el cambio de comportamiento (pedido explicito del usuario):
   // el TEXTAREA/boton "Enviar" ya no permite mandar un mensaje nuevo
   // mientras Vision esta ocupada (ver el guard en formEl "submit" mas
@@ -2189,11 +2784,16 @@ async function sendMessage(text, { messageId = null, images = null, voiceConfirm
   const wasAlreadyBusy = state.sending > 0;
   state.sending += 1;
   questionPanelEl.classList.add("hidden");
+  // REQ-018 (spec fix-detener-y-progreso-visible): cualquier mensaje de esta sesion (una opcion o texto libre) contesta su pregunta
+  // pendiente: la marca de la lista se va y no vuelve a aparecer al regresar.
+  resolvePendingQuestion(state.sessionId);
   if (!wasAlreadyBusy) setConnStatus("busy", "Vision está trabajando…");
 
   const msgId = messageId || crypto.randomUUID();
-  appendMessage("user", text, { messageId: msgId, images });
+  appendMessage("user", text, { messageId: msgId, images, attachments: sentFiles });
   if (!wasAlreadyBusy) resetToolRow();
+  // REQ-014 f: el boton pasa a «Detener» ya mismo (abajo), antes del primer evento: si se aprieta ahora, es para ESTE mensaje.
+  if (!wasAlreadyBusy) noteWatchedTurn(state.sessionId, msgId);
 
   // Investigacion de rendimiento 2026-09 ("Vision tarda mucho, se siente sin
   // respuesta"): feedback INSTANTANEO en el mismo click, antes de mandar el
@@ -2206,6 +2806,7 @@ async function sendMessage(text, { messageId = null, images = null, voiceConfirm
     setSendButtonState("active");
     showOptimisticThinking();
     scheduleThinkingTip();
+    armSlowModelNotice();
   }
 
 try {
@@ -2225,22 +2826,26 @@ try {
         message_id: msgId,
         model: selectedModelForRequest(),
         images: images && images.length > 0 ? images : undefined,
+        // REQ-003 (spec adjuntar-archivos-chat): solo la REFERENCIA; el aviso de
+        // rutas para el agente lo arma el backend.
+        attachments: attachments && attachments.length > 0 ? attachments : undefined,
         // REQ-006/009 (spec asistente-contextual-voz): marca este turno
         // como originado en el modo Cerebro -- activa la confirmacion
         // hablada del lado del backend antes de ejecutar tools peligrosas
         // (bash/write/edit). false (default) = chat de texto normal, sin
         // cambio de comportamiento.
         voice_confirm: voiceConfirm || undefined,
-        // spec informe-tecnico-hablado REQ-008/009/010: con el informe
-        // prendido el backend narra el codigo en vivo, pide comentarios y
-        // anuncia el avance del plan.
+        // spec informe-tecnico-hablado: avisa al backend que se narre (solo si hay voz Y el interruptor).
         narrate: (isTtsEnabled() && isTechReportEnabled()) || undefined,
+        // REQ-012: nivel del informe ('summary' | 'detailed'); el backend trata lo desconocido como 'summary'.
+        narrate_level: isTtsEnabled() && isTechReportEnabled() ? getTechReportLevel() : undefined,
       }),
     });
     await renderIncomingStream(resp, msgId, turnSessionId);
   } catch (err) {
     hideOptimisticThinking();
     cancelThinkingTip();
+    cancelSlowModelNotice();
     // Solo un corte de red real es "sin conexión": un bug de la interfaz
     // (ej. el ReferenceError de 2026-09-20) no debe disfrazarse de eso.
     const offline = isOfflineError(err);
@@ -2255,6 +2860,7 @@ try {
       state.sending = 0;
       hideOptimisticThinking(); // red de seguridad: nunca debe sobrevivir al fin del turno
       cancelThinkingTip(); // idem -- el tip tampoco debe sobrevivir al turno
+      cancelSlowModelNotice(); // ni el aviso de modelo lento
       if (connStatusEl.dataset.state === "busy") setConnStatus("online", "Vision en línea");
       setSendButtonState("idle");
       // Red de seguridad: si el stream murio sin emitir 'done'/'error'
@@ -2266,6 +2872,294 @@ try {
     }
   }
 }
+
+// REQ-002 (navegador-integrado-ventana): claves de eventos browser-page-* ya
+// atendidos, para que recibirlos dos veces no reabra el panel.
+const _browserPageEventsSeen = new Set();
+
+// REQ-014 f (spec fix-detener-y-progreso-visible): el turno que el usuario esta VIENDO responder en la sesion activa. Cada evento de un
+// turno trae su `turn_id` (backend: `_drain_session_queue`); Detener lo manda y el backend frena solo ESE turno. Antes, un Detener en los
+// ultimos milisegundos de un turno frenaba al SIGUIENTE mensaje de la cola, que acababa de arrancar. Sin id conocido, Detener va sin id
+// (como siempre: frena lo que este corriendo).
+let _watchedTurn = { sessionId: null, turnId: null };
+
+function noteWatchedTurn(sessionId, turnId) {
+  if (sessionId && turnId) _watchedTurn = { sessionId, turnId };
+}
+
+function watchedTurnIdFor(sessionId) {
+  return _watchedTurn.sessionId === sessionId ? _watchedTurn.turnId : null;
+}
+
+// REQ-014 b: mensajes que el usuario BORRO en esta pagina. Si su turno ya habia arrancado, el backend lo frena y lo descarta (memoria y
+// SQLite); lo que todavia llegue de ese turno (texto a medias, o un 'done' que se cruzo con el borrado) no se guarda en la copia local
+// ni se lee en voz alta: el mensaje ya no existe.
+const _deletedTurnIds = new Set();
+
+// =========================================================================
+// Spec aviso-proceso-terminado (REQ-001..007, decisiones D1-D4 del usuario 2026-10-13). Pedido: «una notificacion abajo a la derecha
+// cuando terminó un proceso solicitado y tenga todas las tareas en completed». D1 = SOLO la notificacion de Windows: la API
+// `Notification` del navegador, que Windows muestra abajo a la derecha este o no mirando Vision (minimizado, en otra pestaña o en otra
+// aplicacion). D2 = el disparador es el mismo momento del `done` (la barra llega al 100 % y Vision empieza a hablar). D3 = suena el
+// sonido de notificacion de Windows: Vision no pasa `silent` ni suena nada propio (REQ-004; se cambia en Windows).
+// =========================================================================
+// REQ-006: interruptor «Avisarme cuando termine» (Configuración > Audio), prendido de fabrica. Por readPreference/savePreference (REQ-016
+// de fix-detener-y-progreso-visible): sin almacenamiento, el cambio vale igual hasta recargar.
+const NOTIFY_ON_FINISH_KEY = "vision.notifyOnFinish";
+// REQ-003: marca por turno ya avisado (`vision.notified.<turnId>` = hora del aviso), compartida por todas las pestañas del navegador. Las
+// marcas viejas se borran solas: un turno ya terminado no vuelve a llegar despues de un dia.
+const NOTIFIED_MARK_PREFIX = "vision.notified.";
+const NOTIFIED_MARK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+// REQ-003: dos pestañas mirando la misma sesion reciben el MISMO `done` casi a la vez, y la marca de localStorage puede tardar en verse
+// de una pestaña a la otra. El candado del navegador (Web Locks, atomico entre pestañas) decide cual avisa; se retiene unos segundos
+// para que la otra lo encuentre tomado, y para entonces ya ve la marca.
+const NOTIFY_LOCK_HOLD_MS = 4000;
+// REQ-007: el permiso negado se explica UNA vez (tambien entre recargas); si despues se concede, vuelve a valer para una negativa futura.
+const NOTIFY_DENIED_NOTICE_KEY = "vision.notify.deniedNoticeShown";
+// REQ-002: «recortado a unas 3 lineas» de la notificacion de Windows.
+const NOTIFY_SUMMARY_MAX_CHARS = 180;
+const NOTIFY_ICON_URL = new URL("./assets/favicon-180.png", window.location.href).href;
+const NOTIFY_HOW_TO_ALLOW =
+  "Para habilitarlas en Edge: tocá el candado de la barra de direcciones > Permisos del sitio > Notificaciones > Permitir, y recargá la página.";
+const NOTIFY_DENIED_TEXT =
+  `Vision no puede avisarte en Windows cuando termina: el navegador tiene bloqueadas sus notificaciones. ${NOTIFY_HOW_TO_ALLOW} ` +
+  "Si no querés el aviso, apagá «Avisarme cuando termine» en Configuración > Audio.";
+const NOTIFY_FAILED_TEXT =
+  "Windows no mostró el aviso de que Vision terminó: el navegador no lo permitió. Podés revisarlo en Configuración > Audio > «Avisarme cuando termine».";
+// REQ-007: lo que dice Configuración debajo del interruptor segun el permiso del navegador.
+const NOTIFY_PERMISSION_STATUS = {
+  granted: "El navegador ya dio permiso: Windows muestra el aviso abajo a la derecha.",
+  default: "La primera vez el navegador te va a pedir permiso para mostrar notificaciones: elegí «Permitir».",
+  denied: `El navegador tiene bloqueadas las notificaciones de Vision. ${NOTIFY_HOW_TO_ALLOW}`,
+  unsupported: "Este navegador no puede mostrar avisos de Windows. Vision funciona igual, sin el aviso.",
+};
+
+// REQ-001: sessionId -> { turnId, todos }: la ULTIMA lista de tareas que llego de un turno de esa sesion. Se recuerda aunque la sesion no
+// sea la activa (el panel de tareas pinta solo la activa, REQ-018 de fix-detener-y-progreso-visible): un turno de una sesion de fondo o
+// del loop tambien avisa. Solo cuenta la lista de ESE turno: un «gracias» despues de un plan terminado no repite el aviso.
+const _turnTodosBySession = new Map();
+const _notifiedTurns = new Set(); // REQ-003: turnos ya avisados (o descartados) en esta pestaña
+let _notifyPermissionAskedOnSend = false; // REQ-007: el primer clic de Enviar pide el permiso, no cada envio
+let _notifyFailureNoticeShown = false;
+
+function isNotifyOnFinishEnabled() {
+  const raw = readPreference(NOTIFY_ON_FINISH_KEY);
+  return raw === null ? true : raw === "true"; // REQ-006: prendido de fabrica
+}
+
+function setNotifyOnFinishEnabled(enabled) {
+  savePreference(NOTIFY_ON_FINISH_KEY, String(Boolean(enabled)));
+}
+
+// REQ-007: "granted" | "default" | "denied" | "unsupported" (navegador sin la API: nada se rompe, solo no hay aviso).
+function notifyPermission() {
+  try {
+    return typeof window.Notification === "function" ? String(window.Notification.permission || "default") : "unsupported";
+  } catch {
+    return "unsupported";
+  }
+}
+
+function rememberTurnTodos(sessionId, turnId, todos) {
+  if (!sessionId) return;
+  _turnTodosBySession.set(sessionId, { turnId: turnId || null, todos: Array.isArray(todos) ? todos : [] });
+}
+
+// REQ-001: Detener, un error o un mensaje borrado cierran el turno sin aviso: su lista ya no puede disparar nada.
+function forgetTurnTodos(sessionId) {
+  _turnTodosBySession.delete(sessionId);
+}
+
+// REQ-001: N (>= 1) si TODAS las tareas (y sus sub-tareas) estan `completed`; 0 si no. Una cancelada o pendiente no es «todas completed».
+function allTasksCompletedCount(todos) {
+  if (!Array.isArray(todos) || todos.length === 0) return 0;
+  const completed = (t) => Boolean(t) && t.status === "completed";
+  const all = todos.every((t) => completed(t) && (Array.isArray(t.subtasks) ? t.subtasks : []).every(completed));
+  return all ? todos.length : 0;
+}
+
+// REQ-002: arriba el nombre de la sesion, como figura en la lista (el de la primera pregunta si todavia no tiene uno guardado).
+function sessionNameForNotice(sessionId) {
+  const saved = loadSessionsIndex()[sessionId]?.name;
+  const firstUser = sessionId === state.sessionId ? chatHistory.find((m) => m.role === "user" && m.text) : null;
+  const name = String(saved || (firstUser ? firstUser.text.slice(0, 40) : "") || "").replace(/\s+/g, " ").trim();
+  return name || "Vision";
+}
+
+function clockForNotice(date) {
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+// REQ-002/005: el comienzo de la respuesta en texto PLANO (sin markdown ni etiquetas HTML: la notificacion nunca interpreta HTML, pero
+// `**`, `#` o `<b>` sueltos se leerian tal cual), en una sola linea y cortado en una palabra con «…».
+function plainSummaryForNotice(text) {
+  const plain = toPlainText(String(text || ""))
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<\/?[a-zA-Z][^<>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\s+([.,;:!?])/g, "$1")
+    .trim();
+  if (plain.length <= NOTIFY_SUMMARY_MAX_CHARS) return plain;
+  let cut = plain.slice(0, NOTIFY_SUMMARY_MAX_CHARS);
+  const lastSpace = cut.lastIndexOf(" ");
+  if (lastSpace > NOTIFY_SUMMARY_MAX_CHARS * 0.6) cut = cut.slice(0, lastSpace);
+  return `${cut.replace(/[\s.,;:!?¡¿(—–-]+$/u, "")}…`;
+}
+
+function finishedNoticeBody(answerText, total) {
+  const tasks = `${total} de ${total} ${total === 1 ? "tarea" : "tareas"}`;
+  const summary = plainSummaryForNotice(answerText);
+  return summary ? `${summary}\n${tasks}` : tasks;
+}
+
+function pruneNotifiedMarks() {
+  try {
+    const now = Date.now();
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(NOTIFIED_MARK_PREFIX)) keys.push(key);
+    }
+    for (const key of keys) {
+      const at = Number(localStorage.getItem(key));
+      if (!Number.isFinite(at) || now - at > NOTIFIED_MARK_MAX_AGE_MS) localStorage.removeItem(key);
+    }
+  } catch {
+    // noop -- sin localStorage no hay marcas que limpiar
+  }
+}
+
+// REQ-003: `show` corre una sola vez por turno entre TODAS las pestañas: el candado decide quien avisa en el mismo instante y la marca de
+// localStorage cubre a una pestaña que llegue despues (o a esta misma tras F5). Sin candado ni almacenamiento, cada pestaña decide sola y
+// el `tag` (el id del turno) igual hace que Windows reemplace el aviso repetido en vez de sumar otro.
+function claimTurnNotice(turnKey, show) {
+  if (_notifiedTurns.has(turnKey)) return;
+  _notifiedTurns.add(turnKey);
+  const markKey = NOTIFIED_MARK_PREFIX + turnKey;
+  const markIfFirst = () => {
+    try {
+      if (localStorage.getItem(markKey) !== null) return false; // otra pestaña (o esta antes de recargar) ya aviso este turno
+      pruneNotifiedMarks();
+      localStorage.setItem(markKey, String(Date.now()));
+    } catch {
+      // noop -- sin localStorage cada pestaña decide sola (ver arriba)
+    }
+    return true;
+  };
+  const locks = navigator.locks;
+  if (!locks || typeof locks.request !== "function") {
+    if (markIfFirst()) show();
+    return;
+  }
+  locks
+    .request(`vision.notify.${turnKey}`, { ifAvailable: true }, async (lock) => {
+      if (!lock || !markIfFirst()) return; // otra pestaña lo esta avisando en este mismo momento, o ya lo aviso
+      show();
+      await new Promise((resolve) => setTimeout(resolve, NOTIFY_LOCK_HOLD_MS));
+    })
+    .catch(() => {
+      if (markIfFirst()) show(); // el candado fallo (no deberia): la marca sola alcanza
+    });
+}
+
+function showNotifyNotice(text) {
+  const noticeEl = document.getElementById("notify-denied-notice");
+  if (!noticeEl) return;
+  document.getElementById("notify-denied-notice-text").textContent = text;
+  noticeEl.classList.remove("hidden");
+}
+
+// REQ-007: el navegador nego el permiso: se dice UNA vez, en lenguaje claro y con como habilitarlo.
+function warnNotifyDeniedOnce() {
+  if (readPreference(NOTIFY_DENIED_NOTICE_KEY) === "true") return;
+  savePreference(NOTIFY_DENIED_NOTICE_KEY, "true");
+  showNotifyNotice(NOTIFY_DENIED_TEXT);
+}
+
+// REQ-002: la notificacion de Windows. Queda hasta que se la toque o se la cierre (`requireInteraction`); tocarla trae a Vision al
+// frente, abre ESA sesion y la cierra. El `tag` es el id del turno (REQ-003). Sin `silent`: suena el sonido de Windows (REQ-004).
+function showFinishedNotice(sessionId, tag, title, body) {
+  let notice;
+  try {
+    notice = new window.Notification(title, { body, tag, requireInteraction: true, icon: NOTIFY_ICON_URL });
+  } catch (err) {
+    console.warn("Windows no mostró el aviso de que Vision terminó:", err);
+    if (!_notifyFailureNoticeShown) {
+      _notifyFailureNoticeShown = true;
+      showNotifyNotice(NOTIFY_FAILED_TEXT);
+    }
+    return;
+  }
+  notice.onclick = () => {
+    try {
+      window.focus();
+    } catch {
+      // noop -- si el navegador no deja traer la ventana al frente, igual se abre la sesion
+    }
+    switchToSession(sessionId);
+    notice.close();
+  };
+}
+
+// REQ-001: se llama en el `done` de cada turno (de la sesion activa, de una de fondo o del loop), con el texto de su respuesta.
+function notifyIfAllTasksCompleted(sessionId, turnId, answerText) {
+  const record = _turnTodosBySession.get(sessionId);
+  _turnTodosBySession.delete(sessionId);
+  if (!record || record.turnId !== (turnId || null)) return; // la ultima lista no es de ESTE turno (o el turno no tuvo lista)
+  const total = allTasksCompletedCount(record.todos);
+  if (total === 0 || !isNotifyOnFinishEnabled()) return;
+  const permission = notifyPermission();
+  if (permission === "denied") {
+    warnNotifyDeniedOnce();
+    return;
+  }
+  if (permission !== "granted") return; // sin decidir: se pide desde un clic del usuario (REQ-007), nunca aca; sin la API, nada
+  forgetPreference(NOTIFY_DENIED_NOTICE_KEY);
+  const finishedAt = new Date();
+  const title = `${sessionNameForNotice(sessionId)} · ${clockForNotice(finishedAt)}`;
+  const body = finishedNoticeBody(answerText, total);
+  const turnKey = turnId || `${sessionId}:${finishedAt.getTime()}`;
+  claimTurnNotice(turnKey, () => showFinishedNotice(sessionId, turnKey, title, body));
+}
+
+// REQ-007: el estado del permiso, debajo del interruptor de Configuración.
+function refreshNotifyPermissionStatus() {
+  const statusEl = document.getElementById("cfg-notify-finish-permission");
+  const permission = notifyPermission();
+  if (permission === "granted") forgetPreference(NOTIFY_DENIED_NOTICE_KEY);
+  if (statusEl) statusEl.textContent = NOTIFY_PERMISSION_STATUS[permission] || "";
+}
+
+// REQ-007: el permiso se pide SOLO desde un clic del usuario (el navegador lo exige y asi no aparece un cartel de la nada).
+function requestNotifyPermission() {
+  if (notifyPermission() !== "default") return;
+  let answer;
+  try {
+    answer = window.Notification.requestPermission();
+  } catch {
+    return; // el navegador no deja pedirlo: queda sin aviso, sin romper nada
+  }
+  if (!answer || typeof answer.then !== "function") return;
+  answer.then(
+    (result) => {
+      refreshNotifyPermissionStatus();
+      if (result === "denied") warnNotifyDeniedOnce();
+    },
+    () => refreshNotifyPermissionStatus()
+  );
+}
+
+// REQ-007: el primer clic de Enviar (con el interruptor prendido y el permiso sin decidir) pide el permiso; los siguientes ya no.
+function askNotifyPermissionOnFirstSend() {
+  if (_notifyPermissionAskedOnSend || !isNotifyOnFinishEnabled() || notifyPermission() !== "default") return;
+  _notifyPermissionAskedOnSend = true;
+  requestNotifyPermission();
+}
+
+pruneNotifiedMarks();
+document.getElementById("notify-denied-notice-close").addEventListener("click", () => {
+  document.getElementById("notify-denied-notice").classList.add("hidden");
+});
 
 function handleEvent(event, ctx) {
 // REQ-001: el boton unico Enviar/Detener pasa a "Detener" apenas hay
@@ -2280,7 +3174,10 @@ function handleEvent(event, ctx) {
   // de submit (abajo) bloqueaba ESCRIBIR/enviar en B ("no me deja
   // escribir mientras procesa la otra consulta"). Fix: solo se dispara el
   // boton si el stream es de la sesion ACTIVA (ctx.turnSessionId).
-  if (!["queued", "stopped", "done", "error"].includes(event.type)) {
+  // REQ-014 f: el turno de este evento pasa a ser el que el usuario esta viendo (Detener lo nombra).
+  if (event.turn_id && ctx.turnSessionId === state.sessionId) noteWatchedTurn(ctx.turnSessionId, event.turn_id);
+  // REQ-014 d: 'dequeued' (un mensaje salio de la cola) tampoco es actividad del modelo, como 'queued'.
+  if (!["queued", "dequeued", "stopped", "done", "error"].includes(event.type)) {
     if (ctx.turnSessionId === state.sessionId) {
       if (sendOrStopBtnEl.dataset.state === "idle") setSendButtonState("active");
       // El indicador optimista ya cumplio su funcion (feedback instantaneo
@@ -2294,6 +3191,10 @@ function handleEvent(event, ctx) {
 
   switch (event.type) {
     case "text-delta":
+      // REQ-018 (spec fix-detener-y-progreso-visible): el texto se sigue juntando aunque el turno sea de otra sesion (se guarda en SU
+      // copia al terminar, ver closeCurrentAssistantTurn), pero se escribe en la burbuja de SU turno, nunca en la pantalla de la
+      // sesion activa (ver appendAssistantText). El aviso de modelo lento es de la sesion activa: solo lo cancela un turno suyo.
+      if (ctx.turnSessionId === state.sessionId) cancelSlowModelNotice(); // el modelo ya empezo a responder
       ctx.appendAssistantText(event.data.text);
       break;
 
@@ -2302,10 +3203,29 @@ function handleEvent(event, ctx) {
       break;
 
     case "tool-call": {
+      // REQ-018: la insignia de la herramienta es solo visual; sin el turno en pantalla (`responseSlot` null) caia al final del chat
+      // de la sesion ACTIVA. De otra sesion no se dibuja (su resultado se ve al volver, desde SQLite).
+      if (ctx.turnSessionId !== state.sessionId) break;
+      cancelSlowModelNotice(); // el modelo respondio (con una herramienta)
       const badge = appendToolBadge(event.data.name, event.data.arguments, ctx.responseSlot);
       ctx.toolBadges.set(event.data.id, badge);
       break;
     }
+
+    // REQ-003/005 (spec fix-detener-y-progreso-visible): el modelo esta ESCRIBIENDO los argumentos de una herramienta (el `tool-call`
+    // recien llega cuando termina). Caso real: un `write` de 15 KB tardo ~69 s y la pantalla decia «sin responder». Solo para la
+    // sesion activa, como el resto de lo que pinta la tarjeta de progreso.
+    case "tool-writing":
+      if (ctx.turnSessionId !== state.sessionId) break;
+      cancelSlowModelNotice(); // el modelo SI esta respondiendo: escribe una herramienta
+      showWritingProgress(event.data, ctx.responseSlot);
+      break;
+
+    // REQ-004 (spec fix-detener-y-progreso-visible): ultimas lineas de salida del bash en curso (evento fuera de banda de la tool).
+    case "tool-output":
+      if (ctx.turnSessionId !== state.sessionId) break;
+      showLiveOutput(event.data);
+      break;
 
     case "tool-result": {
       const badge = ctx.toolBadges.get(event.data.id);
@@ -2320,14 +3240,21 @@ function handleEvent(event, ctx) {
         // el evento SSE "chart-ready" -> renderChart(), sin depender de
         // este boton manual en el badge de la tool-call.
       }
-      logTool(event.data.name, event.data.result);
-      // Investigacion de rendimiento 2026-09: apenas termina una tool, el
-      // backend no vuelve a avisar "Pensando…" para el proximo paso (ese
-      // progress-estimate es SOLO del primer paso del turno, ver
-      // llm/loop.py) -- se re-muestra el indicador optimista para no dejar
-      // ese tramo en silencio total (puede ser el tramo mas largo del
-      // turno, ver comentario de showOptimisticThinking).
-      if (ctx.turnSessionId === state.sessionId) showOptimisticThinking();
+      // REQ-018: el registro de herramientas (y su contador) del panel lateral es de la sesion activa.
+      if (ctx.turnSessionId === state.sessionId) logTool(event.data.name, event.data.result);
+      // Investigacion de rendimiento 2026-09: apenas termina una tool, se
+      // re-muestra el indicador optimista para no dejar en silencio el
+      // tramo siguiente (puede ser el tramo mas largo del turno, ver
+      // comentario de showOptimisticThinking). Desde fix-detener-y-progreso-
+      // visible el backend ademas avisa «Pensando el próximo paso… (paso N)»
+      // en cada paso (llm/loop.py), que reemplaza a los puntitos apenas llega.
+      if (ctx.turnSessionId === state.sessionId) {
+        // REQ-002 (spec fix-detener-y-progreso-visible): la herramienta termino, asi que su operacion se cierra (antes la tarjeta
+        // seguia diciendo «Ejecutando comando…» de un comando que ya habia terminado mientras el modelo pensaba el paso siguiente).
+        finishProgress();
+        showOptimisticThinking();
+        armSlowModelNotice(); // lo que sigue es otra espera al modelo
+      }
       break;
     }
 
@@ -2340,6 +3267,9 @@ function handleEvent(event, ctx) {
       // estaba en la sesion B, los eventos "todo" de A pisaban el panel de
       // tareas que B esta mirando (y viceversa al volver a A) -- reportado
       // por el usuario como "la lista de tareas se rompio/desaparecio".
+      // REQ-001 (spec aviso-proceso-terminado): la lista se recuerda por sesion y por turno ANTES de ese filtro, sin pintarla: el `done`
+      // de una sesion de fondo (o del loop) tambien avisa si todas sus tareas quedaron completed.
+      rememberTurnTodos(ctx.turnSessionId, event.turn_id, event.data.todos);
       if (ctx.turnSessionId === state.sessionId) {
         renderTodos(event.data.todos);
         _techCurrentTask = currentTaskOf(event.data.todos); // spec informe-tecnico-hablado REQ-011
@@ -2351,7 +3281,7 @@ function handleEvent(event, ctx) {
     // avance del plan, armados por el backend (ya sin secretos). Solo en voz.
     case "narration":
       if (ctx.turnSessionId !== state.sessionId) break;
-      if (isTechReportEnabled()) speakTechReport(event.data.text);
+      if (isTechReportEnabled()) speakTechReport(event.data.text, { lead: Boolean(event.data.lead) });
       ensureTechKeepAlive();
       break;
 
@@ -2359,7 +3289,16 @@ function handleEvent(event, ctx) {
     // labels/values completos (sin el truncado a 4000 chars del SSE,
     // resuelto server-side via SQLite) -- el frontend solo dibuja.
     case "chart-ready":
+      // REQ-018 (spec fix-detener-y-progreso-visible): el grafico de una sesion no se abre encima de otra (antes abria el modal en la
+      // sesion que el usuario estuviera mirando).
+      if (ctx.turnSessionId !== state.sessionId) break;
       renderChart(event.data);
+      break;
+
+    // spec conexiones-con-nombre Fase B: arbol / resultados / pagina de Confluence como bloque seleccionable en el chat.
+    case "confluence-tree":
+      if (ctx.turnSessionId !== state.sessionId) break;
+      renderConfluenceTree(event.data);
       break;
 
     // REQ-002/003 (spec update-skills): el backend emite este evento
@@ -2402,7 +3341,10 @@ function handleEvent(event, ctx) {
       // esperando al usuario, cuando en realidad ya no hacia falta ningun
       // click (el modelo ya siguio adelante). El usuario vela ese panel
       // "sin resolver" y asumia que la recomendada nunca se tomo.
-      renderQuestion(event.data.question, event.data.options, event.data.auto_answered);
+      // REQ-018 (spec fix-detener-y-progreso-visible), reporte del usuario 2026-10-13: «salte a otra sesion ... y me hizo una pregunta
+      // referida a la sesion de la cual venia». Esto dibujaba el panel global sin mirar la sesion del evento, y la opcion elegida se
+      // mandaba a la sesion ACTIVA (la respuesta de A terminaba en B). Ahora la pregunta queda pendiente de SU sesion.
+      handleQuestionEvent(event.data, ctx.turnSessionId);
       break;
 
     // REQ-002/004/005 (spec barra-progreso-adaptativa): el backend avisa
@@ -2425,11 +3367,18 @@ function handleEvent(event, ctx) {
       // ignora del todo (el resultado real se ve al volver a esa sesion,
       // que lee de SQLite -- ver activateSession).
       if (ctx.turnSessionId !== state.sessionId) break;
+      // REQ-008 b: con `pct` es avance REAL (parseo de un PDF), no un presupuesto de tiempo.
+      if (typeof event.data.pct === "number") {
+        setRealProgress({ label: event.data.label, pct: event.data.pct }, ctx.responseSlot);
+        break;
+      }
       startProgress(
         {
           label: event.data.label,
           budgetMs: event.data.budget_ms,
           hasHistory: event.data.has_history,
+          // REQ-004 (fix-detener-y-progreso-visible): la salida en vivo se pega solo a la operacion de ese mismo id.
+          opId: event.data.id ?? null,
         },
         ctx.responseSlot
       );
@@ -2447,11 +3396,10 @@ function handleEvent(event, ctx) {
       // por sesion activa -- si la sesion A sigue con tool-calls mientras el
       // usuario esta en B, no debe narrar por voz el progreso de A ("si la
       // voz esta activada sigue leyendo lo de la sesion anterior").
-      // spec informe-tecnico-hablado REQ-001/003/004: con "Hablar informe
-      // tecnico" prendido, en vez de la etiqueta corta se dice la frase que
-      // arma el backend con lo que Vision ejecuta (`speech`), solo para las
-      // acciones (`speech` null = leer/buscar/pensar: silencio). Las frases
-      // viejas que no llegaron a sonar se reemplazan por la mas nueva.
+      // spec informe-tecnico-hablado REQ-001/003/004: con "Hablar informe tecnico" prendido, en
+      // vez de la etiqueta corta se dice la frase que arma el backend con lo que Vision
+      // ejecuta (`speech`), solo para las acciones (`speech` null = leer/buscar/pensar:
+      // silencio). Las frases viejas que no llegaron a sonar se reemplazan por la mas nueva.
       if (ctx.turnSessionId !== state.sessionId) break;
       if (isTechReportEnabled()) {
         if (event.data.speech) speakTechReport(event.data.speech);
@@ -2470,6 +3418,7 @@ function handleEvent(event, ctx) {
       // motivo: si no se cierra/resetea aca, el proximo turno sintetico
       // arrastraria el `assistantText` del que fallo.
       ctx.closeCurrentAssistantTurn();
+      forgetTurnTodos(ctx.turnSessionId); // REQ-001 (spec aviso-proceso-terminado): un turno que termina en error no avisa
       stopTechKeepAlive(ctx.turnSessionId); // spec informe-tecnico-hablado REQ-011
       // Mismo bug/fix que "progress-estimate" arriba: un error de un turno
       // en background (sesion X) no debe aparecer en la sesion Y que el
@@ -2483,7 +3432,8 @@ function handleEvent(event, ctx) {
       finishProgress();
       break;
 
-case "done":
+case "done": {
+      stopTechKeepAlive(ctx.turnSessionId); // spec informe-tecnico-hablado REQ-011
       // Bug real (2026-09-20, modo Loop): `closeCurrentAssistantTurn()`
       // debe correr SIEMPRE aca, sin importar la sesion activa -- ya tiene
       // su propio manejo interno (`stillOnOriginSession`) para decidir
@@ -2492,8 +3442,18 @@ case "done":
       // acumularia TODOS sus turnos sinteticos en un solo assistantText
       // sin resetear entre ellos -- el mismo bug de desorden de turnos,
       // pero para sesiones que ni siquiera se estan mirando.
+      // REQ-014 b (spec fix-detener-y-progreso-visible): si el usuario borro este mensaje mientras terminaba, lo que alcanzo a
+      // escribir se descarta (no se guarda ni se lee en voz alta) y el cierre de abajo ya no tiene nada que cerrar.
+      const deletedTurn = Boolean(event.turn_id && _deletedTurnIds.has(event.turn_id));
+      if (deletedTurn) ctx.discardAssistant();
+      // REQ-001/002 (spec aviso-proceso-terminado): el texto de la respuesta se toma ANTES de cerrar el turno (el cierre lo vacia para el
+      // turno siguiente de la misma conexion, p. ej. el loop).
+      const finishedAnswer = ctx.assistantText ? ctx.assistantText() : "";
       ctx.closeCurrentAssistantTurn();
-      stopTechKeepAlive(ctx.turnSessionId); // spec informe-tecnico-hablado REQ-011
+      // REQ-001 (spec aviso-proceso-terminado): en el mismo momento del fin (D2), sea de la sesion activa, de una de fondo o del loop:
+      // si la lista de tareas de ESTE turno quedo toda completed, aviso de Windows. Un mensaje que el usuario borro no avisa.
+      if (deletedTurn) forgetTurnTodos(ctx.turnSessionId);
+      else notifyIfAllTasksCompleted(ctx.turnSessionId, event.turn_id, finishedAnswer);
       // Mismo bug/fix que "progress-estimate"/"error"/"stopped" arriba: si
       // el turno que termina es de otra sesion (background, ej. un
       // agente), no corresponde cerrar la barra de progreso NI auto-abrir
@@ -2506,24 +3466,50 @@ case "done":
       // el 100% se alcanza por evidencia real de fin, nunca por la
       // interpolacion, que tiene techo en PROGRESS_CEILING).
       finishProgress();
-      // Auto-revelar el panel "Navegador" si ahora hay contenido nuevo
-      // (dashboards/pages que Vision escribio en este turno).
-      maybeAutoRevealBrowser();
+      // REQ-017 (spec fix-detener-y-progreso-visible): el resumen «Contexto» se pone al dia al terminar CADA turno (tambien los
+      // de la cola y los reenganchados), con el acordeon abierto o cerrado.
+      refreshContextUsage();
       break;
+    }
 
     // --- REQ-001/003/004: eventos nuevos de la spec parada-y-cola-mensajes ---
     case "queued":
       renderQueueBadge(event.data.message_id, event.data.position);
       break;
 
-    case "stopped":
+    // REQ-014 d (spec fix-detener-y-progreso-visible): un mensaje salio de la cola -- arranco ('started') o el usuario lo borro
+    // ('deleted'). Su cartel «En cola» se va y los que siguen esperando se renumeran con la cola que manda el backend. Antes este
+    // evento nunca se emitia y el cartel quedaba pegado aunque el mensaje ya se estuviera respondiendo. Llega a todas las conexiones
+    // de la sesion: es idempotente (y de otra sesion solo limpia la lista local: su cartel no esta en pantalla).
+    case "dequeued": {
+      removeQueueBadge(event.data.message_id);
+      if (Array.isArray(event.data.queue)) {
+        event.data.queue.forEach((id, position) => {
+          if (queuedTurns.has(id)) renderQueueBadge(id, position);
+        });
+      }
+      maybeShowQueueWarning();
+      if (event.data.reason === "started" && ctx.turnSessionId === state.sessionId) {
+        noteWatchedTurn(ctx.turnSessionId, event.data.message_id); // REQ-014 f: ese es el que ahora responde
+      }
+      break;
+    }
+
+    case "stopped": {
       stopTechKeepAlive(ctx.turnSessionId); // spec informe-tecnico-hablado REQ-011
+      forgetTurnTodos(ctx.turnSessionId); // REQ-001 (spec aviso-proceso-terminado): Detener no avisa aunque las tareas esten completed
+      // REQ-014 b: el turno se freno porque el usuario BORRO su mensaje (ya habia arrancado): lo que alcanzo a escribir se descarta
+      // (el backend tambien lo quita de memoria y de SQLite) y no queda un «Turno detenido» suelto en el chat de un mensaje que ya no esta.
+      const deletedByUser = Boolean(event.data && event.data.reason === "message_deleted");
+      if (deletedByUser) ctx.discardAssistant();
+      // Revision F6 (spec fix-detener-y-progreso-visible): lo que alcanzo a escribir se cierra al terminar el stream, SIN leerlo en voz alta.
+      if (ctx.markStopped) ctx.markStopped();
       // Mismo bug/fix que "progress-estimate"/"error" arriba: si el turno
       // detenido es de otra sesion (no la activa), no corresponde tocar
       // NADA de la UI que el usuario esta mirando -- ni el mensaje, ni el
       // boton Enviar/Detener, ni los indicadores optimistas, ni la barra.
       if (ctx.turnSessionId !== state.sessionId) break;
-      appendMessage("system-note", "⏹ Turno detenido por el usuario.", { persist: false });
+      if (!deletedByUser) appendMessage("system-note", "⏹ Turno detenido por el usuario.", { persist: false });
       setSendButtonState("idle");
       // BUG REAL detectado por el usuario (2026-09-16, screenshot): faltaban
       // estas dos lineas -- el indicador optimista (puntitos) y el tip de
@@ -2532,6 +3518,7 @@ case "done":
       // como si el turno siguiera en curso.
       hideOptimisticThinking();
       cancelThinkingTip();
+      cancelSlowModelNotice();
       // El turno se corto: la barra se oculta SIN completarse a 100%
       // (completarla sugeriria que la operacion termino bien, que es
       // justo lo contrario de lo que paso).
@@ -2541,6 +3528,7 @@ case "done":
       // el usuario ya presiono "Detener" seria confuso/contradictorio.
       cancelSpeech();
       break;
+    }
 
     case "message-edited":
       // Bug real corregido: el backend descarta el texto parcial que
@@ -2557,6 +3545,10 @@ case "done":
     // porque ninguna opcion traia el sufijo "(Recomendada)" -- suena la
     // alarma y muestra el banner hasta que el usuario responda o pare.
     case "loop-paused":
+      // REQ-018: el banner (y su alarma, que se apaga con el banner) es del loop de ESA sesion: en otra decia «respondé la pregunta de
+      // abajo» sin ninguna pregunta, y su «Detener loop» frenaba la sesion activa. Al volver, activateSession lo muestra segun el estado
+      // real (loop_paused_for_question) y la lista ya marca la sesion que pregunto.
+      if (ctx.turnSessionId !== state.sessionId) break;
       showLoopBanner();
       break;
 
@@ -2566,14 +3558,16 @@ case "done":
     // 'loop-paused' de arriba, no este) y se avisa el motivo si no fue
     // un simple exito silencioso.
 case "loop-stopped":
+      // Pedido del usuario (2026-09-13): si el loop termino TODAS las tareas
+      // (reason "completed"), suena la señal de EXITO para saberlo estando
+      // lejos de la PC. REQ-018: es solo un sonido (no pinta nada ni deja estado), asi que suena aunque el loop sea de otra sesion.
+      if (event.data.reason === "completed") playSuccessAlarm();
+      // REQ-018 (spec fix-detener-y-progreso-visible): el banner, el interruptor «Loop» y el aviso son de la sesion activa; el loop de
+      // otra sesion no los toca (al volver, activateSession los pone segun el estado real de esa sesion).
+      if (ctx.turnSessionId !== state.sessionId) break;
       hideLoopBanner();
       _loopRunning = false; // sincroniza el toggle "Loop" del panel de accesos rapidos
       if (quickPanelLooprunToggleEl) syncQuickPanelLoopState();
-      maybeAutoRevealBrowser(); // si el loop dejo dashboards/pages, revelarlos
-      // Pedido del usuario (2026-09-13): si el loop termino TODAS las tareas
-      // (reason "completed"), suena la señal de EXITO para saberlo estando
-      // lejos de la PC.
-      if (event.data.reason === "completed") playSuccessAlarm();
       if (event.data.reason === "max_turns") {
         appendMessage(
           "system-note",
@@ -2592,14 +3586,67 @@ case "loop-stopped":
     // sesion desde cero), ya que esta sesion ya existe y solo le falta
     // la carpeta.
     case "project-folder-required":
+      // REQ-018: el modal edita la sesion ACTIVA: con el pedido de otra sesion, el usuario le asignaba la carpeta a la que no era. En
+      // la sesion que lo pidio, el banner «Sin carpeta de proyecto» sigue ofreciendo asignarla.
+      if (ctx.turnSessionId !== state.sessionId) break;
       openSessionEditModal();
       break;
 
     // spec gestion-contexto-conversacion: solo la compactacion completa
     // genera un aviso; el pruning incremental permanece silencioso.
     case "system-note":
+      // REQ-018: el aviso (compactacion, «lleva N pasos», promesa vacia) es del turno de su sesion; en otra aparecia como si fuera de esa.
+      if (ctx.turnSessionId !== state.sessionId) break;
       appendMessage("system-note", event.data.text, { persist: false });
       break;
+
+    // REQ-001/002 (spec navegador-integrado-ventana): el backend ya decidio
+    // -- a nivel de TURNO completo, ver `_browser_index_snapshot` en
+    // llm/loop.py -- que este turno creo la pagina de entrada de la carpeta
+    // de vista previa (no existia antes, existe ahora), sin importar que
+    // tool la escribio. Bug real corregido (QA-034, "el panel se abre solo
+    // despues de generar un dashboard, cuando luego se hace una pregunta"):
+    // antes se re-chequeaba la huella del FILESYSTEM en cada 'done' contra
+    // una variable en memoria (`_browserSeenFingerprint`) que se reiniciaba
+    // en null con cada recarga de pestaña, asi que la primera pregunta de
+    // CUALQUIER tipo despues de recargar "descubria" una huella que en
+    // realidad ya era vieja. Ahora la apertura depende 100% de este evento
+    // puntual del turno, no de comparar estado persistente contra memoria
+    // volatil -- se abre como MUCHO una vez por pagina nueva, y solo si el
+    // panel esta cerrado (si el usuario lo tiene abierto, el polling de
+    // huella ya se encarga del refresh, ver pollQuickBrowserFingerprint).
+    case "browser-page-created": {
+      if (ctx.turnSessionId !== state.sessionId) break;
+      // Idempotente por message_id: recibir el mismo evento dos veces no
+      // reabre un panel que el usuario ya cerró.
+      const createdKey = `${state.sessionId}:${event.data.message_id || event.data.file}`;
+      if (_browserPageEventsSeen.has(createdKey)) break;
+      _browserPageEventsSeen.add(createdKey);
+      if (quickBrowserPanelEl.classList.contains("hidden")) openQuickBrowserPanel();
+      break;
+    }
+
+    // REQ-007: una pagina que YA existia se actualizo -- nunca reabre el
+    // panel solo (esa decision es 100% del usuario, REQ-001). Si esta
+    // cerrado, se avisa con una nota discreta y un boton para abrirlo; si
+    // esta abierto, no hace falta nada (el polling de huella ya refresca
+    // el iframe en vivo).
+    case "browser-page-updated": {
+      if (ctx.turnSessionId !== state.sessionId) break;
+      const updatedKey = `${state.sessionId}:upd:${event.data.message_id || event.data.file}`;
+      if (_browserPageEventsSeen.has(updatedKey)) break;
+      _browserPageEventsSeen.add(updatedKey);
+      if (quickBrowserPanelEl.classList.contains("hidden")) {
+        const note = appendMessage("system-note", "Se actualizó la vista previa. ", { persist: false });
+        const openBtn = document.createElement("button");
+        openBtn.type = "button";
+        openBtn.className = "msg-inline-action";
+        openBtn.textContent = "Abrir";
+        openBtn.addEventListener("click", () => openQuickBrowserPanel());
+        note?.querySelector(".msg-text")?.appendChild(openBtn);
+      }
+      break;
+    }
 
     case "model-switch":
       // spec salto-automatico-modelos REQ-002/003: que modelo responde de
@@ -2905,35 +3952,574 @@ async function addImageFiles(files) {
   renderPendingImages(); // REQ-004: multiples imagenes se acumulan, no se reemplazan
 }
 
-// REQ-001: pegar (Ctrl+V) -- el evento 'paste' del textarea trae los
-// archivos en clipboardData.files/items.
+// (spec adjuntar-archivos-chat) paste / soltar / boton de adjuntar viven ahora en el
+// bloque "Adjuntar ARCHIVOS" de abajo: cubren imagenes Y cualquier otro archivo.
+
+// =========================================================================
+// Adjuntar ARCHIVOS (spec adjuntar-archivos-chat, REQ-001/002/004/007/008/010).
+//
+// Extiende el flujo de imagenes de arriba sin tocarlo: las IMAGENES siguen
+// yendo en base64 por el body (contexto-multimodal); todo lo demas (Excel, CSV,
+// PDF, Word, texto, comprimidos...) se SUBE a `attachment/` de la carpeta de la
+// sesion y al enviar viaja solo la referencia (`attachments: [{path,...}]`). El
+// aviso de rutas para el agente lo arma el backend (REQ-003), nunca este codigo.
+//
+// Estados de un chip pendiente: uploading -> ready | error (REQ-004 a).
+// =========================================================================
+const pendingFilesRowEl = document.getElementById("pending-files-row");
+const attachDropOverlayEl = document.getElementById("attach-drop-overlay");
+
+const MAX_FILES_PER_MESSAGE = 10; // REQ-001 g (el backend tambien lo aplica)
+const MB_BYTES = 1024 * 1024;
+const BIG_TOKENS_WARNING = 100000; // REQ-008 c
+
+let pendingFiles = []; // [{ id, name, size, state, pct, error, meta, inplace, xhr }]
+let _attachThresholds = { warn_mb: 100, inplace_mb: 500 };
+
+function formatFileSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let size = bytes;
+  let i = 0;
+  while (size >= 1024 && i < units.length - 1) {
+    size /= 1024;
+    i += 1;
+  }
+  const text = i === 0 ? String(Math.round(size)) : size.toFixed(1).replace(".", ",");
+  return `${text} ${units[i]}`;
+}
+
+function formatTokens(n) {
+  if (!Number.isFinite(n) || n <= 0) return "";
+  return n >= 1000 ? `≈ ${Math.round(n / 1000)} k tokens` : `≈ ${n} tokens`;
+}
+
+// Icono por familia de archivo (REQ-004 b) -- mismo mapa que el backend (`kind_for`).
+const FILE_KIND_ICON = { excel: "📊", csv: "🧾", pdf: "📕", word: "📘", text: "📄", archive: "🗜️", file: "📎" };
+const FILE_KIND_BY_EXT = {
+  excel: [".xlsx", ".xlsm", ".xls", ".xlsb"],
+  csv: [".csv", ".tsv", ".parquet"],
+  pdf: [".pdf"],
+  word: [".docx", ".doc"],
+  text: [".txt", ".md", ".log", ".json", ".yaml", ".yml", ".xml", ".html", ".htm", ".py", ".js", ".ts", ".sql", ".css", ".ini", ".cfg", ".env"],
+  archive: [".zip", ".7z", ".rar", ".gz", ".tar", ".tgz"],
+};
+function fileKindFor(name) {
+  const dot = name.lastIndexOf(".");
+  const ext = dot >= 0 ? name.slice(dot).toLowerCase() : "";
+  for (const [kind, exts] of Object.entries(FILE_KIND_BY_EXT)) if (exts.includes(ext)) return kind;
+  return "file";
+}
+const SECRET_EXTS = [".env", ".pem", ".key"];
+function looksSecret(name) {
+  const lower = name.toLowerCase();
+  return lower === ".env" || SECRET_EXTS.some((e) => lower.endsWith(e));
+}
+
+async function loadAttachThresholds() {
+  try {
+    const resp = await apiFetch(`${API_BASE}/api/config/attachments`);
+    if (resp.ok) _attachThresholds = await resp.json();
+  } catch {
+    // noop -- se usan los defaults (100/500 MB).
+  }
+}
+
+// ---- estado de la sesion: hace falta carpeta antes de subir ----------------
+async function ensureFolderForAttachments() {
+  // Reusa el mismo chequeo del modal bloqueante de "Nueva sesion".
+  return await validateProjectFolderOrPrompt();
+}
+
+function attachNotice(message) {
+  // Mismo aviso ambar que el de imagenes (no error: es un "atencion, pasa esto").
+  showImageBlockedNotice(message);
+}
+
+// ---- chips ----------------------------------------------------------------
+function renderPendingFiles() {
+  pendingFilesRowEl.innerHTML = "";
+  if (pendingFiles.length === 0) {
+    pendingFilesRowEl.classList.add("hidden");
+    return;
+  }
+  pendingFilesRowEl.classList.remove("hidden");
+  for (const f of pendingFiles) pendingFilesRowEl.appendChild(buildFileChip(f, { pending: true }));
+}
+
+/**
+ * Chip de un archivo (REQ-004). `pending`: chip del compositor (con boton de
+ * quitar y estados de subida); si no, chip de una burbuja ya enviada.
+ */
+function buildFileChip(f, { pending = false } = {}) {
+  const chip = document.createElement("div");
+  chip.className = "file-chip";
+  chip.dataset.state = f.state || "ready";
+  const kind = f.kind || fileKindFor(f.name || "");
+  chip.dataset.kind = kind;
+
+  const icon = document.createElement("span");
+  icon.className = "file-chip-icon";
+  icon.textContent = FILE_KIND_ICON[kind] || "📎";
+
+  const body = document.createElement("div");
+  body.className = "file-chip-body";
+  const name = document.createElement("span");
+  name.className = "file-chip-name";
+  name.textContent = f.name || "archivo";
+  name.title = f.path || f.name || "";
+  const meta = document.createElement("span");
+  meta.className = "file-chip-meta";
+  body.append(name, meta);
+
+  const bits = [];
+  if (Number.isFinite(f.size)) bits.push(formatFileSize(f.size));
+  if (f.state === "uploading") {
+    // REQ-008 a: % REAL de subida (XHR), nunca simulado.
+    bits.push(f.pct != null ? `Subiendo… ${f.pct} %` : "Subiendo…");
+  } else if (f.state === "parsing") {
+    bits.push(f.pct != null ? `Leyendo… ${f.pct} %` : "Leyendo…");
+  } else if (f.state === "error") {
+    bits.push(f.error || "No se pudo subir");
+  } else if (f.state === "deleted") {
+    bits.push("archivo eliminado");
+  } else if (f.state === "missing") {
+    bits.push("archivo no encontrado");
+  } else {
+    if (f.inplace) bits.push("se lee en su lugar");
+    const tok = formatTokens(f.token_estimate);
+    if (tok) bits.push(tok);
+  }
+  meta.textContent = bits.filter(Boolean).join(" · ");
+  if (f.state === "ready" && f.token_estimate > BIG_TOKENS_WARNING) {
+    chip.classList.add("file-chip-warn");
+    meta.title = "Es un archivo enorme: el agente lo va a leer por partes.";
+  }
+  if (looksSecret(f.name || "")) {
+    const warn = document.createElement("span");
+    warn.className = "file-chip-secret";
+    warn.textContent = "puede contener secretos";
+    warn.title = "Los archivos .env, .pem y .key suelen tener credenciales.";
+    body.appendChild(warn);
+  }
+
+  if (f.state === "uploading" || f.state === "parsing") {
+    const bar = document.createElement("div");
+    bar.className = "file-chip-bar";
+    const fill = document.createElement("div");
+    fill.className = "file-chip-bar-fill";
+    fill.style.width = `${f.pct ?? 0}%`;
+    if (f.pct == null) bar.classList.add("indeterminate");
+    bar.appendChild(fill);
+    body.appendChild(bar);
+  }
+
+  chip.append(icon, body);
+
+  if (pending) {
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "file-chip-remove";
+    rm.title = f.state === "uploading" ? "Cancelar subida" : "Quitar archivo";
+    rm.setAttribute("aria-label", rm.title);
+    rm.textContent = "✕";
+    rm.onclick = () => removePendingFile(f.id);
+    chip.appendChild(rm);
+  } else if (f.state === "ready" || f.state === "missing") {
+    // REQ-004 d: click abre el archivo con la app de Windows (nunca un ejecutable).
+    chip.classList.add("file-chip-openable");
+    chip.tabIndex = 0;
+    chip.setAttribute("role", "button");
+    chip.title = "Abrir con la aplicación de Windows";
+    const open = () => openAttachment(f, chip);
+    chip.addEventListener("click", open);
+    chip.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        open();
+      }
+    });
+  }
+  return chip;
+}
+
+async function openAttachment(f, chip) {
+  try {
+    const resp = await apiFetchOk(`${API_BASE}/api/sessions/${encodeURIComponent(state.sessionId)}/attachments/open`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: f.path }),
+    });
+    const data = await resp.json();
+    if (data.revealed) attachNotice("Por seguridad no se ejecutan programas: te lo mostré en el Explorador de archivos.");
+  } catch (err) {
+    // REQ-004 c: si el archivo ya no esta, el chip lo dice en vez de fallar mudo.
+    chip.dataset.state = "missing";
+    const meta = chip.querySelector(".file-chip-meta");
+    if (meta) meta.textContent = "archivo no encontrado";
+    attachNotice(friendlyErrorMessage(err));
+  }
+}
+
+function removePendingFile(id) {
+  const f = pendingFiles.find((p) => p.id === id);
+  if (!f) return;
+  if (f.xhr) f.xhr.abort(); // cancela una subida en curso
+  pendingFiles = pendingFiles.filter((p) => p.id !== id);
+  renderPendingFiles();
+  // Un archivo ya subido que nadie envio se borra del disco (REQ-002 a);
+  // uno "leido en su lugar" nunca se borra (no es una copia nuestra).
+  if (f.state === "ready" && !f.inplace && f.meta?.name) {
+    apiFetch(`${API_BASE}/api/sessions/${encodeURIComponent(state.sessionId)}/attachments/${encodeURIComponent(f.meta.name)}`, {
+      method: "DELETE",
+    }).catch(() => {});
+  }
+}
+
+// ---- subida con % real (XHR: fetch no expone progreso de subida) ------------
+// EXCEPCION documentada a la regla "solo fetch" de AGENTS.md: es la unica forma
+// del navegador de conocer el avance real de una subida (REQ-008 a).
+function uploadAttachment(entry, file) {
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    entry.xhr = xhr;
+    const url = `${API_BASE}/api/sessions/${encodeURIComponent(state.sessionId)}/attachments?name=${encodeURIComponent(file.name)}`;
+    xhr.open("POST", url);
+    const token = typeof getAccessToken === "function" ? getAccessToken() : "";
+    if (token) xhr.setRequestHeader("X-Jarvis-Token", token);
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
+      entry.pct = Math.min(100, Math.round((e.loaded / e.total) * 100));
+      renderPendingFiles();
+    };
+    xhr.onload = () => {
+      entry.xhr = null;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          entry.meta = JSON.parse(xhr.responseText);
+        } catch {
+          entry.state = "error";
+          entry.error = "La respuesta de Vision no se entendió. Probá de nuevo.";
+          resolve(false);
+          return;
+        }
+        entry.state = "ready";
+        entry.path = entry.meta.path;
+        entry.size = entry.meta.size;
+        entry.kind = entry.meta.kind;
+        entry.token_estimate = entry.meta.token_estimate;
+        entry.name = entry.meta.name; // el backend puede haber desambiguado "(1)"
+        resolve(true);
+      } else {
+        entry.state = "error";
+        try {
+          entry.error = JSON.parse(xhr.responseText).detail || "No se pudo subir el archivo.";
+        } catch {
+          entry.error = "No se pudo subir el archivo.";
+        }
+        resolve(false);
+      }
+    };
+    xhr.onerror = () => {
+      entry.xhr = null;
+      entry.state = "error";
+      entry.error = "Se cortó la conexión con Vision. Probá de nuevo.";
+      resolve(false);
+    };
+    xhr.onabort = () => {
+      entry.xhr = null;
+      resolve(false);
+    };
+    xhr.send(file);
+  });
+}
+
+/**
+ * Punto de entrada UNICO para boton, soltar y pegar (REQ-001). Separa las
+ * imagenes (flujo base64 existente) del resto (subida a `attachment/`).
+ */
+async function addAttachmentFiles(fileList) {
+  const files = Array.from(fileList || []).filter((f) => f && f.name !== undefined);
+  if (files.length === 0) return;
+
+  // REQ-001 g: tope de 10 por mensaje (imagenes + archivos juntos).
+  const room = MAX_FILES_PER_MESSAGE - pendingFiles.length - pendingImages.length;
+  if (room <= 0) {
+    attachNotice(`Ya hay ${MAX_FILES_PER_MESSAGE} adjuntos: quitá alguno antes de agregar más.`);
+    return;
+  }
+  const accepted = files.slice(0, room);
+  if (accepted.length < files.length) {
+    attachNotice(`Solo se pueden adjuntar ${MAX_FILES_PER_MESSAGE} archivos por mensaje: se agregaron ${accepted.length} de ${files.length}.`);
+  }
+
+  // REQ-001 h (lote mixto): imagenes -> flujo existente; el resto -> subida. Una
+  // imagen que el navegador no puede decodificar (HEIC, corrupta) pasa a archivo.
+  const images = accepted.filter((f) => f.type.startsWith("image/"));
+  const others = accepted.filter((f) => !f.type.startsWith("image/"));
+  if (images.length > 0) {
+    const before = pendingImages.length;
+    const rejected = await addImageFilesReportingRejects(images);
+    if (rejected.length > 0) others.push(...rejected);
+    if (pendingImages.length === before && rejected.length === 0) return; // modelo sin vision: ya aviso
+  }
+  if (others.length === 0) return;
+
+  if (!(await ensureFolderForAttachments())) return; // sin carpeta no hay donde guardar (REQ-002 f)
+
+  await loadAttachThresholds();
+  for (const file of others) {
+    const sizeMb = file.size / MB_BYTES;
+    if (sizeMb > _attachThresholds.inplace_mb) {
+      // REQ-007 b: demasiado grande para copiar -- se ofrece leerlo en su lugar.
+      attachNotice(
+        `«${file.name}» pesa ${formatFileSize(file.size)} y no se copia a la sesión. Usá «Buscar…» (Ctrl+Shift+F) para leerlo en su lugar.`
+      );
+      continue;
+    }
+    if (sizeMb > _attachThresholds.warn_mb) {
+      const ok = await showConfirmModal({
+        title: "Archivo grande",
+        message: `«${file.name}» pesa ${formatFileSize(file.size)}. Copiarlo a la carpeta de la sesión ocupa ese espacio en el disco. ¿Querés continuar?`,
+        acceptLabel: "Copiar igual",
+      });
+      if (!ok) continue;
+    }
+    const entry = { id: crypto.randomUUID(), name: file.name, size: file.size, kind: fileKindFor(file.name), state: "uploading", pct: 0, meta: null, inplace: false, xhr: null };
+    pendingFiles.push(entry);
+    renderPendingFiles();
+    uploadAttachment(entry, file).then(() => renderPendingFiles());
+  }
+}
+
+// Como `addImageFiles`, pero devuelve las imagenes que NO se pudieron procesar para
+// que pasen a subirse como archivo (REQ-001 h).
+async function addImageFilesReportingRejects(files) {
+  const supported = await activeModelSupportsImages();
+  if (!supported) {
+    showImageBlockedNotice(
+      "Este modelo no soporta imágenes — cambiá a gpt-5-mini/gemini/claude-sonnet-5 para usar esta función."
+    );
+    return [];
+  }
+  const rejected = [];
+  for (const file of files) {
+    try {
+      const dataUri = await compressImageFile(file);
+      pendingImages.push({ dataUri, id: crypto.randomUUID() });
+    } catch {
+      rejected.push(file);
+    }
+  }
+  renderPendingImages();
+  return rejected;
+}
+
+// ---- leer en su lugar: "Buscar…" con el Explorador nativo (REQ-007 c) -------
+async function attachFileInPlace() {
+  if (!(await ensureFolderForAttachments())) return;
+  try {
+    const resp = await apiFetchOk(`${API_BASE}/api/fs/native-picker?mode=any-file`);
+    const { path } = await resp.json();
+    if (!path) return; // el usuario cancelo
+    await registerInPlace(path);
+  } catch (err) {
+    attachNotice(friendlyErrorMessage(err));
+  }
+}
+
+async function registerInPlace(path) {
+  if (pendingFiles.length + pendingImages.length >= MAX_FILES_PER_MESSAGE) {
+    attachNotice(`Ya hay ${MAX_FILES_PER_MESSAGE} adjuntos: quitá alguno antes de agregar más.`);
+    return;
+  }
+  try {
+    const resp = await apiFetchOk(`${API_BASE}/api/sessions/${encodeURIComponent(state.sessionId)}/attachments/register-path`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    const meta = await resp.json();
+    pendingFiles.push({
+      id: crypto.randomUUID(),
+      name: meta.name,
+      size: meta.size,
+      kind: meta.kind,
+      path: meta.path,
+      token_estimate: meta.token_estimate,
+      state: "ready",
+      inplace: true,
+      meta,
+      xhr: null,
+    });
+    renderPendingFiles();
+  } catch (err) {
+    attachNotice(friendlyErrorMessage(err));
+  }
+}
+
+// ---- adjuntos que viajan con el mensaje ------------------------------------
+function collectReadyAttachments() {
+  return pendingFiles
+    .filter((f) => f.state === "ready" && f.meta)
+    .map((f) => ({ path: f.meta.path, name: f.meta.name, size: f.meta.size, mime: f.meta.mime, inplace: !!f.inplace }));
+}
+
+function hasUploadsInProgress() {
+  return pendingFiles.some((f) => f.state === "uploading");
+}
+
+// ---- soltar: TODO `.chat-main`, con guard a nivel `document` (REQ-001 b/f) ---
+// Sin el guard, soltar un archivo fuera de la zona hace que el navegador lo
+// ABRA, reemplazando la pagina y perdiendo la conversacion en curso.
+function _dragHasFiles(e) {
+  return Array.from(e.dataTransfer?.types || []).includes("Files");
+}
+["dragover", "drop"].forEach((evt) => {
+  document.addEventListener(evt, (e) => {
+    if (_dragHasFiles(e)) e.preventDefault();
+  });
+});
+let _dragDepth = 0;
+const _chatMainDropZone = document.querySelector(".chat-main");
+if (_chatMainDropZone) {
+  _chatMainDropZone.addEventListener("dragenter", (e) => {
+    if (!_dragHasFiles(e)) return;
+    _dragDepth += 1;
+    attachDropOverlayEl.classList.remove("hidden");
+  });
+  _chatMainDropZone.addEventListener("dragleave", (e) => {
+    if (!_dragHasFiles(e)) return;
+    _dragDepth = Math.max(0, _dragDepth - 1);
+    if (_dragDepth === 0) attachDropOverlayEl.classList.add("hidden");
+  });
+  _chatMainDropZone.addEventListener("drop", (e) => {
+    _dragDepth = 0;
+    attachDropOverlayEl.classList.add("hidden");
+    const files = e.dataTransfer?.files;
+    if (files && files.length > 0) addAttachmentFiles(files);
+  });
+}
+
+// ---- pegar: archivos del portapapeles (REQ-001 d) --------------------------
 inputEl.addEventListener("paste", (e) => {
   const files = e.clipboardData?.files;
   if (files && files.length > 0) {
-    const hasImage = Array.from(files).some((f) => f.type.startsWith("image/"));
-    if (hasImage) {
-      e.preventDefault(); // evita que el navegador intente "pegar" el binario como texto
-      addImageFiles(files);
-    }
+    e.preventDefault(); // nunca pegar el binario como texto
+    addAttachmentFiles(files);
   }
 });
 
-// REQ-001: arrastrar y soltar sobre el area del chat completo (no solo el
-// textarea) -- mismo criterio que WhatsApp Web/Telegram Web.
-["dragover", "drop"].forEach((evt) => {
-  document.querySelector(".chat-main")?.addEventListener(evt, (e) => e.preventDefault());
-});
-document.querySelector(".chat-main")?.addEventListener("drop", (e) => {
-  const files = e.dataTransfer?.files;
-  if (files && files.length > 0) addImageFiles(files);
-});
-
-// REQ-001: boton de adjuntar -> selector de archivos nativo.
+// ---- boton de adjuntar -----------------------------------------------------
 attachImageBtnEl.addEventListener("click", () => imageFileInputEl.click());
 imageFileInputEl.addEventListener("change", () => {
-  if (imageFileInputEl.files.length > 0) addImageFiles(imageFileInputEl.files);
+  if (imageFileInputEl.files.length > 0) addAttachmentFiles(imageFileInputEl.files);
   imageFileInputEl.value = ""; // permite volver a elegir el mismo archivo dos veces seguidas
 });
+// Ctrl+Shift+F: adjuntar "en su lugar" (archivo enorme) desde el teclado.
+document.addEventListener("keydown", (e) => {
+  if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "f" && document.activeElement === inputEl) {
+    e.preventDefault();
+    attachFileInPlace();
+  }
+});
+
+// ---- Configuracion > Conexiones: umbrales (REQ-007 a) ------------------------
+const connAttachWarnEl = document.getElementById("conn-attach-warn-mb");
+const connAttachInplaceEl = document.getElementById("conn-attach-inplace-mb");
+const connAttachSaveEl = document.getElementById("conn-attach-save");
+const connAttachStatusEl = document.getElementById("conn-attach-status");
+
+async function _loadAttachConfig() {
+  connAttachStatusEl.textContent = "";
+  try {
+    const resp = await apiFetch(`${API_BASE}/api/config/attachments`);
+    if (!resp.ok) throw await httpErrorFromResponse(resp);
+    const data = await resp.json();
+    connAttachWarnEl.value = data.warn_mb;
+    connAttachInplaceEl.value = data.inplace_mb;
+  } catch (err) {
+    connAttachStatusEl.textContent = `No se pudieron cargar los límites. ${friendlyErrorMessage(err)}`;
+    connAttachStatusEl.className = "settings-status error";
+  }
+}
+connAttachSaveEl.addEventListener("click", async () => {
+  connAttachStatusEl.textContent = "Guardando…";
+  connAttachStatusEl.className = "settings-status";
+  try {
+    await apiFetchOk(`${API_BASE}/api/config/attachments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        warn_mb: connAttachWarnEl.value.trim() !== "" ? Number(connAttachWarnEl.value) : null,
+        inplace_mb: connAttachInplaceEl.value.trim() !== "" ? Number(connAttachInplaceEl.value) : null,
+      }),
+    });
+    connAttachStatusEl.textContent = "Guardado ✓";
+    connAttachStatusEl.className = "settings-status ok";
+    loadAttachThresholds();
+  } catch (err) {
+    connAttachStatusEl.textContent = friendlyErrorMessage(err);
+    connAttachStatusEl.className = "settings-status error";
+  }
+});
+document.querySelector('.settings-tab[data-tab="connections"]')?.addEventListener("click", _loadAttachConfig);
+
+// ---- Configuracion > Conexiones: imagenes dentro de PDF y Word (spec leer-imagenes-pdf-word REQ-007) -------
+const connImgMinPxEl = document.getElementById("conn-img-min-px");
+const connImgAskCountEl = document.getElementById("conn-img-ask-count");
+const connImgAskPctEl = document.getElementById("conn-img-ask-pct");
+const connImgSaveEl = document.getElementById("conn-img-save");
+const connImgStatusEl = document.getElementById("conn-img-status");
+
+async function _loadDocImagesConfig() {
+  connImgStatusEl.textContent = "";
+  try {
+    const resp = await apiFetch(`${API_BASE}/api/config/document-images`);
+    if (!resp.ok) throw await httpErrorFromResponse(resp);
+    const data = await resp.json();
+    connImgMinPxEl.value = data.min_px;
+    connImgAskCountEl.value = data.ask_count;
+    connImgAskPctEl.value = data.ask_pct;
+  } catch (err) {
+    connImgStatusEl.textContent = `No se pudieron cargar estos límites. ${friendlyErrorMessage(err)}`;
+    connImgStatusEl.className = "settings-status error";
+  }
+}
+connImgSaveEl.addEventListener("click", async () => {
+  connImgStatusEl.textContent = "Guardando…";
+  connImgStatusEl.className = "settings-status";
+  const numberOrNull = (el) => (el.value.trim() !== "" ? Number(el.value) : null); // vacio = conservar el valor actual
+  try {
+    await apiFetchOk(`${API_BASE}/api/config/document-images`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        min_px: numberOrNull(connImgMinPxEl),
+        ask_count: numberOrNull(connImgAskCountEl),
+        ask_pct: numberOrNull(connImgAskPctEl),
+      }),
+    });
+    connImgStatusEl.textContent = "Guardado ✓";
+    connImgStatusEl.className = "settings-status ok";
+  } catch (err) {
+    connImgStatusEl.textContent = friendlyErrorMessage(err);
+    connImgStatusEl.className = "settings-status error";
+  }
+});
+document.querySelector('.settings-tab[data-tab="connections"]')?.addEventListener("click", _loadDocImagesConfig);
+
+// ---- burbuja ya enviada / reconstruida: chips de archivo (REQ-004 / REQ-010) -----
+function buildMessageAttachmentsRow(attachments) {
+  const row = document.createElement("div");
+  row.className = "msg-files-row";
+  for (const a of attachments) {
+    const state = a.deleted ? "deleted" : a.exists === false ? "missing" : "ready";
+    row.appendChild(buildFileChip({ ...a, state }));
+  }
+  return row;
+}
+
 
 formEl.addEventListener("submit", (e) => {
   e.preventDefault();
@@ -2945,17 +4531,34 @@ formEl.addEventListener("submit", (e) => {
   // `state.sending` como contador) -- cambio de comportamiento deliberado.
   if (sendOrStopBtnEl.dataset.state !== "idle") return;
 
+  // REQ-002/004: con una subida en curso NO se envia (el agente recibiria una
+  // ruta a un archivo incompleto). Un chip con error no bloquea: se descarta.
+  if (hasUploadsInProgress()) {
+    attachNotice("Esperá a que termine de subirse el archivo antes de enviar.");
+    return;
+  }
   const text = inputEl.value;
   const images = pendingImages.map((p) => p.dataUri);
+  const attachments = collectReadyAttachments();
+  const sentFiles = pendingFiles.filter((f) => f.state === "ready" && f.meta).map((f) => ({ ...f.meta, state: "ready" }));
+  // REQ-007 (spec aviso-proceso-terminado): el primer clic de Enviar (o Enter) pide el permiso de notificaciones si todavia no se decidio:
+  // el navegador lo exige desde un gesto del usuario, y este submit corre dentro de ese gesto.
+  if (text.trim() || images.length > 0 || attachments.length > 0) askNotifyPermissionOnFirstSend();
   inputEl.value = "";
   pendingImages = [];
+  pendingFiles = [];
   renderPendingImages();
+  renderPendingFiles();
   // spec compositor-expandible REQ-004: NO se llama toggleComposerExpanded
   // aca -- el estado expandido persiste entre mensajes a proposito. Si
   // esta en auto-grow normal, se recalcula la altura (vuelve a chico
   // porque el texto ya se vacio arriba).
   autoGrowComposer();
-  sendMessage(text, { images: images.length > 0 ? images : null });
+  sendMessage(text, {
+    images: images.length > 0 ? images : null,
+    attachments: attachments.length > 0 ? attachments : null,
+    sentFiles,
+  });
 });
 
 inputEl.addEventListener("keydown", (e) => {
@@ -3016,13 +4619,8 @@ function toggleComposerExpanded() {
 inputEl.addEventListener("input", autoGrowComposer);
 composerExpandBtnEl.addEventListener("click", toggleComposerExpanded);
 
-// Restaura mensajes previos de esta sesion (si la pagina se recargo sin
-// cambiar de sessionId -- ej. F5 dentro de SharePoint) antes de agregar la
-// nota de "sesion iniciada". Se renderiza sin volver a persistir (ya estan
-// guardados) para no reescribir localStorage con lo mismo que se acaba de leer.
-for (const entry of chatHistory) {
-  appendMessage(entry.role, entry.text, { persist: false, messageId: entry.messageId, time: entry.time, responseType: entry.responseType || null, technical: entry.technical || null, errorKind: entry.errorKind || null });
-}
+// Los mensajes previos de esta sesion (F5, reabrir la pestaña) ya NO se pintan aca desde la copia del navegador: REQ-016 los trae
+// de SQLite en restoreActiveSessionOnLoad (bloque de inicializacion final), que los ubica ANTES de la nota de abajo.
 
 // REQ-002 (spec gestion-sesiones): nombre real si ya existe en el
 // indice (sesion retomada), sino fallback a las siglas del UUID hasta
@@ -3036,7 +4634,6 @@ if (storedModel) {
   renderModelChip();
 }
 
-updateCacheMeter();
 checkBackendStatus();
 
 // =========================================================================
@@ -3071,6 +4668,13 @@ const searchNavCloseEl = document.getElementById("search-nav-close");
 const contextSummaryEl = document.getElementById("context-summary");
 const contextFillEl = document.getElementById("context-fill");
 const contextDetailEl = document.getElementById("context-detail");
+// spec aviso-contexto-largo REQ-008/009: chip de contexto siempre visible en la barra superior.
+const contextChipEl = document.getElementById("context-chip");
+const contextChipValEl = document.getElementById("context-chip-val");
+const CONTEXT_WARN_PCT = 75; // el aviso textual sale al llegar aca...
+const CONTEXT_REARM_PCT = 60; // ...y se rearma recien al bajar de aca (compactar o /clear), no con una oscilacion chica
+const _contextWarnedSessions = new Set(); // sesiones a las que YA se les aviso (una vez por sesion, mientras no baje de CONTEXT_REARM_PCT)
+
 
 const connectorsSummaryEl = document.getElementById("connectors-summary");
 const connectorsListEl = document.getElementById("connectors-list");
@@ -3097,15 +4701,17 @@ const slashMenuEl = document.getElementById("slash-menu");
 
 // -------------------------------------------------------------------------
 // Sesiones: un indice liviano en localStorage (id -> {name, updatedAt})
-// separado del historial completo (que ya vive en `vision.session.<id>`,
-// ver CACHE_STORAGE_KEY mas arriba). Permite listar/click sin cargar todo
-// el historial de cada sesion.
+// separado del historial (que vive en SQLite; REQ-016: en el navegador solo
+// queda la copia chica de las sesiones sin carpeta, ver SESSION_COPY_PREFIX
+// mas arriba). Permite listar/click sin cargar todo el historial de cada sesion.
 // -------------------------------------------------------------------------
 const SESSIONS_INDEX_KEY = "vision.sessionsIndex";
 
 function loadSessionsIndex() {
   try {
-    return JSON.parse(localStorage.getItem(SESSIONS_INDEX_KEY) || "{}");
+    const index = JSON.parse(localStorage.getItem(SESSIONS_INDEX_KEY) || "{}");
+    // Un indice con otra forma (`null`, una lista) se trata como vacio en vez de romper a quien lo lea.
+    return index && typeof index === "object" && !Array.isArray(index) ? index : {};
   } catch {
     return {};
   }
@@ -3255,7 +4861,18 @@ function renderSessionsPanel() {
       deleteSession(id, info.name);
     };
 
-    li.append(nameSpan, dateSpan, renameBtn, deleteBtn);
+    li.append(nameSpan);
+    // REQ-018 (spec fix-detener-y-progreso-visible, D5 = «Marca en la lista»): la sesion que le hizo una pregunta al usuario y espera
+    // su respuesta lo dice en la lista (texto real: lo lee tambien un lector de pantalla). En la sesion donde esta el usuario no va:
+    // ahi la pregunta ya se ve en su panel. Se va al contestarla (o al mandar otro mensaje en esa sesion).
+    if (id !== state.sessionId && _pendingQuestions.has(id)) {
+      const questionMark = document.createElement("span");
+      questionMark.className = "session-question-mark";
+      questionMark.textContent = "❓ te hizo una pregunta";
+      li.append(questionMark);
+      li.title = "Ir a esta sesión: te hizo una pregunta";
+    }
+    li.append(dateSpan, renameBtn, deleteBtn);
     li.onclick = () => switchToSession(id);
     sessionListEl.appendChild(li);
   }
@@ -3271,6 +4888,19 @@ function renderSessionsPanel() {
 // =========================================================================
 const SEARCH_DEBOUNCE_MS = 300;
 let searchDebounceTimer = null;
+// REQ-002 (spec fix-busqueda-limpia): numero de la ultima busqueda pedida. Una respuesta que llega cuando ya se borro o cambio la palabra
+// trae un numero viejo y se descarta: antes volvia a pintar los resultados de una palabra que el usuario ya habia borrado.
+let searchSeq = 0;
+
+// REQ-001 (spec fix-busqueda-limpia): borrar la busqueda deja la lista de resultados VACIA (no solo oculta) y vuelve la lista de sesiones.
+function resetSessionSearchResults() {
+  searchSeq += 1; // cualquier busqueda en viaje queda vieja
+  clearTimeout(searchDebounceTimer);
+  sessionSearchResultsEl.innerHTML = "";
+  sessionSearchResultsEl.classList.add("hidden");
+  sessionListEl.classList.remove("hidden");
+  clearSearchHighlights();
+}
 let searchState = { term: "", matches: [], activeIndex: -1 };
 
 function highlightText(text, term) {
@@ -3283,26 +4913,29 @@ function highlightText(text, term) {
 
 async function searchAllSessionsGlobal(term) {
   try {
-    const resp = await apiFetch(`${API_BASE}/api/sessions/search?q=${encodeURIComponent(term)}`);
+    // BUG real (reportado 2026-09-29, "no me aparece la barra"): antes se llamaba SIN
+    // `session_id`. Desde que ya no existe una carpeta global, el backend resuelve la base
+    // a partir de la carpeta de ESA sesion; sin el id respondia `persistence_available:
+    // false` y `results: []`, y la busqueda caia al fallback de localStorage, que solo ve las
+    // sesiones de este navegador. Con el id de la sesion actual busca en su carpeta.
+    const resp = await apiFetch(
+      `${API_BASE}/api/sessions/search?q=${encodeURIComponent(term)}&session_id=${encodeURIComponent(state.sessionId)}`
+    );
     const data = await resp.json();
     if (data.persistence_available) return data.results;
   } catch {
     // sin backend disponible -- cae al fallback de localStorage abajo
   }
 
-  // REQ-006: sin persistencia SQLite, se recorre el TEXTO completo de
-  // cada sesion indexada en localStorage (vision.session.<id> guarda el
-  // chatHistory completo de esa sesion, ver cacheStorageKey()).
+  // REQ-006: sin persistencia SQLite, se recorre el texto de la copia del
+  // navegador de cada sesion indexada (spec fix-detener-y-progreso-visible
+  // REQ-016: solo las sesiones sin carpeta tienen copia, y acotada; ver
+  // readLocalCopy).
   const index = loadSessionsIndex();
   const lowerTerm = term.toLowerCase();
   const results = [];
   for (const [id, info] of Object.entries(index)) {
-    let history;
-    try {
-      history = JSON.parse(localStorage.getItem(`vision.session.${id}`) || "[]");
-    } catch {
-      continue;
-    }
+    const history = readLocalCopy(id);
     const match = history.find((m) => (m.text || "").toLowerCase().includes(lowerTerm));
     if (!match) continue;
     const idx = match.text.toLowerCase().indexOf(lowerTerm);
@@ -3344,11 +4977,11 @@ function renderSearchResults(results, term) {
 
 async function openSearchResult(sessionId, term) {
   if (sessionId !== state.sessionId) {
-    switchToSession(sessionId);
-    // activateSession reconstruye el DOM de forma asincrona (fetch de
-    // status incluido) -- se espera un tick antes de buscar matches en un
-    // DOM que todavia se esta armando.
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // BUG real: antes se esperaba un tiempo FIJO de 200 ms, pero `activateSession` hace
+    // varias consultas al backend antes de pintar los mensajes; si la conversacion no
+    // estaba lista no habia coincidencias y la barra nunca aparecia. Ahora se espera a que
+    // la activacion TERMINE de verdad.
+    await activateSession(sessionId);
   }
   highlightMatchesInOpenSession(term);
 }
@@ -3417,7 +5050,8 @@ function updateSearchNavBar() {
     return;
   }
   searchNavBarEl.classList.remove("hidden");
-  searchNavCountEl.textContent = `${activeIndex + 1} de ${matches.length}`;
+  // Pedido del usuario (2026-09-29): "1/10, 2/10... 10/10 y vuelve a 1/10".
+  searchNavCountEl.textContent = `${activeIndex + 1}/${matches.length}`;
 }
 
 function focusSearchMatch(index) {
@@ -3433,13 +5067,22 @@ function focusSearchMatch(index) {
   updateSearchNavBar();
 }
 
+// Enter en el buscador pasa a la coincidencia siguiente y Shift+Enter a la anterior (da la
+// vuelta: despues de la ultima vuelve a la primera). Solo si ya hay coincidencias resaltadas
+// de ESE mismo termino; si no, Enter no hace nada (el debounce ya esta buscando).
+sessionSearchInputEl.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  const { matches, term } = searchState;
+  if (matches.length === 0 || term !== sessionSearchInputEl.value.trim()) return;
+  e.preventDefault();
+  focusSearchMatch(searchState.activeIndex + (e.shiftKey ? -1 : 1));
+});
+
 searchNavPrevEl.addEventListener("click", () => focusSearchMatch(searchState.activeIndex - 1));
 searchNavNextEl.addEventListener("click", () => focusSearchMatch(searchState.activeIndex + 1));
 searchNavCloseEl.addEventListener("click", () => {
-  clearSearchHighlights();
   sessionSearchInputEl.value = "";
-  sessionListEl.classList.remove("hidden");
-  sessionSearchResultsEl.classList.add("hidden");
+  resetSessionSearchResults();
 });
 
 sessionSearchInputEl.addEventListener("input", () => {
@@ -3447,15 +5090,16 @@ sessionSearchInputEl.addEventListener("input", () => {
   const term = sessionSearchInputEl.value.trim();
 
   if (!term) {
-    sessionListEl.classList.remove("hidden");
-    sessionSearchResultsEl.classList.add("hidden");
-    clearSearchHighlights();
+    resetSessionSearchResults();
     return;
   }
 
   // REQ-001: debounce de 300ms -- no se dispara una consulta por cada tecla.
+  const seq = ++searchSeq;
   searchDebounceTimer = setTimeout(async () => {
     const results = await searchAllSessionsGlobal(term);
+    // REQ-002 (spec fix-busqueda-limpia): mientras viajaba la respuesta, el usuario borro o cambio la palabra: no se pinta.
+    if (seq !== searchSeq || sessionSearchInputEl.value.trim() !== term) return;
     renderSearchResults(results, term);
     // REQ-004: si la sesion ABIERTA esta entre los resultados (o el
     // termino aparece en ella aunque el backend no la liste, ej. un
@@ -3492,6 +5136,14 @@ function updateMetaSessionId(sessionId) {
 function updateMetaSessionPath(path) {
   metaSessionPathEl.textContent = path;
   metaSessionPathEl.title = path;
+}
+
+// spec indice-resiliente-y-borrado-seguro REQ-012: para una sesión SIN carpeta registrada el backend responde, como «referencia
+// visual», la carpeta de Vision (`%LOCALAPPDATA%\Vision`); eso se veía como «perdió la ruta de mi carpeta». El chip dice la verdad.
+const NO_FOLDER_CHIP_TEXT = "Sin carpeta registrada";
+function paintSessionPathFromStatus(statusData) {
+  if (statusData.persistence_available === false) updateMetaSessionPath(NO_FOLDER_CHIP_TEXT);
+  else if (statusData.project_path) updateMetaSessionPath(statusData.project_path);
 }
 
 /**
@@ -3545,14 +5197,54 @@ const sessionEditBrowseEl = document.getElementById("session-edit-browse");
 const sessionEditSaveEl = document.getElementById("session-edit-save");
 const sessionEditStatusEl = document.getElementById("session-edit-status");
 const sessionEditCloseEl = document.getElementById("session-edit-close");
+// spec sesion-publica-privada REQ-008: interruptor «Sesion publica» (apagado por defecto) y su aviso.
+const sessionEditPublicEl = document.getElementById("session-edit-public");
+const sessionEditPublicWarningEl = document.getElementById("session-edit-public-warning");
+let _sessionPublicAtOpen = false; // lo que el servidor decia al abrir el modal: para saber si la persona lo cambio
+
+function syncSessionPublicWarning() {
+  sessionEditPublicWarningEl.classList.toggle("hidden", !sessionEditPublicEl.checked);
+}
+sessionEditPublicEl.addEventListener("change", syncSessionPublicWarning);
+
+// spec sesion-publica-privada REQ-008: al abrir el modal el interruptor refleja el estado REAL de la sesion (privada si no tiene carpeta o si no se
+// puede leer: el valor por defecto). Es de mejor esfuerzo: si falla, queda apagado y el resto del modal funciona igual.
+async function loadSessionVisibility(sessionId) {
+  _sessionPublicAtOpen = false;
+  sessionEditPublicEl.checked = false;
+  sessionEditPublicEl.dataset.loaded = "false";
+  let touched = false; // si la persona toca el interruptor antes de que llegue la respuesta, su eleccion manda
+  const onTouch = () => {
+    touched = true;
+  };
+  sessionEditPublicEl.addEventListener("change", onTouch, { once: true });
+  syncSessionPublicWarning();
+  try {
+    const resp = await apiFetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/visibility`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (sessionId !== state.sessionId) return; // respuesta tardia de otra sesion: no se pinta sobre la actual
+    _sessionPublicAtOpen = Boolean(data.public);
+    if (!touched) {
+      sessionEditPublicEl.checked = _sessionPublicAtOpen;
+      syncSessionPublicWarning();
+    }
+  } catch {
+    // Sin respuesta: se queda en privada.
+  } finally {
+    sessionEditPublicEl.removeEventListener("change", onTouch);
+    if (sessionId === state.sessionId) sessionEditPublicEl.dataset.loaded = "true";
+  }
+}
 
 function openSessionEditModal() {
   sessionEditNameEl.value = metaSessionNameEl.textContent;
   sessionEditIdEl.value = state.sessionId;
-  sessionEditPathEl.value = metaSessionPathEl.textContent;
+  sessionEditPathEl.value = metaSessionPathEl.textContent === NO_FOLDER_CHIP_TEXT ? "" : metaSessionPathEl.textContent;
   sessionEditStatusEl.textContent = "";
   sessionEditOverlayEl.classList.remove("hidden");
   sessionEditNameEl.focus();
+  loadSessionVisibility(state.sessionId);
 }
 function closeSessionEditModal() {
   sessionEditOverlayEl.classList.add("hidden");
@@ -3571,16 +5263,177 @@ sessionEditBrowseEl.addEventListener("click", () => {
   }, sessionEditStatusEl);
 });
 
-async function assignSessionProjectPath(sessionId, path, title) {
+/**
+ * spec cambio-carpeta-historial: antes de CAMBIAR la carpeta de una sesion que ya tenia otra, pregunta si se copia su historial.
+ * Devuelve `true` (copiar), `false` (dejarlo donde esta, o no hace falta preguntar) o `null` (la persona cerro la pregunta: no cambiar
+ * la carpeta). De mejor esfuerzo: si la consulta falla, devuelve `false` y el guardado sigue como siempre.
+ */
+async function askAboutHistoryOnFolderChange(sessionId, newPath) {
+  let preview = null;
+  try {
+    const resp = await apiFetch(
+      `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/folder-change-preview?path=${encodeURIComponent(newPath)}`
+    );
+    if (resp.ok) preview = await resp.json();
+  } catch {
+    // Sin respuesta: se sigue como siempre, sin preguntar.
+  }
+  // `"none"` = no hacia falta preguntar (no es lo mismo que contestar «dejarlo», que es `false`): solo en ese caso se consulta si la CARPETA tiene
+  // conversaciones anteriores (spec importar-historial-de-carpeta REQ-012: nunca dos avisos seguidos).
+  if (!preview || !preview.applicable) return "none";
+  const n = preview.message_count;
+  let message =
+    `Esta sesión tiene ${n} mensaje${n === 1 ? "" : "s"} guardado${n === 1 ? "" : "s"} en ${preview.old_path}. ` +
+    `Si la pasás a ${preview.new_path}, ¿querés copiar el historial a la carpeta nueva? ` +
+    `La copia no borra nada de la carpeta anterior.`;
+  if (preview.attachments > 0) {
+    message +=
+      ` Los ${preview.attachments} archivo${preview.attachments === 1 ? "" : "s"} adjunto${preview.attachments === 1 ? "" : "s"} no se copian: ` +
+      `sus mensajes sí, y en la carpeta nueva se verán como «archivo no encontrado».`;
+  }
+  message += ` Si lo dejás donde está, después de reiniciar Vision esta sesión no recordará lo anterior.`;
+  const answer = await showConfirmModal({
+    title: "Cambiar la carpeta de la sesión",
+    message,
+    acceptLabel: "Copiar el historial",
+    cancelLabel: "Dejarlo donde está",
+    dismissValue: null,
+  });
+  return answer; // true = copiar, false = dejarlo, null = cerrada con la ✕
+}
+
+// spec importar-historial-de-carpeta: «dd/mm hh:mm» de una conversacion anterior, para que la lista sea reconocible a simple vista.
+function formatFolderHistoryDate(epochSeconds) {
+  if (!epochSeconds) return "";
+  const d = new Date(epochSeconds * 1000);
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  return `${dd}/${mm} ${hh}:${mi}`;
+}
+
+/**
+ * spec importar-historial-de-carpeta REQ-010/011/012: la carpeta elegida YA tiene conversaciones anteriores del usuario. Muestra la lista y
+ * devuelve la decision: `{ action: "import", sessionId }`, `{ action: "open", sessionId, registered }`, `{ action: "keep" }` (seguir con esta sesion
+ * tal cual) o `{ action: "dismiss" }` (la ✕ o el clic fuera: NO cambiar nada). Si no hay nada que ofrecer, o la consulta falla, devuelve `{ action: "keep" }`
+ * sin mostrar nada (mejor esfuerzo: la carpeta se asigna como siempre).
+ */
+async function askAboutFolderHistory(sessionId, folderPath) {
+  let info = null;
+  try {
+    const resp = await apiFetch(
+      `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/folder-sessions?path=${encodeURIComponent(folderPath)}`
+    );
+    if (resp.ok) info = await resp.json();
+  } catch {
+    // Sin respuesta: se sigue como siempre, sin preguntar.
+  }
+  if (!info || !info.applicable || !Array.isArray(info.sessions) || info.sessions.length === 0) return { action: "keep" };
+
+  const overlayEl = document.getElementById("folder-history-overlay");
+  const introEl = document.getElementById("folder-history-intro");
+  const listEl = document.getElementById("folder-history-list");
+  const noteEl = document.getElementById("folder-history-note");
+  const keepBtnEl = document.getElementById("folder-history-keep");
+  const closeBtnEl = document.getElementById("folder-history-close");
+  const n = info.sessions.length;
+  // spec sesion-publica-privada REQ-009: las conversaciones de OTRAS personas que ahora estan publicas se rotulan; sin ninguna, el aviso es el de siempre.
+  const foreignPublic = info.sessions.filter((s) => s.public && s.own === false);
+  const allForeign = foreignPublic.length === n;
+  introEl.textContent =
+    `La carpeta ${folderPath} ya tiene ${n} conversación${n === 1 ? "" : "es"} anterior${n === 1 ? "" : "es"}` +
+    `${allForeign ? " pública" + (n === 1 ? "" : "s") + " de otras personas" : foreignPublic.length ? " (algunas públicas de otras personas)" : " tuya" + (n === 1 ? "" : "s")}. ` +
+    `¿Querés traer una a esta sesión o abrirla directamente?`;
+  noteEl.textContent = info.can_import
+    ? "Importar COPIA el historial: la conversación anterior queda como estaba."
+    : "Esta sesión ya tiene mensajes, así que no se puede importar encima (se mezclarían). Podés abrir la conversación anterior.";
+  if (foreignPublic.length) {
+    noteEl.textContent += " De las conversaciones públicas de otras personas no se copian los resultados de Outlook ni de Teams (verás «contenido privado omitido»).";
+  }
+  listEl.replaceChildren();
+
+  return new Promise((resolve) => {
+    const finish = (decision) => {
+      overlayEl.classList.add("hidden");
+      keepBtnEl.onclick = null;
+      closeBtnEl.onclick = null;
+      overlayEl.onclick = null;
+      listEl.replaceChildren();
+      resolve(decision);
+    };
+    for (const s of info.sessions) {
+      const li = document.createElement("li");
+      li.className = "folder-history-item";
+      li.dataset.sessionId = s.id;
+      const infoEl = document.createElement("div");
+      infoEl.className = "folder-history-info";
+      const titleEl = document.createElement("span");
+      titleEl.className = "folder-history-title";
+      titleEl.textContent = s.title;
+      if (s.public) {
+        const badgeEl = document.createElement("span");
+        badgeEl.className = "folder-history-badge";
+        badgeEl.textContent = s.own === false ? "pública · de otra persona" : "pública";
+        titleEl.appendChild(badgeEl);
+      }
+      const metaEl = document.createElement("span");
+      metaEl.className = "folder-history-meta";
+      metaEl.textContent = `${s.message_count} mensaje${s.message_count === 1 ? "" : "s"} · ${formatFolderHistoryDate(s.updated_at)}`;
+      infoEl.append(titleEl, metaEl);
+      const actionsEl = document.createElement("div");
+      actionsEl.className = "folder-history-actions";
+      if (info.can_import) {
+        const importBtn = document.createElement("button");
+        importBtn.type = "button";
+        importBtn.className = "acc-action-btn folder-history-import";
+        importBtn.textContent = "Importar a esta sesión";
+        importBtn.onclick = () => finish({ action: "import", sessionId: s.id });
+        actionsEl.appendChild(importBtn);
+      }
+      const openBtn = document.createElement("button");
+      openBtn.type = "button";
+      openBtn.className = "acc-action-btn secondary folder-history-open";
+      openBtn.textContent = "Abrir esa sesión";
+      openBtn.onclick = () => finish({ action: "open", sessionId: s.id, registered: Boolean(s.registered) });
+      actionsEl.appendChild(openBtn);
+      li.append(infoEl, actionsEl);
+      listEl.appendChild(li);
+    }
+    keepBtnEl.onclick = () => finish({ action: "keep" });
+    closeBtnEl.onclick = () => finish({ action: "dismiss" });
+    overlayEl.onclick = (e) => {
+      if (e.target === overlayEl) finish({ action: "dismiss" });
+    };
+    overlayEl.classList.remove("hidden");
+  });
+}
+
+/**
+ * spec importar-historial-de-carpeta REQ-011: «Abrir esa sesion». Si la conversacion anterior no estaba registrada en el indice, se registra con su
+ * carpeta (sin tocar su historial ni su titulo) y se abre. La sesion actual, vacia, no se toca.
+ */
+async function openPreviousSessionFromFolder(previousId, registered, folderPath) {
+  if (!registered) await assignSessionProjectPath(previousId, folderPath, "");
+  await activateSession(previousId);
+}
+
+async function assignSessionProjectPath(sessionId, path, title, copyHistory = false, importFromSessionId = "", isPublic = false) {
+  const body = { path, title: title || "", copy_history: copyHistory };
+  // spec sesion-publica-privada REQ-001: el campo solo viaja cuando se pide PUBLICA (sin el, la sesion queda privada, como siempre).
+  if (isPublic) body.public = true;
+  // spec importar-historial-de-carpeta REQ-004: el campo solo viaja cuando se eligio importar (sin el, el pedido es el de siempre).
+  if (importFromSessionId) body.import_from_session_id = importFromSessionId;
   const resp = await apiFetch(`${API_BASE}/api/sessions/${sessionId}/project-path`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, title: title || "" }),
+    body: JSON.stringify(body),
   });
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
     throw httpError(resp.status, err);
   }
+  return resp.json().catch(() => ({}));
 }
 
 // spec carpeta-por-sesion REQ-008: valida ANTES de disparar una accion
@@ -3666,14 +5519,73 @@ sessionEditSaveEl.addEventListener("click", async () => {
       await commitSessionRename(state.sessionId, newName, metaSessionNameEl.textContent);
     }
     if (newPath && newPath !== metaSessionPathEl.textContent) {
-      await assignSessionProjectPath(state.sessionId, newPath, newName || metaSessionNameEl.textContent);
+      // spec cambio-carpeta-historial REQ-007/008/009: si la sesion ya tenia otra carpeta con historial, se PREGUNTA que hacer con el.
+      const copyAnswer = await askAboutHistoryOnFolderChange(state.sessionId, newPath);
+      if (copyAnswer === null) {
+        // La ✕ o el clic fuera: la persona se arrepintio, la carpeta no cambia (el nombre, si lo cambio, ya quedo guardado arriba).
+        sessionEditStatusEl.textContent = "";
+        return;
+      }
+      // spec importar-historial-de-carpeta REQ-010/011/012: si NO se hizo la pregunta de arriba, se consulta si la CARPETA ya tiene conversaciones
+      // anteriores del usuario (caso real: sesion nueva + carpeta de una sesion vieja) y se ofrece importarlas o abrirlas.
+      let importFrom = "";
+      if (copyAnswer === "none") {
+        const decision = await askAboutFolderHistory(state.sessionId, newPath);
+        if (decision.action === "dismiss") {
+          sessionEditStatusEl.textContent = "";
+          return;
+        }
+        if (decision.action === "open") {
+          await openPreviousSessionFromFolder(decision.sessionId, decision.registered, newPath);
+          closeSessionEditModal();
+          return;
+        }
+        if (decision.action === "import") importFrom = decision.sessionId;
+      }
+      const result = await assignSessionProjectPath(
+        state.sessionId,
+        newPath,
+        newName || metaSessionNameEl.textContent,
+        copyAnswer === true,
+        importFrom,
+        sessionEditPublicEl.checked
+      );
+      _sessionPublicAtOpen = sessionEditPublicEl.checked; // ya quedo guardado junto con la carpeta
       updateMetaSessionPath(newPath);
+      if (importFrom) {
+        if (result.import_failed) {
+          // Nunca un «Guardado ✓» mentiroso: la carpeta quedo asignada, pero el historial NO se trajo.
+          sessionEditStatusEl.textContent =
+            "La carpeta se guardó, pero no pude importar la conversación anterior. Podés intentarlo de nuevo o abrirla desde la lista de sesiones.";
+          sessionEditStatusEl.className = "settings-status error";
+          return;
+        }
+        // Repinta el chat desde SQLite: la sesion ahora tiene todo el historial importado.
+        await activateSession(state.sessionId);
+      }
       updatePersistenceBanner(true);
+      rememberSessionFolder(state.sessionId, true); // REQ-016: desde aca su chat va a SQLite y deja de copiarse
       // BUG real detectado: faltaba refrescar el footer ("Sin carpeta
       // asignada a esta sesión") tras asignar carpeta desde este modal --
       // solo se actualizaba metaSessionPathEl (el chip de arriba), el
       // footer de abajo dependia unicamente de activateSession()/status.
       refreshProjectFooter();
+    }
+    // spec sesion-publica-privada REQ-008: si solo cambio el interruptor (la carpeta no se reasigno arriba), se guarda por su propio endpoint.
+    // Con carpeta nueva el campo `public` ya viajo con ella. Una sesion sin carpeta no tiene donde guardarlo: se avisa en vez de callar.
+    if (sessionEditPublicEl.checked !== _sessionPublicAtOpen) {
+      if (!metaSessionPathEl.textContent || metaSessionPathEl.textContent === NO_FOLDER_CHIP_TEXT) {
+        sessionEditStatusEl.textContent = "Primero elegí la carpeta de la sesión: sin carpeta no puedo guardar si es pública o privada.";
+        sessionEditStatusEl.className = "settings-status error";
+        return;
+      }
+      const visibilityResp = await apiFetch(`${API_BASE}/api/sessions/${encodeURIComponent(state.sessionId)}/visibility`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ public: sessionEditPublicEl.checked }),
+      });
+      if (!visibilityResp.ok) throw await httpErrorFromResponse(visibilityResp);
+      _sessionPublicAtOpen = sessionEditPublicEl.checked;
     }
     sessionEditStatusEl.textContent = "Guardado ✓";
     sessionEditStatusEl.className = "settings-status ok";
@@ -3751,17 +5663,24 @@ function showConfirmModal({
   // una decision real que tomar. Default false: no cambia el comportamiento
   // de ningun llamador existente.
   hideCancel = false,
+  // spec cambio-carpeta-historial REQ-010: texto del boton secundario y lo que devuelve la ✕ (y el clic fuera). Defaults = el
+  // comportamiento de siempre («Cancelar» y `false`), asi ningun llamador existente cambia. Con `dismissValue: null` la ✕ se puede
+  // distinguir de «no» (que devuelve `false`).
+  cancelLabel = "Cancelar",
+  dismissValue = false,
 } = {}) {
   return new Promise((resolve) => {
     confirmTitleEl.textContent = title;
     confirmMessageEl.textContent = message;
     confirmAcceptBtnEl.textContent = acceptLabel;
+    confirmCancelBtnEl.textContent = cancelLabel;
     confirmCancelBtnEl.classList.toggle("hidden", hideCancel);
     confirmOverlayEl.classList.remove("hidden");
 
     const cleanup = (result) => {
       confirmOverlayEl.classList.add("hidden");
       confirmCancelBtnEl.classList.remove("hidden");  // restaura para el proximo uso normal
+      confirmCancelBtnEl.textContent = "Cancelar"; // y su texto de siempre
       confirmAcceptBtnEl.onclick = null;
       confirmCancelBtnEl.onclick = null;
       confirmCloseEl.onclick = null;
@@ -3770,11 +5689,12 @@ function showConfirmModal({
 
     confirmAcceptBtnEl.onclick = () => cleanup(true);
     confirmCancelBtnEl.onclick = () => cleanup(false);
-    confirmCloseEl.onclick = () => cleanup(false);
+    confirmCloseEl.onclick = () => cleanup(dismissValue);
   });
 }
 confirmOverlayEl.addEventListener("click", (e) => {
-  if (e.target === confirmOverlayEl) confirmCancelBtnEl.click();
+  // Clic fuera = lo mismo que la ✕ (respeta `dismissValue`); sin `dismissValue` es el «Cancelar» de siempre.
+  if (e.target === confirmOverlayEl) confirmCloseEl.click();
 });
 
 // Elimina una sesion por completo: backend (cancela turno en curso si
@@ -3782,6 +5702,34 @@ confirmOverlayEl.addEventListener("click", (e) => {
 // historial persistido en localStorage, y su entrada en el indice de
 // sesiones. Si la sesion eliminada era la activa, activa una nueva vacia
 // para no dejar la UI en un estado inconsistente.
+// spec aviso-eliminar-sesion-usuarios REQ-006/007: la frase que cuenta que otras conversaciones hay en la carpeta. Vacia si no hay nada que decir.
+// Con tope de 5 nombres por grupo y «y N más». `others` puede faltar (backend viejo): entonces no agrega nada.
+const OTHERS_SHOWN = 5;
+function describeOthersInFolder(others) {
+  if (!others || typeof others !== "object") return "";
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  const list = (items, label) => {
+    const shown = items.slice(0, OTHERS_SHOWN).map(label).join(", ");
+    return items.length > OTHERS_SHOWN ? `${shown} y ${items.length - OTHERS_SHOWN} más` : shown;
+  };
+  let out = "";
+  const mine = Array.isArray(others.mine) ? others.mine : [];
+  if (mine.length > 0) {
+    out += ` En esa carpeta también tenés: ${list(mine, (s) => `«${s.title}» (${plural(s.message_count, "mensaje", "mensajes")})`)}.`;
+  }
+  const pub = Array.isArray(others.public) ? others.public : [];
+  if (pub.length > 0) {
+    out +=
+      ` Conversaciones públicas de otras personas: ` +
+      `${list(pub, (s) => `«${s.title}» de ${s.published_by} (${plural(s.message_count, "mensaje", "mensajes")})`)}.`;
+  }
+  const priv = Array.isArray(others.private_by_user) ? others.private_by_user : [];
+  if (priv.length > 0) {
+    out += ` Hay conversaciones privadas de otras personas (no se ven sus nombres): ${list(priv, (g) => `${g.user} (${g.count})`)}.`;
+  }
+  return out;
+}
+
 async function deleteSession(sessionId, sessionName) {
   const label = sessionName || sessionId.slice(0, 8);
 
@@ -3816,6 +5764,22 @@ async function deleteSession(sessionId, sessionName) {
   }
 
   let message = `¿Eliminar la sesión "${label}"? Esta acción no se puede deshacer.`;
+  // spec indice-resiliente-y-borrado-seguro REQ-011: se dice QUE se va a perder y DONDE, y si el mismo identificador existe en otra
+  // carpeta (borrar la sesión no la elimina). Solo texto: ningún paso ni botón nuevo.
+  if (impact.message_count > 0) {
+    message +=
+      ` Tiene ${impact.message_count} mensaje${impact.message_count === 1 ? "" : "s"} guardado${impact.message_count === 1 ? "" : "s"}` +
+      (impact.project_path ? ` en ${impact.project_path}` : "") +
+      `. Los archivos de esa carpeta no se tocan.`;
+  }
+  for (const copy of Array.isArray(impact.copies_elsewhere) ? impact.copies_elsewhere : []) {
+    message +=
+      ` Hay otra copia de esta conversación con el mismo identificador en ${copy.project_path}` +
+      ` (${copy.message_count} mensaje${copy.message_count === 1 ? "" : "s"}); borrar la sesión no la elimina.`;
+  }
+  // spec aviso-eliminar-sesion-usuarios REQ-006: quien mas usa esa carpeta, solo para saber. Mis sesiones con nombre, las publicas con su autor y las
+  // privadas de otras personas SOLO por usuario y cantidad (nunca titulos: Vision aisla por usuario). Solo texto: ningun paso ni boton nuevo.
+  message += describeOthersInFolder(impact.others_in_folder);
   if (impact.agent_count > 0) {
     message += impact.will_reassign_to_fallback
       ? ` Esta sesión tiene ${impact.agent_count} agente(s) asociado(s): se reasignarán ` +
@@ -3832,6 +5796,42 @@ async function deleteSession(sessionId, sessionName) {
   });
   if (!confirmed) return;
 
+  // REQ-009 g (spec adjuntar-archivos-chat): si la sesion tiene adjuntos, un SEGUNDO paso
+  // pregunta si tambien se borran del disco. El default es CONSERVARLOS: la carpeta puede ser
+  // del usuario (no de Vision) y borrar archivos es irreversible. Se hace ANTES de eliminar la
+  // sesion, porque despues ya no hay a que ligar la limpieza.
+  try {
+    const sumResp = await apiFetch(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/attachments/summary`);
+    const summary = sumResp.ok ? await sumResp.json() : { has_attachments: false };
+    if (summary.has_attachments) {
+      const alsoDelete = await showConfirmModal({
+        title: "Archivos adjuntos",
+        message:
+          "Esta sesión tiene archivos e imágenes adjuntos. ¿Querés borrar también los archivos de la carpeta " +
+          "«attachment» del disco? Si elegís conservarlos, quedan ahí y solo se elimina la conversación.",
+        acceptLabel: "Borrarlos también",
+      });
+      if (alsoDelete) {
+        try {
+          const prev = await (await apiFetchOk(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/attachments/cleanup-preview`)).json();
+          const ids = (prev.rows || []).filter((r) => r.deletable).map((r) => r.id);
+          if (ids.length > 0) {
+            await apiFetchOk(`${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/attachments/cleanup`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ delete: ids }),
+            });
+          }
+        } catch (err) {
+          // Una falla de limpieza no debe impedir eliminar la sesion, pero tampoco ser muda.
+          appendMessage("error", `No se pudieron borrar los adjuntos del disco. ${friendlyErrorMessage(err)}`, { persist: false });
+        }
+      }
+    }
+  } catch {
+    // Sin backend no hay adjuntos que consultar: se sigue con el borrado normal.
+  }
+
   try {
     await apiFetch(`${API_BASE}/api/session/${sessionId}`, { method: "DELETE" });
   } catch (err) {
@@ -3841,11 +5841,8 @@ async function deleteSession(sessionId, sessionName) {
     // fantasma en la lista sin ninguna forma de sacarla.
   }
 
-  try {
-    localStorage.removeItem(`vision.session.${sessionId}`);
-  } catch {
-    // noop
-  }
+  removeLocalCopy(sessionId); // REQ-016: la copia chica que tenga (sesion sin carpeta)
+  _sessionHasFolder.delete(sessionId);
 
   const index = loadSessionsIndex();
   delete index[sessionId];
@@ -3870,6 +5867,13 @@ async function deleteSession(sessionId, sessionName) {
 // asi el usuario puede ir y volver entre sesiones sin perder scroll,
 // sin parpadeo de pantalla, y reconectandose al turno en progreso si
 // vuelve a una sesion que sigue "pensando".
+//
+// REQ-016/REQ-018 (spec fix-detener-y-progreso-visible, revision F2/F3): cada activacion de una sesion suma 1. Lo que espera algo de la
+// red para pintar (la carga de la pagina, una activacion anterior) compara este numero antes y despues de cada espera: si cambio, el
+// usuario ya fue a otra sesion -- o fue y volvio, y esa activacion nueva ya pinto todo -- y lo suyo no se dibuja. Antes solo se comparaba
+// el id de la sesion: el turno de A se enganchaba (y se pintaba) en B, y ir y volver a A durante la carga pintaba su historial dos veces.
+let _sessionActivations = 0;
+
 function clearMessagesDom() {
   // .turn-container reemplaza a .user-turn-wrap como unidad de limpieza
   // (cada turno = burbuja de usuario + su respuesta/tool-calls agrupadas,
@@ -3900,6 +5904,9 @@ function clearMessagesDom() {
 }
 
 async function activateSession(sessionId) {
+  // Revision F2/F3: si mientras esta activacion espera a Vision el usuario activa otra sesion, esta deja de pintar (ver _sessionActivations).
+  const activation = ++_sessionActivations;
+  const superseded = () => activation !== _sessionActivations;
   state.sessionId = sessionId;
   try {
     localStorage.setItem(SESSION_ID_KEY, sessionId);
@@ -3926,21 +5933,17 @@ clearMessagesDom();
   // local queda SOLO como fallback para el caso sin conexion. Bug real
   // reportado por el usuario: "deberia procesar todo en background pero
   // visualizar las cosas de la sesion en la que estoy parado".
-  let history;
-  try {
-    const resp = await apiFetch(`${API_BASE}/api/sessions/${sessionId}/messages`);
-    const data = resp.ok ? await resp.json() : null;
-    const messages = data?.messages;
-    history = messages && messages.length > 0 ? messages : loadChatHistoryForSession(sessionId);
-  } catch {
-    // Sin conexion al backend -- se cae a la cache local de este navegador.
-    history = loadChatHistoryForSession(sessionId);
-  }
+  // REQ-016 (spec fix-detener-y-progreso-visible): el mismo camino que usa F5 al abrir la pagina (fetchSessionHistory).
+  const history = await fetchSessionHistory(sessionId);
+  if (superseded()) return; // revision F2/F3: el usuario ya esta en otra sesion; pintar esto (o guardarlo como su copia) seria cruzarlas
   chatHistory.push(...history);
-  persistChatHistory(); // sincroniza la cache local con lo que devolvio SQLite (o el fallback)
+  persistChatHistory(); // solo escribe si la sesion no tiene carpeta (la copia chica, acotada)
   for (const entry of chatHistory) {
-    appendMessage(entry.role, entry.text, { persist: false, messageId: entry.messageId, time: entry.time, responseType: entry.responseType || null, technical: entry.technical || null, errorKind: entry.errorKind || null });
+    appendMessage(entry.role, entry.text, { persist: false, messageId: entry.messageId, time: entry.time, responseType: entry.responseType || null, technical: entry.technical || null, errorKind: entry.errorKind || null, attachments: entry.attachments || null });
   }
+  // REQ-018 (spec fix-detener-y-progreso-visible): la pregunta que esta sesion dejo esperando (llego estando el usuario en otra, o el
+  // usuario se fue con ella en pantalla) aparece al volver. clearMessagesDom ya oculto la de la sesion anterior.
+  showPendingQuestionFor(sessionId);
 
   // BUG real corregido (deteccion QA 2026-09-14): el panel "Tareas" solo se
   // actualizaba via eventos SSE "todo" en vivo -- al activar/volver a una
@@ -3950,13 +5953,16 @@ clearMessagesDom();
   // quedaba vacio/desactualizado aunque el backend SI tenia el plan guardado
   // (`GET /api/todos/{id}`, ya existente). Se re-sincroniza siempre al
   // activar cualquier sesion, sea que este ocupada o no.
+  let todos = [];
   try {
     const todosResp = await apiFetch(`${API_BASE}/api/todos/${sessionId}`);
     const todosData = todosResp.ok ? await todosResp.json() : null;
-    renderTodos(todosData?.todos || []);
+    todos = todosData?.todos || [];
   } catch {
-    renderTodos([]);
+    todos = [];
   }
+  if (superseded()) return;
+  renderTodos(todos);
 
   // spec proyecto-por-sesion REQ-006: el Session ID se muestra INSTANTANEO
   // (no depende de red) -- la ruta de carpeta si necesita el fetch de
@@ -3966,9 +5972,10 @@ clearMessagesDom();
   // REQ-002 (spec gestion-sesiones): renderSessionsPanel() ya actualiza
   // el chip con el nombre real (updateMetaSessionName) -- no hace falta
   // pisarlo aca con las siglas del UUID.
-  updateCacheMeter();
   renderSessionsPanel();
-  if (document.getElementById("acc-context").open) refreshContextUsage();
+  // REQ-017 (spec fix-detener-y-progreso-visible): el % de ESTA sesion, aunque el acordeon «Contexto» este cerrado (antes solo
+  // se refrescaba abierto y el resumen quedaba en «—» o con el % de la sesion anterior).
+  refreshContextUsage();
 
   // Si esta sesion sigue procesando un turno en background (ver fix del
   // bug: crear/cambiar de sesion ya no lo cancela), nos re-enganchamos al
@@ -3978,14 +5985,16 @@ clearMessagesDom();
   try {
     const statusResp = await apiFetch(`${API_BASE}/api/session/${sessionId}/status`);
     const statusData = await statusResp.json();
+    if (superseded()) return; // revision F2: el banner, el chip, el loop y el turno en curso de ESTA sesion no van en otra
     // REQ-006 (spec persistencia-sqlite-sesiones): el status ya trae
     // `persistence_available` -- se reusa esta misma consulta (que ya se
     // hace al activar cualquier sesion) en vez de agregar un fetch extra.
     updatePersistenceBanner(statusData.persistence_available);
+    rememberSessionFolder(sessionId, statusData.persistence_available); // REQ-016: decide si le corresponde copia chica
     // spec proyecto-por-sesion REQ-006: idem para `project_path` -- ya
     // resuelto del lado del backend (carpeta propia, default, o raiz de
     // Vision), no se recalcula nada aca.
-    if (statusData.project_path) updateMetaSessionPath(statusData.project_path);
+    paintSessionPathFromStatus(statusData);
     // spec modo-plan-loop REQ-001/005/009: el chip de modo y el banner de
     // alarma se sincronizan con el estado REAL de la sesion (backend),
     // nunca con un valor local que se desincronizaria al cambiar de
@@ -4026,17 +6035,119 @@ clearMessagesDom();
         setConnStatus("busy", "Vision sigue pensando en esta sesión…");
         resetToolRow();
         const resp = await apiFetch(`${API_BASE}/api/chat/stream/${sessionId}`);
-        await renderIncomingStream(resp, statusData.active_turn_id);
+        // Revision F2: el stream es de ESTA sesion aunque el usuario cambie mientras llega (sin el tercer argumento quedaba de la activa).
+        await renderIncomingStream(resp, statusData.active_turn_id, sessionId);
         if (connStatusEl.dataset.state === "busy") setConnStatus("online", "Vision en línea");
         touchCurrentSessionInIndex(sessionId);
       } finally {
         state.sending -= 1;
         if (state.sending < 0) state.sending = 0;
       }
+        settleSendButtonAfterAttach(sessionId);
     }
   } catch {
     // Si falla la reconexion no es critico -- el usuario puede reintentar
     // simplemente reabriendo el acordeon de Sesion.
+  }
+}
+
+// -------------------------------------------------------------------------
+// REQ-016 (spec fix-detener-y-progreso-visible): al abrir la pagina (o con F5) el chat de la sesion activa se lee de SQLite por el
+// MISMO camino que activateSession (`fetchSessionHistory`), no de la copia del navegador. Antes F5 pintaba SOLO esa copia: despues
+// de «Liberar caché» la sesion se veia vacia aunque SQLite tenia todo, con el navegador lleno faltaba la ultima respuesta, y una
+// copia con otra forma rompia la pagina entera. Es asincrono (espera al backend): lo que se haya pintado mientras tanto (la nota
+// «Sesión iniciada», un mensaje que el usuario ya mando) queda DESPUES del historial, como antes.
+// -------------------------------------------------------------------------
+let _historyRestoreDone = false;
+
+async function restoreActiveSessionOnLoad() {
+  const loadSessionId = state.sessionId;
+  const loadActivation = _sessionActivations;
+  try {
+    const history = await fetchSessionHistory(loadSessionId);
+    // El usuario ya cambio de sesion mientras tanto: activateSession pinta la otra, esto ya no corresponde. Revision F3: tambien si fue
+    // a otra y VOLVIO a esta (el id coincide, pero activateSession ya la pinto entera: insertarla otra vez la duplicaba).
+    if (_sessionActivations !== loadActivation || state.sessionId !== loadSessionId || history.length === 0) return;
+    const firstShownEl = Array.from(messagesEl.children).find((el) => !el.classList.contains("messages-watermark")) || null;
+    const countBefore = messagesEl.children.length;
+    for (const entry of history) {
+      appendMessage(entry.role, entry.text, { persist: false, messageId: entry.messageId, time: entry.time, responseType: entry.responseType || null, technical: entry.technical || null, errorKind: entry.errorKind || null, attachments: entry.attachments || null });
+    }
+    if (firstShownEl) {
+      for (const el of Array.from(messagesEl.children).slice(countBefore)) messagesEl.insertBefore(el, firstShownEl);
+    }
+    chatHistory.splice(0, 0, ...history);
+    persistChatHistory(); // solo la sesion sin carpeta (copia chica): asi queda acotada desde la primera carga
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    showPendingQuestionFor(loadSessionId); // REQ-018: con F5, la pregunta sin contestar de esta sesion vuelve (dato de SQLite)
+  } catch (err) {
+    console.warn("No se pudo restaurar la conversación al abrir la página:", err);
+  } finally {
+    _historyRestoreDone = true;
+  }
+}
+
+// REQ-016: migracion de UNA sola vez (marca LOCAL_COPY_MIGRATION_KEY) de lo que el navegador guardaba de mas:
+//  - las copias `vision.session.<id>` de las sesiones CON carpeta cuyo chat YA esta en SQLite (el backend las lista en
+//    /api/sessions/all con su `message_count`). REQ-016 (spec fix-detener-y-progreso-visible, revision F1): una sesion con carpeta de
+//    la que SQLite no tiene ningun mensaje (charlo sin carpeta con la version anterior y despues la recibio) conserva su copia,
+//    acotada como las de las sesiones sin carpeta: era lo unico que quedaba de esa charla (la misma regla que fetchSessionHistory);
+//  - las copias huerfanas: sesion sin carpeta que tampoco esta en el indice de sesiones (nadie la puede abrir desde la lista);
+//  - las claves `vision.pomodoro.*` de la funcion Pomodoro, eliminada (spec configuracion-limpieza-credenciales-servidor REQ-101).
+// Las copias de sesiones sin carpeta que siguen en la lista quedan, acotadas como las nuevas. NUNCA toca preferencias, el indice
+// de sesiones, la sesion abierta ni el token. Sin respuesta del backend no se sabe que sesiones tienen carpeta: no se borra nada y
+// se reintenta en la proxima carga.
+const LOCAL_COPY_MIGRATION_KEY = "vision.migrations.chatCopiesV1";
+const REMOVED_FEATURE_PREFIXES = ["vision.pomodoro."];
+
+async function migrateLocalCopiesOnce() {
+  try {
+    if (localStorage.getItem(LOCAL_COPY_MIGRATION_KEY)) return;
+  } catch {
+    return; // sin localStorage no hay copias que ordenar
+  }
+  let sqliteMessageCounts; // id de sesion con carpeta -> cuantos mensajes tiene en SQLite
+  try {
+    const resp = await apiFetch(`${API_BASE}/api/sessions/all`);
+    if (!resp.ok) return;
+    sqliteMessageCounts = new Map(((await resp.json()).sessions || []).map((s) => [s.id, Number(s.message_count) || 0]));
+  } catch {
+    return;
+  }
+  const index = loadSessionsIndex();
+  let keys;
+  try {
+    keys = Object.keys(localStorage);
+  } catch {
+    return;
+  }
+  for (const key of keys) {
+    try {
+      if (REMOVED_FEATURE_PREFIXES.some((prefix) => key.startsWith(prefix))) {
+        localStorage.removeItem(key);
+        continue;
+      }
+      if (!key.startsWith(SESSION_COPY_PREFIX)) continue;
+      const sessionId = key.slice(SESSION_COPY_PREFIX.length);
+      const sqliteCount = sqliteMessageCounts.get(sessionId);
+      if (sqliteCount !== undefined) _sessionHasFolder.set(sessionId, true);
+      if (sqliteCount > 0) {
+        localStorage.removeItem(key); // su chat esta en SQLite
+      } else if (sqliteCount === undefined && !Object.hasOwn(index, sessionId) && sessionId !== state.sessionId) {
+        localStorage.removeItem(key);
+      } else {
+        const history = parseLocalCopy(localStorage.getItem(key));
+        if (history.length > 0) localStorage.setItem(key, boundedLocalCopy(history));
+        else localStorage.removeItem(key);
+      }
+    } catch (err) {
+      console.warn("No se pudo ordenar una copia local de conversación:", key, err);
+    }
+  }
+  try {
+    localStorage.setItem(LOCAL_COPY_MIGRATION_KEY, new Date().toISOString());
+  } catch {
+    // noop -- sin la marca, la migracion se repite en la proxima carga (es idempotente)
   }
 }
 
@@ -4087,18 +6198,68 @@ sessionNewBtnEl.addEventListener("click", () => {
 // -------------------------------------------------------------------------
 // Contexto/tokens: consulta el backend (estimacion, ver app/token_estimate.py)
 // -------------------------------------------------------------------------
+// REQ-017 (spec fix-detener-y-progreso-visible): se llama al cargar la pagina, al cambiar de sesion y al terminar cada turno, con
+// el acordeon abierto o cerrado -- antes solo con el acordeon abierto, y el resumen cerrado quedaba en «—» mientras el medidor
+// «Caché local» (ya quitado) mostraba 100 %: el usuario leia ese 100 % como el contexto del modelo (que estaba en 15 %).
+// spec aviso-contexto-largo REQ-008: el chip de la barra superior. `level` lo calcula el backend (ok | warn | high | critical); sin dato queda
+// en «—» y `unknown` (nunca con el % de otra sesion).
+function paintContextChip(data) {
+  if (!data) {
+    contextChipEl.dataset.state = "unknown";
+    contextChipValEl.textContent = "—";
+    contextChipEl.title = "Contexto: no se pudo calcular";
+    return;
+  }
+  contextChipEl.dataset.state = data.level || "ok";
+  contextChipValEl.textContent = `${data.pct_used || 0}%`;
+  contextChipEl.title =
+    `Contexto: ${data.tokens.toLocaleString("es-AR")} / ${data.context_window.toLocaleString("es-AR")} tokens (estimado). ` +
+    "Si se acerca al 100 %, usá /compact para resumirlo o /clear para borrar la conversación.";
+}
+
+// spec aviso-contexto-largo REQ-009: UNA nota por sesion al llegar a CONTEXT_WARN_PCT; se rearma solo al bajar de CONTEXT_REARM_PCT.
+function maybeWarnLongContext(sessionId, pct) {
+  if (pct < CONTEXT_REARM_PCT) {
+    _contextWarnedSessions.delete(sessionId);
+    return;
+  }
+  if (pct < CONTEXT_WARN_PCT || _contextWarnedSessions.has(sessionId)) return;
+  _contextWarnedSessions.add(sessionId);
+  appendMessage(
+    "system-note",
+    `Esta conversación está llegando al límite de lo que el modelo puede leer (${pct}% estimado). ` +
+      "Escribí /compact para resumirla y seguir, o /clear para borrarla toda. Si no, pronto el modelo va a rechazarla por larga.",
+    { persist: false }
+  );
+}
+
 async function refreshContextUsage() {
+  const sessionId = state.sessionId;
   try {
-    const resp = await apiFetch(`${API_BASE}/api/context/${state.sessionId}`);
+    // spec aviso-contexto-largo REQ-007: se mide contra la ventana del modelo ELEGIDO en el selector (nada en modo Automatico).
+    const model = selectedModelForRequest();
+    const query = model ? `?model=${encodeURIComponent(model)}` : "";
+    const resp = await apiFetch(`${API_BASE}/api/context/${sessionId}${query}`);
+    if (!resp.ok) throw await httpErrorFromResponse(resp);
     const data = await resp.json();
+    if (sessionId !== state.sessionId) return; // respuesta tardia de la sesion anterior: no se pinta sobre la nueva
     const pct = data.pct_used || 0;
     contextSummaryEl.textContent = `${pct}%`;
     contextFillEl.style.width = `${pct}%`;
     contextFillEl.classList.toggle("warn", pct >= 60 && pct < 85);
     contextFillEl.classList.toggle("critical", pct >= 85);
     contextDetailEl.textContent = `${data.tokens.toLocaleString("es-AR")} / ${data.context_window.toLocaleString("es-AR")} tokens (estimado)`;
+    paintContextChip(data);
+    maybeWarnLongContext(sessionId, pct);
   } catch {
+    if (sessionId !== state.sessionId) return;
     contextDetailEl.textContent = "No se pudo calcular el contexto.";
+    // REQ-017 (spec fix-detener-y-progreso-visible, revision F5): sin dato de ESTA sesion, el resumen (lo unico que se ve con el
+    // acordeon cerrado) y la barra no se quedan con el % de la sesion anterior.
+    contextSummaryEl.textContent = "—";
+    contextFillEl.style.width = "0%";
+    contextFillEl.classList.remove("warn", "critical");
+    paintContextChip(null);
   }
 }
 
@@ -4110,30 +6271,145 @@ const CONNECTOR_LABELS = {
   oracle: "Oracle", bigquery: "BigQuery", sharepoint: "SharePoint", sap: "SAP", graph: "Graph",
 };
 
-async function refreshConnectorsStatus() {
-  connectorsListEl.innerHTML = '<li><span class="connector-dot checking"></span>Verificando…</li>';
-  try {
-    const resp = await apiFetch(`${API_BASE}/api/connectors/status`);
-    const data = await resp.json();
-    const connectors = data.connectors || [];
-    const onlineCount = connectors.filter((c) => c.status === "online").length;
-    connectorsSummaryEl.textContent = `${onlineCount}/${connectors.length}`;
+// spec interruptores-conexiones-skills, decisión del usuario 2026-10-08: el panel lateral y Configuración > Conexiones muestran la MISMA prueba, y se vuelve a
+// probar SOLO con el botón «Actualizar estado» (o la primera vez que hace falta). Antes cada lugar hacía su propia prueba en momentos distintos: el panel lateral
+// quedaba con una vieja (ej. BigQuery en rojo porque su primera prueba venció) mientras Conexiones mostraba otra nueva en verde; y apagar un interruptor
+// re-probaba todo y mandaba la fila al final de la lista. `_connSnapshot` = { connectors (estado de la última prueba), switches (interruptores), error }.
+let _connSnapshot = null;
+let _connCheckInFlight = null;
 
-    connectorsListEl.innerHTML = "";
-    connectors.forEach((c) => {
-      const li = document.createElement("li");
-      const dot = document.createElement("span");
-      dot.className = `connector-dot ${c.status}`;
-      const label = document.createElement("span");
-      label.textContent = CONNECTOR_LABELS[c.name] || c.name;
-      li.append(dot, label);
-      li.title = c.detail || c.status;
-      connectorsListEl.appendChild(li);
-    });
-  } catch (err) {
+function connectorDisplayName(c) {
+  // spec conexiones-con-nombre REQ-002: «Tipo - nombre» (ej. «SharePoint - Sitio Logistico»); BigQuery no tiene nombre y sigue como siempre
+  return c.display || CONNECTOR_LABELS[c.name] || c.name;
+}
+
+// spec conexiones-office-m365-visibles: Outlook y Teams y Office NO son conexiones del gestor (sin campos ni credenciales: tienen su propio estado y su propio interruptor en el
+// servidor), pero la persona las espera ver junto al resto, con un nombre que diga que se puede hacer. Se SUMAN a la foto como filas extra; los endpoints de conexiones no cambian.
+function m365Capability(s) {
+  const enabled = s.enabled !== false;
+  if (!enabled) return { enabled, status: "off", detail: "Desactivada" };
+  if (s.state === "connected") return { enabled, status: "online", detail: "Conectado" };
+  // «waiting» (ambar fijo) y NO «checking»: `checking` es el «Verificando…» de la carga y la pantalla lo usa para saber que todavia no termino de probar
+  if (s.state === "waiting") return { enabled, status: "waiting", detail: "Esperando que termines de entrar en el navegador" };
+  if (s.state === "error") return { enabled, status: "error", detail: s.message || "No se pudo iniciar sesión. Probá de nuevo desde Conexiones." };
+  return { enabled, status: "error", detail: "Sin sesión: iniciala en Conexiones > Conectores > Outlook y Teams" };
+}
+
+// Office SE PUEDE usar con Excel cerrado (solo falta abrir el libro): marcarlo en rojo seria mentir.
+function officeCapability(o) {
+  const enabled = o.enabled !== false;
+  if (!enabled) return { enabled, status: "off", detail: "Desactivada" };
+  const excel = o.excel || {};
+  const word = o.word || {};
+  const wordNote = word.state === "missing" && word.message ? ` ${word.message}` : "";
+  if (excel.state === "running" || excel.state === "closed") return { enabled, status: "online", detail: `${excel.message || ""}${wordNote}`.trim() };
+  if (excel.state === "busy") return { enabled, status: "waiting", detail: excel.message || "Excel está ocupado." };
+  return { enabled, status: "error", detail: excel.message || word.message || "No pude saber si Office está disponible." };
+}
+
+const CAPABILITIES = [
+  { key: "m365", display: "Outlook y Teams - Principal", statusPath: "/api/m365/status", switchPath: "/api/m365/switch", build: m365Capability },
+  { key: "office", display: "Office - Principal", statusPath: "/api/office/status", switchPath: "/api/office/switch", build: officeCapability },
+];
+
+// Si una consulta falla, esa fila simplemente no aparece: la lista de siempre se ve completa (nunca se rompe por esto).
+async function fetchCapabilities() {
+  const out = [];
+  await Promise.all(
+    CAPABILITIES.map(async (cap) => {
+      try {
+        const resp = await apiFetchOk(`${API_BASE}${cap.statusPath}`);
+        const data = await resp.json();
+        // spec conexiones-office-m365-visibles REQ-009: el nombre lo pone la PERSONA (el servidor lo manda en `display`); `cap.display` es solo el respaldo si no llegara
+        out.push({ ...cap.build(data), key: cap.key, name: cap.key, display: typeof data.display === "string" && data.display ? data.display : cap.display, switchPath: cap.switchPath });
+      } catch { /* sin respuesta: sin fila */ }
+    }),
+  );
+  return out;
+}
+
+// La persona renombro una de estas conexiones desde su ventana (vault.js avisa con un evento): se relee su estado y se repintan las dos listas SIN recargar ni re-probar las demas.
+window.addEventListener("vision:capability-name-changed", () => {
+  refreshCapabilities().catch(() => {}); // sin respuesta: queda la ultima foto
+});
+
+// Un interruptor de estas filas cambio en el servidor: se vuelve a leer SOLO su estado (no se re-prueban las demas conexiones) y se repintan las dos listas.
+async function refreshCapabilities() {
+  if (!_connSnapshot) return;
+  _connSnapshot = { ..._connSnapshot, capabilities: await fetchCapabilities() };
+  renderConnStatusList();
+  renderConnectorsSidebar();
+}
+
+// La ÚNICA prueba real de las conexiones: pide el estado y los interruptores y repinta los dos lugares a la vez.
+async function checkConnectionsNow() {
+  if (_connCheckInFlight) return _connCheckInFlight;
+  connectorsListEl.innerHTML = '<li><span class="connector-dot checking"></span>Verificando…</li>';
+  const statusListEl = document.getElementById("conn-status-list");
+  if (statusListEl) statusListEl.innerHTML = '<div class="conn-status-row"><span class="connector-dot checking"></span>Verificando…</div>';
+  _connCheckInFlight = (async () => {
+    try {
+      const resp = await apiFetchOk(`${API_BASE}/api/connectors/status`);
+      const connectors = (await resp.json()).connectors || [];
+      let switches = [];
+      try {
+        switches = await fetchConnectionSwitches();
+      } catch { /* sin la lista de interruptores se muestra el estado como antes */ }
+      const capabilities = await fetchCapabilities();
+      _connSnapshot = { connectors, switches, capabilities, error: null };
+    } catch (err) {
+      _connSnapshot = { connectors: [], switches: [], capabilities: [], error: err };
+    } finally {
+      _connCheckInFlight = null;
+    }
+    renderConnectorsSidebar();
+    renderConnStatusList();
+    if (!_connSnapshot.error) updateConnectionsSummary(_connSnapshot.switches);
+  })();
+  return _connCheckInFlight;
+}
+
+// Un interruptor cambió (se guardó en el servidor): se anota en la foto SIN volver a probar, así Conexiones dibuja el interruptor donde quedó.
+function applySwitchesToConnSnapshot(switches) {
+  if (!_connSnapshot) return;
+  _connSnapshot = { ..._connSnapshot, switches, pending: true };
+  renderConnStatusList();
+}
+
+// Orden estable: alfabético por nombre visible (el mismo de la lista de interruptores). Apagar o prender nunca mueve una fila.
+function sortByConnectionName(items, nameOf) {
+  return [...items].sort((a, b) => nameOf(a).localeCompare(nameOf(b), "es", { sensitivity: "base" }));
+}
+
+function renderConnectorsSidebar() {
+  const snap = _connSnapshot;
+  if (!snap) return;
+  if (snap.error) {
     connectorsSummaryEl.textContent = "sin datos";
-    renderListError(connectorsListEl, `No se pudo consultar el estado de las conexiones. ${friendlyErrorMessage(err)}`, "");
+    renderListError(connectorsListEl, `No se pudo consultar el estado de las conexiones. ${friendlyErrorMessage(snap.error)}`, "");
+    return;
   }
+  const connectors = sortByConnectionName(snap.connectors, connectorDisplayName);
+  const onlineCount = connectors.filter((c) => c.status === "online").length;
+  connectorsSummaryEl.textContent = `${onlineCount}/${connectors.length}`; // «X/Y» = conexiones de DATOS: las capacidades de abajo no lo cambian
+  connectorsListEl.innerHTML = "";
+  const visible = sortByConnectionName([...connectors, ...(snap.capabilities || []).filter((cap) => cap.enabled)], connectorDisplayName);
+  visible.forEach((c) => {
+    const li = document.createElement("li");
+    const dot = document.createElement("span");
+    dot.className = `connector-dot ${c.status}`;
+    const label = document.createElement("span");
+    label.textContent = connectorDisplayName(c);
+    li.append(dot, label);
+    li.title = c.detail || c.status;
+    connectorsListEl.appendChild(li);
+  });
+}
+
+// Abrir el acordeón del panel lateral muestra la última prueba; solo si todavía no hubo ninguna, la hace.
+async function refreshConnectorsStatus() {
+  if (_connSnapshot) renderConnectorsSidebar();
+  else await checkConnectionsNow();
 }
 
 // Los paneles de acordeon consultan datos reales recien al abrirse (evita
@@ -4325,6 +6601,59 @@ function dragElement(dragHandleEl, widgetEl) {
 dragElement(voiceEyeDragHandleEl, voiceEyeWidgetEl);
 
 let meetingModeActive = false;
+
+// -- Spec fix-conflicto-modos-voz-simultaneos (REQ-001..005, opcion A) ----
+// Bug real reportado por el usuario (2026-09-26): con Modo Cerebro activo,
+// tocar "Hablar" lo dejaba sordo y ni Escape + reactivar lo recuperaba hasta
+// recargar la pagina. Los 3 modos de voz abren el microfono cada uno por su
+// cuenta, y la cancelacion de eco de Chromium es UNA sola por microfono
+// fisico: un segundo stream con eco cancelado (Chrome lo aplica por defecto)
+// le "roba" el procesamiento al primero, que queda recibiendo silencio sin
+// error ni evento `ended`. Como "Hablar" es manual, quedaba grabando para
+// siempre y cada reactivacion de Cerebro sufria lo mismo.
+// Fix acordado con el usuario: UN modo de voz a la vez (bloquear el nuevo,
+// nunca apagar solo el que ya escucha). Se chequea en el click de cada boton,
+// ANTES de abrir el microfono, y por fuera de cada modo: no toca el VAD de
+// Cerebro, la cadena de fragmentos de Reunion ni la limpieza al desenchufar.
+const VOICE_MODE_LABELS = { chat: "el micrófono del chat", brain: "Modo Cerebro", meeting: "Modo reunión" };
+
+function activeVoiceMode() {
+  // voiceMicStarting: "Hablar" ya pidio el microfono pero todavia no marco
+  // `listening` -- un click a otro modo en ese instante tambien se bloquea.
+  if (voiceMicStarting || voiceMicBtnEl.dataset.listening === "true") return "chat";
+  if (brainModeActive) return "brain";
+  if (meetingModeActive) return "meeting";
+  // spec control-microfono-windows: el aviso previo (leer si Windows lo silencio) tarda un instante ANTES de que el modo marque que esta activo;
+  // en ese tramo el modo pedido primero ya ocupa el microfono (mismo criterio que voiceMicStarting).
+  return pendingVoiceMode() || (meetingStartPending ? "meeting" : null);
+}
+
+// REQ-004: que modo esta escuchando y como apagarlo, sin jerga tecnica.
+function voiceModeBusyMessage(active, requested) {
+  const wanted = VOICE_MODE_LABELS[requested];
+  // spec control-microfono-windows: Cerebro o Record todavia estan en su chequeo previo del microfono: aun no escuchan (va ANTES de los dos avisos de abajo).
+  if ((active === "brain" && !brainModeActive) || (active === "meeting" && !meetingModeActive)) {
+    return `${VOICE_MODE_LABELS[active]} se está preparando. Esperá un momento antes de usar ${wanted}.`;
+  }
+  if (active === "brain") return `Modo Cerebro está escuchando. Apagalo con Escape si querés usar ${wanted}.`;
+  if (active === "meeting") return `Modo reunión está escuchando. Terminá la reunión (tocá Record o Escape) si querés usar ${wanted}.`;
+  // Revision 2026-10-09: mientras "Hablar" todavia espera el microfono (p. ej. el permiso del navegador) NO graba:
+  // "esta grabando, tocalo para terminar" seria falso y ese toque se ignora (voiceMicStarting).
+  if (voiceMicBtnEl.dataset.listening !== "true") {
+    return `El micrófono del chat se está encendiendo. Esperá a que empiece a grabar y tocalo de nuevo para terminar si querés usar ${wanted}.`;
+  }
+  return `El micrófono del chat está grabando. Tocalo de nuevo para terminar si querés usar ${wanted}.`;
+}
+
+// REQ-001/002/003: true si el modo pedido puede arrancar. Si otro modo esta
+// escuchando, avisa y devuelve false SIN tocar ningun estado (REQ-005: no
+// queda ninguna bandera trabada; apagado el otro modo, este arranca normal).
+function canStartVoiceMode(requested) {
+  const active = activeVoiceMode();
+  if (!active || active === requested) return true;
+  appendMessage("system-note", voiceModeBusyMessage(active, requested), { persist: false });
+  return false;
+}
 
 // -------------------------------------------------------------------------
 // Bug real reportado por el usuario (modo Cerebro, pero afecta a los 3
@@ -4541,7 +6870,8 @@ async function noticeTranscriptionProblem(modeLabel, err = null, resp = null) {
 voiceMicBtnEl.addEventListener("click", () => {
   const listening = voiceMicBtnEl.dataset.listening === "true";
   if (listening) stopVoiceMicRecording();
-  else startVoiceMicRecording();
+  // spec control-microfono-windows REQ-005: aviso ANTES de grabar si el microfono esta silenciado en Windows. Solo el clic manual: el plug and play no pasa por aca.
+  else if (canStartVoiceMode("chat")) startWithMicCheck("chat", startVoiceMicRecording); // fix-conflicto-modos-voz-simultaneos REQ-001
 });
 
 // -- Spec panel-flotante-control-rapido (2026-09-12): boton circular -----
@@ -4587,6 +6917,7 @@ function openQuickPanelMenu() {
   quickPanelMuteToggleEl.dataset.checked = String(isVoiceMuted());
   quickPanelLoopToggleEl.dataset.checked = String(_loopEnabled);
   if (quickPanelLooprunToggleEl && quickPanelLoopautoToggleEl) syncQuickPanelLoopState();
+  fetchConnectionSwitches().then(updateConnectionsSummary).catch(() => { /* el resumen es decorativo: sin el, el boton sigue andando */ });
 }
 function closeQuickPanelMenu() {
   quickPanelMenuEl.classList.add("hidden");
@@ -4647,7 +6978,7 @@ quickPanelAutosendBtnEl.addEventListener("click", (e) => {
 quickPanelLoopBtnEl.addEventListener("click", (e) => {
   e.stopPropagation();
   _loopEnabled = !_loopEnabled;
-  try { localStorage.setItem(TTS_LOOP_KEY, _loopEnabled ? "true" : "false"); } catch { /* noop */ }
+  savePreference(TTS_LOOP_KEY, _loopEnabled ? "true" : "false"); // REQ-016: si no se guarda, se avisa una vez
   quickPanelLoopToggleEl.dataset.checked = String(_loopEnabled);
   if (!_loopEnabled && _looping) stopActivePlayback();
 });
@@ -4664,7 +6995,7 @@ quickPanelLoopBtnEl.addEventListener("click", (e) => {
 const LOOP_AUTO_PREF_KEY = "vision.loop.auto";
 
 function _loadLoopAutoPref() {
-  try { return localStorage.getItem(LOOP_AUTO_PREF_KEY) === "true"; } catch { return false; }
+  return readPreference(LOOP_AUTO_PREF_KEY) === "true";
 }
 let _loopRunning = false;
 let _loopAutoPref = _loadLoopAutoPref();
@@ -4690,7 +7021,7 @@ quickPanelLooprunBtnEl.addEventListener("click", (e) => {
 quickPanelLoopautoBtnEl.addEventListener("click", (e) => {
   e.stopPropagation();
   _loopAutoPref = !_loopAutoPref;
-  try { localStorage.setItem(LOOP_AUTO_PREF_KEY, _loopAutoPref ? "true" : "false"); } catch { /* noop */ }
+  savePreference(LOOP_AUTO_PREF_KEY, _loopAutoPref ? "true" : "false"); // REQ-016: si no se guarda, se avisa una vez
   syncQuickPanelLoopState();
 });
 
@@ -4700,8 +7031,127 @@ quickPanelLoopautoBtnEl.addEventListener("click", (e) => {
 // endpoint que usa el menu "/"). Estado vacio explicito si el proyecto no
 // tiene ninguna definida -- nunca una lista en blanco sin contexto ni un
 // fallback silencioso a skills globales.
+// spec interruptores-conexiones-skills (REQ-006/008/009): interruptores de conexiones y skills. El estado vive en el servidor (`~/.vision/vision.db`, global): la pantalla
+// solo lo muestra y lo cambia, y SIEMPRE repinta con lo que devolvio el servidor (nunca asume que el cambio se guardo).
+async function fetchConnectionSwitches() {
+  const resp = await apiFetchOk(`${API_BASE}/api/switches/connections`);
+  return (await resp.json()).connections || [];
+}
+
+async function postConnectionSwitch(key, enabled) {
+  const resp = await apiFetchOk(`${API_BASE}/api/switches/connections`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key, enabled }),
+  });
+  return (await resp.json()).connections || [];
+}
+
+// Interruptor accesible (role=switch). `onToggle(nextValue)` devuelve una promesa: si falla, el interruptor vuelve a su estado real y se avisa en pantalla.
+function buildSwitch({ checked, disabled = false, label, onToggle }) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "sw-toggle";
+  btn.setAttribute("role", "switch");
+  btn.setAttribute("aria-label", label);
+  btn.setAttribute("aria-checked", String(checked));
+  btn.dataset.state = checked ? "on" : "off";
+  btn.disabled = disabled;
+  btn.innerHTML = '<span class="sw-toggle-knob"></span>';
+  btn.addEventListener("click", async (event) => {
+    // Precaucion, NO un arreglo de un bug actual: hoy cada interruptor es hermano (no hijo) del elemento que se puede clicar, asi que sin esta linea nada cambia (se probo
+    // quitandola: el panel rapido sigue abierto y la skill no se ejecuta). Se deja por si un interruptor se mete algun dia DENTRO de un <li> expandible o de un boton.
+    event.stopPropagation();
+    if (btn.disabled) return;
+    const next = btn.getAttribute("aria-checked") !== "true";
+    btn.disabled = true;
+    try {
+      await onToggle(next);
+    } catch (err) {
+      alert(friendlyErrorMessage(err));
+    } finally {
+      btn.disabled = disabled;
+    }
+  });
+  return btn;
+}
+
+function setSwitchVisual(btn, checked) {
+  btn.setAttribute("aria-checked", String(checked));
+  btn.dataset.state = checked ? "on" : "off";
+}
+
+const quickPanelConnectionsBtnEl = document.getElementById("quick-panel-connections-btn");
+const quickPanelConnectionsViewEl = document.getElementById("quick-panel-connections-view");
+const quickPanelConnectionsBackEl = document.getElementById("quick-panel-connections-back");
+const quickPanelConnectionsListEl = document.getElementById("quick-panel-connections-list");
+const quickPanelConnectionsSummaryEl = document.getElementById("quick-panel-connections-summary");
+
+// El resumen del boton («3/5») se ve con el menu cerrado: cuantas conexiones hay activas sobre cuantas estan configuradas.
+function updateConnectionsSummary(list) {
+  if (!quickPanelConnectionsSummaryEl) return;
+  quickPanelConnectionsSummaryEl.textContent = list.length ? `${list.filter((c) => c.enabled).length}/${list.length}` : "";
+}
+
+function renderConnectionSwitchRows(container, list) {
+  container.innerHTML = "";
+  if (!list.length) {
+    const empty = document.createElement("div");
+    empty.className = "quick-panel-skills-empty";
+    empty.textContent = "No hay conexiones configuradas";
+    container.appendChild(empty);
+    return;
+  }
+  list.forEach((conn) => {
+    const row = document.createElement("div");
+    row.className = "sw-row";
+    row.dataset.state = conn.enabled ? "on" : "off";
+    const name = document.createElement("span");
+    name.className = "sw-row-name";
+    name.textContent = conn.display; // texto del servidor: textContent, nunca innerHTML
+    const note = document.createElement("span");
+    note.className = "sw-row-note";
+    note.textContent = conn.env_disabled ? "desactivada en el .env" : conn.enabled ? "activa" : "desactivada";
+    const toggle = buildSwitch({
+      checked: conn.enabled,
+      disabled: conn.env_disabled && !conn.enabled, // lo que el .env apaga no se puede prender desde aca
+      label: `${conn.enabled ? "Desactivar" : "Activar"} ${conn.display}`,
+      onToggle: async (next) => {
+        const fresh = await postConnectionSwitch(conn.key, next);
+        updateConnectionsSummary(fresh);
+        renderConnectionSwitchRows(container, fresh);
+        // Decisión del usuario (2026-10-08): el interruptor se GUARDA al instante, pero el panel lateral y Configuración > Conexiones no se vuelven a probar ni se
+        // reordenan solos: «primero configuremos todo y luego presiono el botón Actualizar estado». Solo se sincroniza la posición del interruptor en Conexiones.
+        applySwitchesToConnSnapshot(fresh);
+      },
+    });
+    row.append(name, note, toggle);
+    container.appendChild(row);
+  });
+}
+
+async function showQuickPanelConnectionsView() {
+  quickPanelMainViewEl.classList.add("hidden");
+  quickPanelConnectionsViewEl.classList.remove("hidden");
+  quickPanelConnectionsListEl.innerHTML = '<div class="quick-panel-skills-empty">Cargando…</div>';
+  try {
+    const list = await fetchConnectionSwitches();
+    updateConnectionsSummary(list);
+    renderConnectionSwitchRows(quickPanelConnectionsListEl, list);
+  } catch (err) {
+    renderListError(quickPanelConnectionsListEl, friendlyErrorMessage(err));
+  }
+}
+
+quickPanelConnectionsBtnEl.addEventListener("click", () => showQuickPanelConnectionsView());
+quickPanelConnectionsBackEl.addEventListener("click", () => showQuickPanelMainView());
+
 function showQuickPanelMainView() {
   quickPanelSkillsViewEl.classList.add("hidden");
+  // REQ-002 (spec quick-panel-labels-comandos): el submenu de Comandos es
+  // una vista hermana de Skills -- volver al menu principal oculta ambas.
+  quickPanelCommandsViewEl?.classList.add("hidden");
+  quickPanelConnectionsViewEl?.classList.add("hidden");
   quickPanelMainViewEl.classList.remove("hidden");
 }
 async function showQuickPanelSkillsView() {
@@ -4719,7 +7169,14 @@ async function showQuickPanelSkillsView() {
     if (resp.ok) globalEnabled = (await resp.json()).global_enabled === true;
   } catch { /* fallback: no habilitadas */ }
 
-  const makeBtn = (name) => {
+  // spec interruptores-conexiones-skills REQ-009: estado individual de cada skill (global y local). Se pide una vez al abrir la vista.
+  const skillState = new Map();
+  try {
+    const sResp = await apiFetch(`${API_BASE}/api/switches/skills?session_id=${encodeURIComponent(state.sessionId)}`);
+    if (sResp.ok) (await sResp.json()).skills.forEach((s) => skillState.set(`${s.scope}:${s.name}`, s.enabled));
+  } catch { /* sin el estado individual todas se muestran activas, como antes */ }
+
+  const makeBtn = (name, scope) => {
     const it = document.createElement("button");
     it.type = "button";
     it.className = "quick-panel-skill-item";
@@ -4732,7 +7189,29 @@ async function showQuickPanelSkillsView() {
       formEl.requestSubmit();
       closeQuickPanelMenu();
     };
-    return it;
+    const row = document.createElement("div");
+    row.className = "sw-row sw-row-skill";
+    const enabled = skillState.get(`${scope}:${name}`) !== false; // sin dato = activa, como antes
+    row.dataset.state = enabled ? "on" : "off";
+    const toggle = buildSwitch({
+      checked: enabled,
+      label: `${enabled ? "Desactivar" : "Activar"} la skill ${name}`,
+      onToggle: async (next) => {
+        const query = scope === "local" ? `?session_id=${encodeURIComponent(state.sessionId)}` : "";
+        const resp = await apiFetchOk(`${API_BASE}/api/switches/skills${query}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, enabled: next }),
+        });
+        const fresh = (await resp.json()).skills.find((s) => s.name === name && s.scope === scope);
+        const now = fresh ? fresh.enabled : next; // lo que dice el SERVIDOR, no lo que se pidio
+        skillState.set(`${scope}:${name}`, now);
+        setSwitchVisual(toggle, now);
+        row.dataset.state = now ? "on" : "off";
+      },
+    });
+    row.append(it, toggle);
+    return row;
   };
 
   const gSec = document.createElement("div");
@@ -4776,7 +7255,7 @@ async function showQuickPanelSkillsView() {
       gList.appendChild(e);
       return;
     }
-    skills.forEach((s) => gList.appendChild(makeBtn(s.name)));
+    skills.forEach((s) => gList.appendChild(makeBtn(s.name, "global")));
   }
   await reRenderGList();
 
@@ -4798,13 +7277,162 @@ async function showQuickPanelSkillsView() {
     e.textContent = "Sin skills del proyecto definidas";
     lList.appendChild(e);
   } else {
-    local.forEach((s) => lList.appendChild(makeBtn(s.name)));
+    local.forEach((s) => lList.appendChild(makeBtn(s.name, "local")));
   }
 }
 
 
 quickPanelSkillsBtnEl.addEventListener("click", () => showQuickPanelSkillsView());
 quickPanelSkillsBackEl.addEventListener("click", () => showQuickPanelMainView());
+
+// -------------------------------------------------------------------------
+// Submenu in-place de Comandos (spec quick-panel-labels-comandos).
+// REQ-003: dos secciones ("Comandos del sistema" / "Comandos propios"),
+// mismo endpoint que el menu "/" (getCommandsList). REQ-004: el click
+// reusa renderCommandModal() -- el MISMO camino que el menu "/", sin
+// duplicar la logica por `kind`. REQ-005: boton "Importar desde carpeta"
+// que abre el Explorador nativo de Windows y copia los .md a commands/.
+// -------------------------------------------------------------------------
+const quickPanelCommandsBtnEl = document.getElementById("quick-panel-commands-btn");
+const quickPanelCommandsViewEl = document.getElementById("quick-panel-commands-view");
+const quickPanelCommandsBackEl = document.getElementById("quick-panel-commands-back");
+const quickPanelCommandsListEl = document.getElementById("quick-panel-commands-list");
+
+function _quickPanelSection(title) {
+  const sec = document.createElement("div");
+  sec.className = "quick-panel-skills-section";
+  const head = document.createElement("div");
+  head.className = "quick-panel-skills-section-title";
+  const label = document.createElement("span");
+  label.textContent = title;
+  head.appendChild(label);
+  sec.appendChild(head);
+  const list = document.createElement("div");
+  list.className = "quick-panel-skills-list";
+  sec.appendChild(list);
+  return { sec, head, list };
+}
+
+function _quickPanelCommandBtn(command) {
+  const it = document.createElement("button");
+  it.type = "button";
+  it.className = "quick-panel-skill-item";
+  const icon = command.kind === "custom" ? "✎" : "⚡";
+  it.textContent = `${icon} /${command.name}`;
+  it.title = command.description || (command.kind === "custom" ? "Comando propio" : "");
+  it.onclick = () => {
+    closeQuickPanelMenu();
+    renderCommandModal(command); // REQ-004: mismo camino que el menu "/"
+  };
+  return it;
+}
+
+async function showQuickPanelCommandsView() {
+  quickPanelMainViewEl.classList.add("hidden");
+  quickPanelSkillsViewEl.classList.add("hidden");
+  quickPanelCommandsViewEl.classList.remove("hidden");
+  quickPanelCommandsListEl.innerHTML = "";
+
+  const data = await getCommandsList();
+
+  const sys = _quickPanelSection("Comandos del sistema");
+  (data.system || []).forEach((c) => sys.list.appendChild(_quickPanelCommandBtn({ ...c, isCustom: false })));
+  quickPanelCommandsListEl.appendChild(sys.sec);
+
+  const own = _quickPanelSection("Comandos propios");
+  const importBtn = document.createElement("button");
+  importBtn.type = "button";
+  importBtn.className = "msg-copy-btn";
+  importBtn.textContent = "Importar…";
+  importBtn.title = "Importar comandos desde una carpeta con archivos <nombre>.md";
+  importBtn.onclick = (e) => {
+    e.stopPropagation();
+    importCommandsFromFolder();
+  };
+  own.head.appendChild(importBtn);
+  const custom = data.custom || [];
+  if (!custom.length) {
+    const empty = document.createElement("div");
+    empty.className = "quick-panel-skills-empty";
+    empty.textContent = "Sin comandos propios en esta sesión";
+    own.list.appendChild(empty);
+  } else {
+    custom.forEach((c) => own.list.appendChild(_quickPanelCommandBtn({ ...c, isCustom: true, kind: "custom" })));
+  }
+  quickPanelCommandsListEl.appendChild(own.sec);
+}
+
+/**
+ * REQ-005: importa comandos desde una carpeta local. Flujo en 2 pasos:
+ * el backend nunca sobrescribe en silencio -- devuelve `conflicts`, se
+ * pide confirmacion y se reintenta con `overwrite`. Resultado resumido
+ * como nota de sistema en el chat (una falla nunca es muda).
+ */
+async function importCommandsFromFolder() {
+  const ok = await validateProjectFolderOrPrompt();
+  if (!ok) return;
+  // QA-031: antes se llamaba sin `statusEl` -- el catch de
+  // openNativeFolderPicker SOLO escribe en statusEl, asi que si el
+  // Explorador nativo fallaba (500, ya hay otro abierto, tkinter roto) el
+  // click en "Importar…" no mostraba absolutamente nada ("una falla no
+  // debe ser muda", regla del proyecto). No hay un statusEl visible en
+  // este submenu (a diferencia del modal de sesion/skills), asi que se
+  // pasa un objeto minimo que reusa esa misma rama de error para avisar
+  // en el chat con friendlyErrorMessage, igual que el resto de las
+  // acciones de este panel.
+  const statusProxy = {
+    _text: "",
+    set textContent(v) {
+      this._text = v;
+      if (v) appendMessage("error", `No se pudo importar comandos. ${v}`, { persist: false });
+    },
+    get textContent() {
+      return this._text;
+    },
+    className: "",
+  };
+  openNativeFolderPicker(
+    "",
+    async (sourcePath) => {
+      const post = (overwrite) =>
+        apiFetchOk(`${API_BASE}/api/commands/import-path`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: state.sessionId, source_path: sourcePath, overwrite }),
+        }).then((r) => r.json());
+      try {
+        let result = await post([]);
+        let imported = [...result.imported];
+        if (result.conflicts.length) {
+          const confirmOverwrite = window.confirm(
+            `Ya existen estos comandos en la sesión:\n\n/${result.conflicts.join("\n/")}\n\n¿Querés reemplazarlos por los de la carpeta elegida?`
+          );
+          if (confirmOverwrite) {
+            const second = await post(result.conflicts);
+            imported = imported.concat(second.imported);
+            result = { ...second, reserved: result.reserved, invalid: result.invalid };
+          }
+        }
+        // REQ-005 d: resumen completo -- nombra tambien lo conservado sin
+        // confirmar (antes solo se mencionaban importados/reservados/invalidos).
+        const parts = [];
+        parts.push(imported.length ? `Comandos importados: /${imported.join(", /")}.` : "No se importó ningún comando nuevo.");
+        if (result.conflicts?.length) parts.push(`Se conservaron sin cambios (no confirmado): /${result.conflicts.join(", /")}.`);
+        if (result.reserved?.length) parts.push(`Se omitieron por ser del sistema: /${result.reserved.join(", /")}.`);
+        if (result.invalid?.length) parts.push(`Se omitieron por estar vacíos, ilegibles, con nombre inválido o demasiado grandes: ${result.invalid.join(", ")}.`);
+        appendMessage("system-note", parts.join(" "), { persist: false });
+        _commandsCache = null;
+        if (!quickPanelCommandsViewEl.classList.contains("hidden")) showQuickPanelCommandsView();
+      } catch (err) {
+        appendMessage("error", `No se pudieron importar los comandos. ${friendlyErrorMessage(err)}`, { persist: false });
+      }
+    },
+    statusProxy
+  );
+}
+
+quickPanelCommandsBtnEl.addEventListener("click", () => showQuickPanelCommandsView());
+quickPanelCommandsBackEl.addEventListener("click", () => showQuickPanelMainView());
 
 // REQ-004: panel del "lienzo" embebido -- reusa el backend YA EXISTENTE
 // de vista previa en vivo (browser_workspace.py + endpoints
@@ -4852,6 +7480,7 @@ function copyQuickBrowserUrl() {
 
 function openQuickBrowserPanel() {
   quickBrowserPanelEl.classList.remove("hidden");
+  restoreBrowserGeometry(); // REQ-005: posicion/tamano guardados (ajustados a la ventana actual)
   quickBrowserLastFingerprint = null; // fuerza la primera carga
   syncQuickBrowserUrl();
   pollQuickBrowserFingerprint();
@@ -4865,32 +7494,19 @@ function closeQuickBrowserPanel() {
 }
 
 // -------------------------------------------------------------------------
-// Auto-revelado del panel "Navegador". Pedido del usuario (2026-09): el panel
-// SOLO se abre solo cuando Vision diseno una pagina que "debe verse en un
-// navegador" (la sesion tiene un index.html real, `has_index`), NO por
-// cualquier contenido. `_browserSeenFingerprint` evita reabrirlo para
-// contenido ya visto. Siempre se muestra la URL copiable + boton ↗ para
-// abrir en una pestana del navegador externo.
+// Auto-revelado del panel "Navegador Integrado" (REQ-001/002, spec
+// navegador-integrado-ventana). QA-034 CERRADO: la apertura automatica ya
+// NO se decide reconsultando la huella del filesystem en cada 'done' (eso
+// comparaba contra `_browserSeenFingerprint`, una variable en memoria que
+// se reiniciaba en null con cada recarga de pestaña -- la primera pregunta
+// de CUALQUIER tipo despues de recargar "descubria" una huella vieja como
+// si fuera nueva). Ahora la apertura depende 100% del evento puntual
+// 'browser-page-created' que el backend emite SOLO cuando el TURNO
+// completo creo la pagina de entrada (ver casos "browser-page-created"/
+// "browser-page-updated" en el switch de handleEvent, mas arriba). Siempre
+// se muestra la URL copiable + boton ↗ para abrir en una pestana del
+// navegador externo.
 // -------------------------------------------------------------------------
-let _browserSeenFingerprint = null;
-
-async function maybeAutoRevealBrowser() {
-  try {
-    const resp = await apiFetch(`${API_BASE}/api/browser/${encodeURIComponent(state.sessionId)}/fingerprint`);
-    const data = await resp.json();
-    // Solo abrir si Vision diseno una PAGINA (hay index.html) y el contenido
-    // es nuevo aun no visto.
-    if (!data.has_index) return;
-    const fp = data.fingerprint;
-    if (!fp || fp === "empty") return;
-    if (_browserSeenFingerprint === fp) return;
-    _browserSeenFingerprint = fp;
-    if (quickBrowserPanelEl.classList.contains("hidden")) openQuickBrowserPanel();
-  } catch {
-    // no bloqueante
-  }
-}
-
 if (quickBrowserUrlEl) {
   quickBrowserUrlEl.addEventListener("click", () => copyQuickBrowserUrl());
 }
@@ -4945,6 +7561,171 @@ quickBrowserMinBtnEl.addEventListener("click", () => {
   }
 });
 
+// -------------------------------------------------------------------------
+// REQ-003/004/005 (spec navegador-integrado-ventana): mover, redimensionar y
+// recordar posicion/tamano del panel. Se usa Pointer Events + setPointerCapture
+// (el arrastre sigue aunque el mouse salga del header) y el iframe recibe
+// pointer-events:none via las clases .dragging/.resizing (sin eso el iframe se
+// "come" el mouse y el gesto se corta). Maximizado no se mueve/redimensiona;
+// minimizado (solo la barra) si se mueve pero no se redimensiona.
+// -------------------------------------------------------------------------
+const quickBrowserResetBtnEl = document.getElementById("quick-browser-reset-btn");
+const quickBrowserIsolateBtnEl = document.getElementById("quick-browser-isolate-btn");
+const quickBrowserResizeHandleEl = document.getElementById("quick-browser-resize-handle");
+const BROWSER_GEOMETRY_KEY = "vision.browserPanel.geometry";
+const BROWSER_ISOLATED_KEY = "vision.browserPanel.isolated";
+const BROWSER_MIN_W = 320;
+const BROWSER_MIN_H = 200;
+const BROWSER_WINDOW_MARGIN = 16; // maximo = ventana menos 16 px por lado
+const BROWSER_HEADER_VISIBLE = 48; // el header siempre asoma al menos 48 px
+
+// Ajusta {left, top, width, height} a los limites de la ventana actual.
+function clampBrowserGeometry(g) {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const maxW = Math.max(BROWSER_MIN_W, vw - BROWSER_WINDOW_MARGIN * 2);
+  const maxH = Math.max(BROWSER_MIN_H, vh - BROWSER_WINDOW_MARGIN * 2);
+  const width = Math.round(Math.min(Math.max(g.width, BROWSER_MIN_W), maxW));
+  const height = Math.round(Math.min(Math.max(g.height, BROWSER_MIN_H), maxH));
+  // Al menos 48 px del header dentro de la ventana, en ambos ejes.
+  const left = Math.round(Math.min(Math.max(g.left, BROWSER_HEADER_VISIBLE - width), vw - BROWSER_HEADER_VISIBLE));
+  const top = Math.round(Math.min(Math.max(g.top, 0), vh - BROWSER_HEADER_VISIBLE));
+  return { left, top, width, height };
+}
+
+function applyBrowserGeometry(g) {
+  const c = clampBrowserGeometry(g);
+  const s = quickBrowserPanelEl.style;
+  s.left = `${c.left}px`;
+  s.top = `${c.top}px`;
+  s.width = `${c.width}px`;
+  s.height = `${c.height}px`;
+  s.bottom = "auto";
+  return c;
+}
+
+function currentBrowserGeometry() {
+  const r = quickBrowserPanelEl.getBoundingClientRect();
+  return { left: r.left, top: r.top, width: r.width, height: r.height };
+}
+
+function saveBrowserGeometry(g) {
+  // REQ-016 (spec fix-detener-y-progreso-visible): sin localStorage el panel recuerda la posicion solo hasta recargar (y se avisa una vez).
+  savePreference(BROWSER_GEOMETRY_KEY, JSON.stringify(g));
+}
+
+// Lee la geometria guardada; JSON corrupto o incompleto => null (default, sin error visible).
+function loadBrowserGeometry() {
+  try {
+    const raw = readPreference(BROWSER_GEOMETRY_KEY);
+    if (!raw) return null;
+    const g = JSON.parse(raw);
+    for (const k of ["left", "top", "width", "height"]) {
+      if (!g || typeof g[k] !== "number" || !Number.isFinite(g[k])) return null;
+    }
+    return g;
+  } catch {
+    return null;
+  }
+}
+
+function resetBrowserGeometry() {
+  const s = quickBrowserPanelEl.style;
+  s.left = s.top = s.width = s.height = s.bottom = "";
+  forgetPreference(BROWSER_GEOMETRY_KEY);
+}
+
+// Al abrir: aplica la geometria guardada (ajustada a la ventana de hoy). Los
+// estados maximizado/minimizado NO se guardan: siempre abre normal.
+function restoreBrowserGeometry() {
+  const g = loadBrowserGeometry();
+  if (g) applyBrowserGeometry(g);
+}
+
+// Un gesto de arrastre/resize; `onMove` recibe el delta desde el inicio.
+function startBrowserGesture(e, className, onMove) {
+  e.preventDefault();
+  const startX = e.clientX;
+  const startY = e.clientY;
+  const start = currentBrowserGeometry();
+  const target = e.currentTarget;
+  target.setPointerCapture(e.pointerId);
+  quickBrowserPanelEl.classList.add(className);
+  const move = (ev) => onMove(start, ev.clientX - startX, ev.clientY - startY);
+  const end = (ev) => {
+    target.removeEventListener("pointermove", move);
+    target.removeEventListener("pointerup", end);
+    target.removeEventListener("pointercancel", end);
+    try {
+      target.releasePointerCapture(ev.pointerId);
+    } catch {
+      // noop -- la captura ya se habia liberado.
+    }
+    quickBrowserPanelEl.classList.remove(className);
+    saveBrowserGeometry(currentBrowserGeometry());
+  };
+  target.addEventListener("pointermove", move);
+  target.addEventListener("pointerup", end);
+  target.addEventListener("pointercancel", end);
+}
+
+const quickBrowserHeaderEl = quickBrowserPanelEl.querySelector(".quick-browser-header");
+quickBrowserHeaderEl.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  // Los botones del header (y la URL copiable) NO inician un arrastre.
+  if (e.target.closest(".quick-browser-cntrl-btn, .quick-browser-url")) return;
+  if (quickBrowserPanelEl.classList.contains("maximized")) return;
+  startBrowserGesture(e, "dragging", (start, dx, dy) => {
+    applyBrowserGeometry({ ...start, left: start.left + dx, top: start.top + dy });
+  });
+});
+
+quickBrowserResizeHandleEl.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  if (quickBrowserPanelEl.classList.contains("maximized") || quickBrowserPanelEl.classList.contains("minimized")) return;
+  startBrowserGesture(e, "resizing", (start, dx, dy) => {
+    applyBrowserGeometry({ ...start, width: start.width + dx, height: start.height + dy });
+  });
+});
+
+// Reajusta tambien cuando cambia el tamano de la ventana del navegador.
+window.addEventListener("resize", () => {
+  if (quickBrowserPanelEl.classList.contains("hidden")) return;
+  if (quickBrowserPanelEl.classList.contains("maximized")) return;
+  if (quickBrowserPanelEl.style.left) applyBrowserGeometry(currentBrowserGeometry());
+});
+
+quickBrowserResetBtnEl.addEventListener("click", () => resetBrowserGeometry());
+
+// -------------------------------------------------------------------------
+// REQ-006 (decision del usuario 2026-09-28): aislamiento A PEDIDO. Por
+// defecto el iframe comparte origen con Vision (los dashboards pueden hablar
+// con su origen de datos); con el toggle se recarga con sandbox SIN
+// allow-same-origin => origen opaco (sin localStorage ni API de Vision).
+// -------------------------------------------------------------------------
+const BROWSER_SANDBOX = "allow-scripts allow-forms allow-popups allow-modals";
+
+function isBrowserIsolated() {
+  return readPreference(BROWSER_ISOLATED_KEY) === "true";
+}
+
+function applyBrowserIsolation({ reload = true } = {}) {
+  const isolated = isBrowserIsolated();
+  if (isolated) quickBrowserIframeEl.setAttribute("sandbox", BROWSER_SANDBOX);
+  else quickBrowserIframeEl.removeAttribute("sandbox");
+  quickBrowserIsolateBtnEl.setAttribute("aria-pressed", String(isolated));
+  // El atributo sandbox solo rige en la PROXIMA navegacion: se recarga el iframe.
+  if (reload && !quickBrowserPanelEl.classList.contains("hidden")) {
+    quickBrowserIframeEl.src = `${API_BASE}/browser/${encodeURIComponent(state.sessionId)}/?t=${Date.now()}`;
+  }
+}
+
+quickBrowserIsolateBtnEl.addEventListener("click", () => {
+  savePreference(BROWSER_ISOLATED_KEY, String(!isBrowserIsolated())); // REQ-016: si no se guarda, rige igual hasta recargar
+  applyBrowserIsolation();
+});
+applyBrowserIsolation({ reload: false });
+
 // -- REQ-003/004/005/006/011: Modo reunion (Record) ----------------------
 // Captura continua en FRAGMENTOS CORTOS (no un solo archivo largo al
 // final) -- necesario para poder detectar el comando de activacion EN
@@ -4964,6 +7745,10 @@ const MEETING_FRAGMENT_MS = 4000; // ventana de captura por fragmento
 
 let meetingRecorder = null;
 let meetingStream = null;
+// spec audio-sistema-modo-reunion: de donde escucha ESTA reunion ("mic" = lo de siempre | "system" | "both") y el audio armado con la PC (null con "mic").
+let meetingSource = "mic";
+let meetingAudio = null;
+let meetingSharedStream = null; // el flujo de getDisplayMedia pedido en el clic, hasta que startMeetingMode lo toma
 let meetingFullTranscript = "";
 let meetingFragmentTimer = null;
 
@@ -5029,8 +7814,8 @@ async function processMeetingFragment(blob) {
     // Assistant): si Vision estaba hablando (TTS en curso) y se detecta
     // la mencion de nuevo, se corta la voz al instante en vez de esperar
     // a que termine -- "solo si vuelve a detectar mientras el habla que
-    // vuelvo a decir Vision". `isSpeaking()` (tts.js) dice si Vision esta
-    // hablando ahora, con la voz del navegador o con un motor de voz.
+    // vuelvo a decir Vision". `speechSynthesis.speaking` es el chequeo
+    // nativo del navegador para saber si hay una utterance sonando ahora.
     if (isSpeaking()) {
       cancelSpeech();
     }
@@ -5160,8 +7945,9 @@ async function analyzeManualClick() {
 // del boton "Record" ni con el modal de confirmacion de salida.
 voiceEyeContainerEl.addEventListener("click", () => analyzeManualClick());
 
-async function startMeetingMode() {
+async function startMeetingMode({ source = "mic", systemStream = null } = {}) {
   meetingModeActive = true;
+  meetingSource = source;
   meetingFullTranscript = "";
   voiceRecordBtnEl.dataset.recording = "true";
   // REQ-002 (spec asistente-contextual-voz): se muestra el widget
@@ -5170,6 +7956,12 @@ async function startMeetingMode() {
   // usuario ya lo haya arrastrado antes en esta misma sesion de pagina.
   voiceEyeWidgetEl.classList.remove("hidden");
   await initVoiceEye(voiceEyeContainerEl);
+  setMeetingSourceBadge(); // REQ-010: el ojo dice de donde escucha
+
+  if (source !== "mic") {
+    await startMeetingWithSystemAudio(source, systemStream);
+    return;
+  }
 
   let stream;
   try {
@@ -5201,6 +7993,78 @@ async function startMeetingMode() {
   recordNextMeetingFragment();
 }
 
+// spec audio-sistema-modo-reunion REQ-010: el widget del ojo muestra de donde escucha la reunion.
+function setMeetingSourceBadge() {
+  const badgeEl = document.getElementById("voice-eye-source");
+  if (badgeEl) badgeEl.textContent = meetingModeActive ? meetingSourceLabel(meetingSource) : "";
+}
+
+// spec audio-sistema-modo-reunion REQ-003/004: arranca la reunion con el audio de la PC ("system") o con el audio de la PC mezclado con el microfono ("both").
+// Solo se llega aca con una fuente distinta de "mic": el camino de siempre (solo microfono) no pasa por esta funcion.
+async function startMeetingWithSystemAudio(source, systemStream) {
+  let micStream = null;
+  if (source === "both") {
+    try {
+      micStream = await openMicStream(); // QA-007: el microfono elegido en Configuracion; sin microfono la reunion sigue con el audio de la PC
+    } catch (err) {
+      appendMessage(
+        "system-note",
+        isMicPermissionError(err)
+          ? "Modo reunión: Vision no tiene permiso para usar el micrófono; escucha solo el audio de la PC. Habilitalo desde el candado de la barra de direcciones."
+          : "Modo reunión: no se pudo acceder al micrófono; escucha solo el audio de la PC y suma tu voz apenas conectes uno.",
+        { persist: false },
+      );
+    }
+  }
+  // El usuario pudo haber salido mientras el navegador pedia el microfono: no dejar nada abierto.
+  if (!meetingModeActive) {
+    micStream?.getTracks().forEach((track) => track.stop());
+    systemStream?.getTracks().forEach((track) => track.stop());
+    return;
+  }
+  meetingAudio = await buildMeetingAudio({ source, systemStream, micStream });
+  meetingStream = meetingAudio.stream;
+  // REQ-009: si la persona toca «Dejar de compartir» del navegador, la reunion SIGUE abierta y se avisa una sola vez.
+  meetingAudio.systemTracks().forEach((track) => track.addEventListener("ended", onMeetingSystemAudioEnded, { once: true }));
+  if (meetingAudio.micStream()) watchMicTrackEnd(meetingAudio.micStream(), reacquireMeetingMic);
+  noticeMicFallbackOnce();
+  startSpeechGuard();
+  recordNextMeetingFragment();
+}
+
+// REQ-009: se corto el audio de la PC a mitad de la reunion. Con "both" sigue por el microfono; con "system" queda abierta esperando (se puede terminar con Escape).
+function onMeetingSystemAudioEnded() {
+  if (!meetingModeActive || !meetingAudio) return;
+  if (meetingSource === "both" && meetingAudio.micStream()) {
+    appendMessage("system-note", "Modo reunión: se dejó de compartir el audio de la PC. Sigue escuchando solo tu micrófono.", { persist: false });
+  } else {
+    appendMessage(
+      "system-note",
+      "Modo reunión: se dejó de compartir el audio de la PC y no hay otra fuente. La reunión sigue abierta: terminala con Escape y elegí «Guardar y salir» para el resumen.",
+      { persist: false },
+    );
+  }
+}
+
+// spec audio-sistema-modo-reunion REQ-006: con el audio de la PC, la propia voz de Vision (TTS) puede volver a entrar y, si dice «Vision», dispararse a si misma en bucle.
+// Los fragmentos que se solapan con la voz de Vision no se transcriben. Con "mic" (cancelacion de eco del microfono) no se descarta nada: comportamiento de siempre.
+let meetingVisionSpokeInFragment = false;
+let meetingSpeechGuardTimer = null;
+
+function startSpeechGuard() {
+  stopSpeechGuard();
+  if (meetingSource === "mic") return;
+  meetingSpeechGuardTimer = setInterval(() => {
+    if (isSpeaking()) meetingVisionSpokeInFragment = true;
+  }, 250);
+}
+
+function stopSpeechGuard() {
+  clearInterval(meetingSpeechGuardTimer);
+  meetingSpeechGuardTimer = null;
+  meetingVisionSpokeInFragment = false;
+}
+
 // Graba el siguiente fragmento de ~MEETING_FRAGMENT_MS del modo reunion.
 // Antes era una funcion anidada dentro de startMeetingMode; se saco a nivel
 // de modulo para que la reconexion de microfono (QA-008, reacquireMeetingMic)
@@ -5214,10 +8078,17 @@ function recordNextMeetingFragment() {
   // dos grabadores sobre el mismo stream.
   if (meetingRecorder && meetingRecorder.state === "recording" && meetingRecorder.stream === meetingStream) return;
   const chunks = [];
+  meetingVisionSpokeInFragment = meetingSource !== "mic" && isSpeaking(); // REQ-006: arranca el fragmento ya con Vision hablando?
   meetingRecorder = new MediaRecorder(meetingStream);
   meetingRecorder.ondataavailable = (e) => chunks.push(e.data);
   meetingRecorder.onstop = () => {
     const blob = new Blob(chunks, { type: "audio/webm" });
+    // REQ-006: con el audio de la PC, un fragmento que se solapo con la voz de Vision NO se transcribe (evita el bucle de que Vision se escuche a si misma).
+    if (meetingSource !== "mic" && meetingVisionSpokeInFragment) {
+      meetingVisionSpokeInFragment = false;
+      if (meetingModeActive) recordNextMeetingFragment();
+      return;
+    }
     // No se espera (await) aca -- no bloquea el arranque del siguiente
     // fragmento mientras la reunion sigue. Se guarda la promesa en
     // `meetingLastFragmentPromise` para que stopMeetingModeConfirmed
@@ -5239,6 +8110,8 @@ let meetingMicReacquiring = false;
 
 async function reacquireMeetingMic() {
   if (!meetingModeActive || meetingMicReacquiring) return;
+  // spec audio-sistema-modo-reunion: con "solo lo que escucho" no se usa el microfono: nada que reabrir. Con "ambos" el flujo mezclado NO cambia; solo se cambia el microfono de adentro.
+  if (meetingSource === "system") return;
   meetingMicReacquiring = true;
   try {
     let stream = null;
@@ -5257,6 +8130,14 @@ async function reacquireMeetingMic() {
         "Modo reunión: se desconectó el micrófono y no hay otro conectado. La reunión sigue abierta y retoma la escucha apenas conectes uno.",
         { persist: false },
       );
+      return;
+    }
+    if (meetingSource === "both" && meetingAudio) {
+      // El flujo mezclado es el MISMO: el grabador sigue sobre el, sin cortar el fragmento en curso ni perder el audio de la PC.
+      meetingAudio.swapMic(stream);
+      watchMicTrackEnd(stream, reacquireMeetingMic);
+      noticeMicFallbackOnce();
+      appendMessage("system-note", `Modo reunión: escuchando por «${micLabel(stream)}» y el audio de la PC.`, { persist: false });
       return;
     }
     const previousStream = meetingStream;
@@ -5299,6 +8180,14 @@ function teardownMeetingCapture() {
     meetingStream.getTracks().forEach((track) => track.stop());
     meetingStream = null;
   }
+  // spec audio-sistema-modo-reunion REQ-008: tambien el microfono de adentro de la mezcla, el audio de la PC y el contexto de audio.
+  if (meetingAudio) {
+    meetingAudio.stop();
+    meetingAudio = null;
+  }
+  meetingSource = "mic";
+  stopSpeechGuard();
+  setMeetingSourceBadge();
   voiceRecordBtnEl.dataset.recording = "false";
   hideMeetingExitConfirm();
   voiceEyeWidgetEl.classList.add("hidden");
@@ -5379,9 +8268,34 @@ function stopMeetingModeDiscarded() {
   meetingLastFragmentPromise = null;
 }
 
+// spec audio-sistema-modo-reunion REQ-001/013/014: elegir la fuente y recien despues el aviso de microfono silenciado de la 0.30.0 (solo si la fuente usa el microfono).
+let meetingStartPending = false; // mientras dura la ventana de fuente, otro modo de voz no puede arrancar encima (REQ-014)
+
+async function startMeetingFromClick() {
+  if (meetingStartPending) return;
+  meetingStartPending = true;
+  try {
+    const choice = await requestMeetingSource();
+    if (!choice) return; // canceló: no arranca nada
+    if (!canStartVoiceMode("meeting")) {
+      choice.systemStream?.getTracks().forEach((track) => track.stop()); // otro modo tomo el microfono mientras elegia
+      return;
+    }
+    if (choice.source === "system") {
+      startMeetingMode(choice); // REQ-013: no usa el microfono, asi que no se revisa si esta silenciado
+    } else {
+      const result = await startWithMicCheck("meeting", () => startMeetingMode(choice));
+      if (result !== "continue") choice.systemStream?.getTracks().forEach((track) => track.stop()); // cerró el aviso: no dejar el audio de la PC abierto
+    }
+  } finally {
+    meetingStartPending = false;
+  }
+}
+
 voiceRecordBtnEl.addEventListener("click", () => {
   if (!meetingModeActive) {
-    startMeetingMode();
+    // spec audio-sistema-modo-reunion REQ-001: primero se elige de donde escucha (el audio de la PC se pide AQUI, dentro del clic). Con «Solo lo que hablo» sigue el camino de siempre.
+    if (canStartVoiceMode("meeting")) startMeetingFromClick();
     return;
   }
   // Ya estaba activo -- volver a tocar Record es uno de los 2 disparadores
@@ -5448,11 +8362,36 @@ let brainStateInterval = null;
 let brainPendingText = ""; // acumulado desde el ultimo envio (auto o por mencion)
 let brainSending = false; // true mientras un turno de voz esta en curso -- evita solapar 2 envios
 let brainTranscriptionsPending = 0; // Whisper en vuelo -- tambien es estado "procesando" (amarillo)
+// spec cerebro-espacio-turnos: Espacio con el modo ESCUCHANDO cierra la frase en curso y la envia cuando su transcripcion termina; Espacio PROCESANDO deja el modo en escucha (verde) hasta el proximo envio.
+let brainSendWhenReady = false;
+let brainManualListen = false;
+// spec cerebro-hablar-con-espacio-y-audio-agrupado: modo «Mantener Espacio para hablar». `brainPttHeld` = la barra esta apretada y se esta grabando; `brainPttIgnoreKeyup` = la pulsacion que ENCENDIO el modo (su
+// soltada no envia nada); `brainPttHintIfEmpty` = al soltar sin haber dicho nada se avisa en el cartel; `brainPttBegin` = el `beginUtterance` de startBrainMode (vive en su cierre) para grabar desde el teclado.
+let brainPttHeld = false;
+let brainPttIgnoreKeyup = false;
+let brainPttHintIfEmpty = false;
+let brainPttBegin = null;
+// Incidente real 2026-10-03 (v0.23.1): con Whisper devolviendo 500 y reintentando, un fragmento tardaba ~1 minuto y, como el autoenvio
+// esperaba a que NO hubiera ninguna transcripcion en vuelo, el texto ya transcripto no se enviaba (el modo quedaba amarillo sin
+// contestar). Se guarda cuando empezo cada una para dejar de esperar a las que llevan demasiado.
+const brainTranscriptionsInFlight = new Set();
+const BRAIN_TRANSCRIPTION_WAIT_MS = 10_000;
 let brainAudioCtx = null;
 let brainAnalyser = null;
 let brainVadRafId = null;
 let brainSpeechActive = false; // true mientras el VAD detecta energia por encima del piso de silencio
+// spec fix-cerebro-escucha-y-microfono REQ-003: ultima vez que Vision hablo. Antes era local de startBrainMode y arrancaba en 0 en cada
+// encendido o reinicio: si el Cerebro arrancaba en un hueco entre dos partes de lo que Vision dice, no habia enfriamiento y grababa en el
+// primer frame (medido en un e2e: a los 26 ms, con Vision volviendo a hablar a los 200 ms). Cada fin de voz -- tambien el corte por
+// espacio o ⏹ -- lo actualiza.
+let brainLastSpeakingAt = 0;
+onSpeechEnd(() => {
+  brainLastSpeakingAt = performance.now();
+});
 let brainSilenceStartedAt = 0; // timestamp (performance.now()) de cuando empezo el silencio actual
+// spec autoenvio-cerebro-sin-voz REQ-001: ultima vez que el detector OYO voz real (performance.now()). Los N segundos del
+// autoenvio se cuentan desde aca, no desde que termino la transcripcion de la frase anterior.
+let brainLastVoiceAt = 0;
 
 // REQ-007 (revisado, pedido explicito del usuario 2026-09-10: "no debe
 // apagarse si esta hablando el... solo termina si presiono escape tal
@@ -5477,6 +8416,18 @@ let brainSilenceStartedAt = 0; // timestamp (performance.now()) de cuando empezo
 // microfonos corporativos con ganancia baja podia no detectar ninguna voz
 // y, por lo tanto, nunca cerrar/enviar una intervencion.
 const BRAIN_SILENCE_THRESHOLD = 0.012;
+// spec cerebro-hablar-con-espacio-y-audio-agrupado REQ-009: el umbral deja de ser unico. 4 niveles con palabras; «normal» ES el de siempre (0,012), asi que quien no toque nada no nota ningun cambio.
+const BRAIN_SENSITIVITY_KEY = "vision.brain.sensitivity";
+const BRAIN_SENSITIVITY_LEVELS = { very_noisy: 0.05, noisy: 0.028, normal: BRAIN_SILENCE_THRESHOLD, quiet: 0.007 };
+const BRAIN_SENSITIVITY_DEFAULT = "normal";
+function getBrainSensitivity() {
+  const raw = readPreference(BRAIN_SENSITIVITY_KEY);
+  // Un valor desconocido o corrupto (otro build, edicion a mano) vale «normal»: nunca un umbral absurdo que deje al modo sordo o loco.
+  return Object.prototype.hasOwnProperty.call(BRAIN_SENSITIVITY_LEVELS, raw) ? raw : BRAIN_SENSITIVITY_DEFAULT;
+}
+function brainSilenceThreshold() {
+  return BRAIN_SENSITIVITY_LEVELS[getBrainSensitivity()]; // se lee en cada cuadro del detector: el cambio se aplica EN VIVO, sin reiniciar el modo
+}
 const BRAIN_SILENCE_CONFIRM_MS = 600;
 // Limite duro por si el VAD nunca detecta silencio (ej. ruido de fondo
 // constante) -- evita un blob de audio creciendo sin fin.
@@ -5491,7 +8442,80 @@ const BRAIN_MAX_UTTERANCE_MS = 15000;
 // los acentos del navbar en el tema oscuro.
 function setBrainState(state) {
   brainBtnEl.dataset.state = state;
+  renderBrainBanner(state);
 }
+
+// spec cerebro-cartel-estado: el cartel dice COMO APAGAR el modo (SOLO con Esc: tocar el icono con el modo activo NO lo apaga, decision del usuario) y en que estado esta. Se pinta desde el MISMO `state` que el boton (una sola fuente de verdad:
+// Escape o un error de microfono terminan en `stopBrainMode()` -> `setBrainState("idle")` y lo ocultan sin codigo aparte). Dos colores, como se pidio: verde = escucha,
+// ambar = procesa. El hueco en que el BOTON es rojo (activo y en silencio, o Vision hablando) sigue siendo «escuchando» para el cartel: rojo asustaria y ocultarlo dejaria sin aviso justo cuando
+// mas hace falta saber como apagarlo. Texto fijo (nada del servidor), con `<kbd>` armado por DOM, nunca innerHTML.
+const brainBannerEl = document.getElementById("brain-banner");
+const brainBannerTextEl = document.getElementById("brain-banner-text");
+function renderBrainBanner(state) {
+  if (!brainBannerEl) return; // compatibilidad con un index.html viejo en cache: sin cartel, el modo sigue andando
+  if (state === "idle") {
+    brainBannerEl.classList.add("hidden");
+    brainBannerEl.dataset.state = "idle";
+    return;
+  }
+  // Para el cartel «hablando» (Vision responde por voz) manda `isSpeaking()` y NO el color del boton (que ahi es rojo): es lo mismo que mira Espacio para decidir si interrumpe.
+  // spec cerebro-hablar-con-espacio-y-audio-agrupado REQ-008: en modo «Mantener Espacio» el estado sale del TECLADO (apretada = escuchando) y entre pulsaciones es «paused» (gris, sordo). Prioridad: hablando > apretada > procesando > pausa.
+  const push = isBrainPushMode();
+  const shown = isSpeaking() ? "speaking"
+    : push ? (brainPttHeld ? "listening" : state === "processing" ? "processing" : "paused")
+    : state === "processing" ? "processing" : "listening";
+  brainBannerEl.classList.remove("hidden");
+  const hint = performance.now() < brainBannerHintUntil ? BRAIN_BANNER_HINT : "";
+  const mode = push ? "push" : "auto";
+  if (brainBannerEl.dataset.state === shown && brainBannerTextEl.dataset.hint === hint && brainBannerTextEl.dataset.mode === mode && brainBannerTextEl.childNodes.length) return; // sin repintar cada 250 ms: un lector de pantalla no se re-anuncia
+  brainBannerEl.dataset.state = shown;
+  brainBannerTextEl.dataset.hint = hint;
+  brainBannerTextEl.dataset.mode = mode;
+  if (push) {
+    const [pushLead, verb, action] = BRAIN_BANNER_PUSH[shown];
+    brainBannerTextEl.replaceChildren(
+      document.createTextNode(`${hint || pushLead} ${verb} `),
+      (() => { const key = document.createElement("kbd"); key.textContent = "Espacio"; return key; })(),
+      document.createTextNode(`${action} · `),
+      (() => { const key = document.createElement("kbd"); key.textContent = "Esc"; return key; })(),
+      document.createTextNode(" para apagarlo."),
+    );
+    return;
+  }
+  const kbd = (label) => {
+    const key = document.createElement("kbd");
+    key.textContent = label;
+    return key;
+  };
+  const lead = hint || BRAIN_BANNER_LEAD[shown];
+  brainBannerTextEl.replaceChildren(
+    document.createTextNode(`${lead} `),
+    kbd("Espacio"),
+    document.createTextNode(`${BRAIN_BANNER_SPACE[shown]} · `),
+    kbd("Esc"),
+    document.createTextNode(" para apagarlo."),
+  );
+}
+// Que hace cada tecla en cada estado (spec cerebro-espacio-turnos). Texto fijo del front.
+const BRAIN_BANNER_LEAD = {
+  listening: "Modo Cerebro: te estoy escuchando.",
+  processing: "Modo Cerebro: procesando…",
+  speaking: "Modo Cerebro: Vision está respondiendo.",
+};
+const BRAIN_BANNER_SPACE = {
+  listening: " para enviar lo que dijiste",
+  processing: " para seguir hablando",
+  speaking: " para interrumpir y hablar",
+};
+const BRAIN_BANNER_HINT = "Todavía no dijiste nada.";
+// Modo «Mantener Espacio para hablar»: [frase, verbo antes de la tecla, lo que hace la tecla]. Cuatro estados; «paused» (gris) = sordo entre pulsaciones.
+const BRAIN_BANNER_PUSH = {
+  paused: ["Modo Cerebro: en pausa, no te escucho.", "Mantené", " para hablar"],
+  listening: ["Modo Cerebro: te estoy escuchando.", "Soltá", " para enviar lo que dijiste"],
+  processing: ["Modo Cerebro: procesando…", "Mantené", " para seguir hablando"],
+  speaking: ["Modo Cerebro: Vision está respondiendo.", "Mantené", " para interrumpir y hablar"],
+};
+let brainBannerHintUntil = 0; // aviso breve (2 s) cuando se presiona Espacio sin haber dicho nada: no envia un mensaje vacio
 
 // REQ-013: refleja en vivo, cada 250ms, en que estado visual cae el modo
 // -- prioridad: procesando (esperando Whisper/LLM) > escuchando activo
@@ -5499,7 +8523,19 @@ function setBrainState(state) {
 // TTS hablando la respuesta).
 function tickBrainState() {
   if (!brainModeActive) return;
-  if (brainSending || brainTranscriptionsPending > 0) {
+  trackBrainSilence(); // spec fix-cerebro-escucha-y-microfono: cuanto lleva el microfono entregando ceros exactos
+  // spec fix-cerebro-escucha-y-microfono REQ-006: tambien con un turno escrito a mano o de un agente (state.sending), no solo los del Cerebro.
+  if (isBrainPushMode()) {
+    // spec cerebro-hablar-con-espacio-y-audio-agrupado: el estado sale del teclado, no del detector. Apretada = escuchando (verde); soltada y enviada = procesando (ambar); el resto = en pausa (el boton se ve rojo, como «activo y callado»).
+    if (brainPttHeld) setBrainState("listening");
+    else if (brainSending || state.sending > 0 || brainTranscriptionsPending > 0) setBrainState("processing");
+    else setBrainState("idle-active");
+    return;
+  }
+  if (brainManualListen && isSpeaking()) brainManualListen = false; // Vision empezo a responder: la escucha manual terminó
+  if (brainManualListen) {
+    setBrainState("listening"); // verde -- la persona presiono Espacio mientras se procesaba: el modo vuelve a escucharla (spec cerebro-espacio-turnos)
+  } else if (brainSending || state.sending > 0 || brainTranscriptionsPending > 0) {
     setBrainState("processing"); // amarillo
   } else if (brainSpeechActive) {
     setBrainState("listening"); // verde -- VAD detecto energia de voz ahora mismo
@@ -5546,6 +8582,39 @@ function scheduleBrainAutoSend(delayMs = getBrainAutosendPauseMs()) {
   }, Math.max(0, delayMs));
 }
 
+// spec autoenvio-cerebro-sin-voz REQ-003: el autoenvio solo puede disparar con el usuario en silencio. Hay voz si el detector la oye
+// ahora, si hay una frase grabandose (`brainRecorder`, incluye la confirmacion de silencio de 600 ms) o si hay una transcripcion en
+// vuelo (su texto todavia no esta en `brainPendingText`, asi que enviar ya seria enviar cortado).
+// Una transcripcion en vuelo hace esperar al envio SOLO durante BRAIN_TRANSCRIPTION_WAIT_MS: pasado ese plazo se envia lo que ya
+// esta transcripto y el fragmento que llegue tarde se agrega al mensaje siguiente (no se pierde).
+function brainHasFreshTranscription() {
+  const now = performance.now();
+  for (const startedAt of brainTranscriptionsInFlight) {
+    if (now - startedAt < BRAIN_TRANSCRIPTION_WAIT_MS) return true;
+  }
+  return false;
+}
+
+function brainUserMayStillBeTalking() {
+  return brainSpeechActive || brainRecorder !== null || brainHasFreshTranscription();
+}
+
+// REQ-001/003/004: UNICO punto que arma el autoenvio. Se llama al terminar CUALQUIER frase (con texto, vacia, descartada por
+// energia, alucinacion o error de red) y al terminar un turno de Vision; asi, si la voz cancelo la cuenta y esa segunda frase no
+// aporto texto, el texto anterior no queda varado. Cuenta N segundos desde la ULTIMA voz real (`brainLastVoiceAt`).
+function armBrainAutoSendIfIdle() {
+  if (isBrainPushMode()) return; // spec cerebro-hablar-con-espacio-y-audio-agrupado: con «Mantener Espacio» solo se envia al soltar (o al terminar el turno en curso); nunca por silencio
+  if (!brainModeActive || !isBrainAutosendEnabled() || !brainPendingText.trim()) return;
+  if (brainUserMayStillBeTalking() || brainSending) return; // se vuelve a llamar cuando cambie ese estado
+  const waitMs = getBrainAutosendPauseMs() - (performance.now() - brainLastVoiceAt);
+  clearTimeout(brainAutoSendTimer);
+  brainAutoSendTimer = setTimeout(() => {
+    // Se vuelve a mirar al vencer: puede haber empezado otra frase entre que se armo la cuenta y ahora.
+    if (brainUserMayStillBeTalking()) return;
+    sendBrainIntervention();
+  }, Math.max(0, waitMs));
+}
+
 // REQ-006: envia lo acumulado como un turno de chat REAL -- reusa
 // sendMessage() tal cual (mismas tools, mismo streaming, misma
 // persistencia y TTS de la respuesta) con `voiceConfirm:true` para que el
@@ -5561,6 +8630,7 @@ async function sendBrainIntervention() {
   brainPendingText = "";
   clearTimeout(brainAutoSendTimer);
   if (!text) return;
+  brainManualListen = false; // spec cerebro-espacio-turnos: al salir un mensaje, el modo pasa a «procesando»
   brainSending = true;
   try {
     await sendMessage(text, { voiceConfirm: true });
@@ -5569,7 +8639,11 @@ async function sendBrainIntervention() {
     // Barge-in/turno hablado mientras el anterior estaba en curso: queda
     // acumulado arriba y se despacha ahora, sin perderlo ni solapar dos
     // streams de la misma conversacion.
-    if (brainModeActive && brainPendingText.trim()) scheduleBrainAutoSend(0);
+    if (brainModeActive && brainPendingText.trim()) {
+      // Con autoenvio, respeta la voz (REQ-004). Apagado: texto en cola de un turno anterior, como siempre.
+      if (isBrainAutosendEnabled() && !isBrainPushMode()) armBrainAutoSendIfIdle(); // en modo «Mantener Espacio» ya soltaste: sale ahora
+      else scheduleBrainAutoSend(0);
+    }
   }
 }
 
@@ -5577,8 +8651,65 @@ async function sendBrainIntervention() {
 // llego al limite duro de duracion) -- YA con el audio de esa "frase"
 // completo, arranca la transcripcion de inmediato (sin esperar ningun
 // timer adicional de fragmento fijo, a diferencia de Record).
-async function processBrainUtterance(blob, speechEndedAt) {
+async function processBrainUtterance(blob) {
+  // REQ-004: sea cual sea el final de la frase (texto, vacio, descartada, error), se re-evalua el autoenvio.
+  try {
+    await transcribeBrainUtterance(blob);
+  } finally {
+    armBrainAutoSendIfIdle();
+    flushBrainSendRequest(); // spec cerebro-espacio-turnos: la persona pidio enviar con Espacio mientras esta frase se transcribia
+  }
+}
+
+// spec cerebro-espacio-turnos: Espacio con el modo escuchando. Cierra la frase en curso (el texto recien existe cuando Whisper termina) y envia TODO lo acumulado como UN mensaje cuando no queda ninguna
+// transcripcion en vuelo. Sin nada dicho no envia (nunca un mensaje vacio) y avisa en el cartel. Pasado el plazo de siempre (`BRAIN_TRANSCRIPTION_WAIT_MS`) se envia lo ya transcripto y lo tardio va al siguiente.
+function flushBrainSendRequest() {
+  if (!brainSendWhenReady || !brainModeActive) return;
+  if (brainRecorder !== null || brainTranscriptionsPending > 0) return; // todavia hay una frase grabandose o transcribiendose
+  brainSendWhenReady = false;
+  if (brainPttHintIfEmpty) {
+    // spec cerebro-hablar-con-espacio-y-audio-agrupado: soltar sin haber dicho nada no envia nada y lo avisa (2 s), igual que Espacio sin nada dicho.
+    brainPttHintIfEmpty = false;
+    if (!brainPendingText.trim()) {
+      brainBannerHintUntil = performance.now() + 2000;
+      renderBrainBanner(brainBtnEl.dataset.state);
+      setTimeout(() => renderBrainBanner(brainBtnEl.dataset.state), 2100);
+    }
+  }
+  sendBrainIntervention();
+}
+
+function requestBrainSend() {
+  brainManualListen = false;
+  if (brainRecorder && brainRecorder.state !== "inactive") {
+    brainSendWhenReady = true;
+    brainRecorder.stop(); // misma accion que endUtterance(); su onstop transcribe y, al terminar, flushBrainSendRequest() envia
+  } else if (brainTranscriptionsPending > 0) {
+    brainSendWhenReady = true;
+  } else if (brainPendingText.trim()) {
+    clearTimeout(brainAutoSendTimer);
+    sendBrainIntervention();
+    return;
+  } else {
+    brainBannerHintUntil = performance.now() + 2000; // nada dicho: no se envia, se avisa (2 s)
+    renderBrainBanner(brainBtnEl.dataset.state);
+    setTimeout(() => renderBrainBanner(brainBtnEl.dataset.state), 2100);
+    return;
+  }
+  // Si Whisper se cuelga, no se queda esperando para siempre: pasado el plazo se envia lo que ya esta transcripto.
+  setTimeout(() => {
+    if (!brainSendWhenReady) return;
+    brainSendWhenReady = false;
+    sendBrainIntervention();
+  }, BRAIN_TRANSCRIPTION_WAIT_MS + 100);
+}
+
+async function transcribeBrainUtterance(blob) {
   brainTranscriptionsPending += 1;
+  const startedAt = performance.now();
+  brainTranscriptionsInFlight.add(startedAt);
+  // Si esta transcripcion se cuelga, nada mas volveria a evaluar el envio: se agenda al cumplirse el plazo.
+  setTimeout(armBrainAutoSendIfIdle, BRAIN_TRANSCRIPTION_WAIT_MS + 50);
   let fragmentText = "";
   try {
     if (!(await hasRealVoiceEnergy(blob))) return;
@@ -5604,6 +8735,7 @@ async function processBrainUtterance(blob, speechEndedAt) {
     return; // fragmento perdido por error de red -- el modo sigue escuchando, no es fatal
   } finally {
     brainTranscriptionsPending = Math.max(0, brainTranscriptionsPending - 1);
+    brainTranscriptionsInFlight.delete(startedAt);
   }
   if (!fragmentText || isWhisperHallucination(fragmentText) || !brainModeActive) return;
 
@@ -5619,13 +8751,8 @@ async function processBrainUtterance(blob, speechEndedAt) {
   brainPendingText = brainPendingText ? `${brainPendingText} ${fragmentText}` : fragmentText;
 
   if (isBrainAutosendEnabled()) {
-    // El tiempo configurado se cuenta desde que el usuario DEJO de
-    // hablar, no desde que Whisper termino. Asi la transcripcion ocurre
-    // durante la pausa de auto-envio: si tarda menos que la pausa, espera
-    // solo el remanente; si tarda mas, envia inmediatamente al quedar el
-    // texto disponible.
-    const elapsedSinceSpeech = performance.now() - speechEndedAt;
-    scheduleBrainAutoSend(getBrainAutosendPauseMs() - elapsedSinceSpeech);
+    // El envio lo decide `armBrainAutoSendIfIdle` (la llama processBrainUtterance al terminar): cuenta N segundos desde la ultima
+    // voz y no dispara mientras el usuario siga hablando. Antes se armaba aca con el reloj del fin de la frase anterior.
     return;
   }
 
@@ -5661,7 +8788,13 @@ async function startBrainMode({ notifyMicError = true } = {}) {
     // Meet/Zoom/etc. `noiseSuppression` ayuda ademas a que el VAD no
     // dispare con ruido de fondo constante (aire acondicionado, etc.).
     // QA-007: con el microfono elegido en Configuracion (ver openMicStream).
-    const stream = await openMicStream({ echoCancellation: true, noiseSuppression: true, autoGainControl: true });
+    brainMicOpening += 1; // spec fix-cerebro-escucha-y-microfono: la verificacion de salud no reabre encima de un pedido en vuelo
+    let stream;
+    try {
+      stream = await openMicStream({ echoCancellation: true, noiseSuppression: true, autoGainControl: true });
+    } finally {
+      brainMicOpening -= 1;
+    }
     // Escape pudo apagar el modo mientras el navegador pedia el microfono:
     // no dejarlo abierto (y escuchando) sin ningun modo que lo use.
     if (!brainModeActive) {
@@ -5669,7 +8802,11 @@ async function startBrainMode({ notifyMicError = true } = {}) {
       return;
     }
     brainStream = stream;
+    brainMicLastError = null;
+    brainMicMissingNoticeShown = false;
+    brainZeroSince = 0;
   } catch (err) {
+    brainMicLastError = err;
     // Sin microfono real -- el modo queda "activo" visualmente (el icono
     // ya cambio de estado) pero sin audio real no hay nada que transcribir.
     // QA-008: ya no en silencio -- se avisa, y `refreshActiveMicStreams`
@@ -5687,6 +8824,11 @@ async function startBrainMode({ notifyMicError = true } = {}) {
   }
   noticeMicFallbackOnce();
   watchMicTrackEnd(brainStream, restartBrainModeForMic);
+  // spec fix-cerebro-escucha-y-microfono REQ-004: al terminar un silencio de la pista (palanca del auricular, tecla de microfono) se
+  // verifica enseguida si la captura revivio; si sigue entregando ceros exactos, se reabre.
+  brainStream.getAudioTracks().forEach((track) => {
+    track.addEventListener("unmute", () => setTimeout(() => brainMicHealthCheck({ force: true }), 1500));
+  });
 
   // VAD por energia RMS (Web Audio API), mismo criterio que el medidor de
   // nivel de Configuracion > Audio (ver startMicMeter) -- analiza el
@@ -5712,7 +8854,7 @@ async function startBrainMode({ notifyMicError = true } = {}) {
   // nueva. Se agrega un cooldown despues de que `speaking` deja de estar
   // activo antes de volver a escuchar.
   const BRAIN_TTS_COOLDOWN_MS = 900;
-  let brainLastSpeakingAt = 0;
+  // brainLastSpeakingAt vive a nivel de modulo (spec fix-cerebro-escucha-y-microfono REQ-003).
 
   function beginUtterance() {
     if (!brainStream) return;
@@ -5727,7 +8869,7 @@ async function startBrainMode({ notifyMicError = true } = {}) {
       if (!brainModeActive) return;
       // No se espera (await) aca -- no bloquea seguir escuchando mientras
       // esta "frase" recien capturada se transcribe en paralelo.
-      processBrainUtterance(blob, performance.now());
+      processBrainUtterance(blob);
     };
     brainRecorder.start();
     utteranceStartedAt = performance.now();
@@ -5738,9 +8880,27 @@ async function startBrainMode({ notifyMicError = true } = {}) {
       brainRecorder.stop();
     }
   }
+  brainPttBegin = beginUtterance; // spec cerebro-hablar-con-espacio-y-audio-agrupado: el teclado graba con la MISMA funcion que el detector
 
   function vadTick() {
     if (!brainModeActive || !brainAnalyser) return;
+    // spec cerebro-hablar-con-espacio-y-audio-agrupado REQ-002: con «Mantener Espacio» el detector queda FUERA: no arranca ni corta frases (lo hace el teclado), asi que el ruido ambiente no importa. Solo dibuja las ondas mientras se habla.
+    if (isBrainPushMode()) {
+      brainSpeechActive = false;
+      let pushLevel = 0;
+      if (brainPttHeld) {
+        brainAnalyser.getByteTimeDomainData(vadData);
+        let pushSum = 0;
+        for (let i = 0; i < vadData.length; i++) {
+          const sample = (vadData[i] - 128) / 128;
+          pushSum += sample * sample;
+        }
+        pushLevel = Math.sqrt(pushSum / vadData.length);
+      }
+      updateBrainWaveform(pushLevel);
+      brainVadRafId = requestAnimationFrame(vadTick);
+      return;
+    }
     // BUG real reportado por el usuario (2026-09-14): "se auto escucha
     // cuando responde". El `echoCancellation` de getUserMedia (mas arriba)
     // resuelve el eco de audio/video de la propia pestaña, pero NO cancela
@@ -5753,11 +8913,15 @@ async function startBrainMode({ notifyMicError = true } = {}) {
     // desde la ULTIMA vez que se la vio hablando (no apenas `speaking`
     // vuelve a false), para darle tiempo al audio real de dejar de sonar/
     // reverberar en el ambiente.
-    // spec voz-fish-audio REQ-010: con un motor de voz del backend el audio
-    // sale por Web Audio de esta pestaña; se pausa igual que con el navegador.
+    // spec voz-fish-audio REQ-010: con un motor de voz del backend el audio sale por
+    // Web Audio de esta pestaña; se pausa el microfono igual que con la voz del navegador.
     const nowSpeaking = isSpeaking();
     if (nowSpeaking) brainLastSpeakingAt = performance.now();
     if (nowSpeaking || performance.now() - brainLastSpeakingAt < BRAIN_TTS_COOLDOWN_MS) {
+      // spec fix-cerebro-escucha-y-microfono REQ-002: una frase que el usuario venia diciendo se CIERRA apenas Vision empieza a hablar
+      // (se manda lo suyo, como antes -- decision D1: lo dicho mientras procesa se guarda) en vez de seguir grabando la voz de Vision,
+      // que la cancelacion de eco no resta.
+      if (nowSpeaking && brainRecorder) endUtterance();
       updateBrainWaveform(0);
       brainVadRafId = requestAnimationFrame(vadTick);
       return;
@@ -5770,10 +8934,13 @@ async function startBrainMode({ notifyMicError = true } = {}) {
     }
     const rms = Math.sqrt(sumSquares / vadData.length);
     const now = performance.now();
-    const hasVoice = rms >= BRAIN_SILENCE_THRESHOLD;
+    const hasVoice = rms >= brainSilenceThreshold(); // REQ-009: el umbral sale de la sensibilidad elegida (de fabrica, 0,012 como siempre)
 
     if (hasVoice) {
       brainSpeechActive = true;
+      // spec autoenvio-cerebro-sin-voz REQ-001/002 (D1 aprobada): la voz que vuelve cancela la cuenta del autoenvio.
+      brainLastVoiceAt = now;
+      clearTimeout(brainAutoSendTimer);
       brainSilenceStartedAt = 0;
       if (!brainRecorder) beginUtterance(); // arranca a grabar apenas detecta la primera energia real
       // Limite duro: si el usuario habla sin pausas por mas de
@@ -5827,7 +8994,13 @@ function stopBrainMode() {
   }
   brainPendingText = "";
   brainSending = false;
+  brainSendWhenReady = false;
+  brainManualListen = false;
+  brainPttHeld = false; // spec cerebro-hablar-con-espacio-y-audio-agrupado: Esc con la barra apretada apaga todo y su keyup ya no hace nada
+  brainPttHintIfEmpty = false;
+  brainPttBegin = null;
   brainTranscriptionsPending = 0;
+  brainTranscriptionsInFlight.clear();
   setBrainState("idle");
   updateBrainWaveform(0); // oculta las ondas -- ya no hay audio que graficar
 }
@@ -5841,14 +9014,18 @@ function stopBrainMode() {
 // y avisado; el proximo `devicechange` lo reintenta.
 let brainMicRestarting = false;
 
-async function restartBrainModeForMic() {
+async function restartBrainModeForMic({ quiet = false } = {}) {
   if (!brainModeActive || brainMicRestarting) return;
   brainMicRestarting = true;
+  const wasMissing = brainMicMissingNoticeShown; // venia sin microfono: al volver se avisa aunque el reintento sea silencioso
   try {
     stopBrainMode();
     await startBrainMode({ notifyMicError: false });
     if (!brainModeActive) return; // Escape durante el reinicio
     if (!brainStream) {
+      // spec fix-cerebro-escucha-y-microfono REQ-007: los reintentos no llenan el chat de avisos (una nota por episodio).
+      if (brainMicMissingNoticeShown) return;
+      brainMicMissingNoticeShown = true;
       appendMessage(
         "system-note",
         "Modo Cerebro: se desconectó el micrófono y no hay otro conectado. Sigue encendido y vuelve a escuchar apenas conectes uno.",
@@ -5856,11 +9033,69 @@ async function restartBrainModeForMic() {
       );
       return;
     }
-    appendMessage("system-note", `Modo Cerebro: escuchando por «${micLabel(brainStream)}».`, { persist: false });
+    if (!quiet || wasMissing) {
+      appendMessage("system-note", `Modo Cerebro: escuchando por «${micLabel(brainStream)}».`, { persist: false });
+    }
   } finally {
     brainMicRestarting = false;
   }
 }
+
+// spec fix-cerebro-escucha-y-microfono REQ-004/005/007 (reporte del usuario 2026-10-10, auricular Dell WL5024 con microfono de palanca: al
+// subirla se silencia; tras unos minutos asi, al bajarla Modo Cerebro quedaba en rojo y no volvia a escuchar, ni con espacio). El microfono
+// puede volver SIN un `devicechange` (palanca, Bluetooth que se re-engancha, driver dormido) y nada reintentaba. Una verificacion liviana
+// cada 3 s -- y el espacio, y el fin del silencio de la pista -- lo cura. Con un microfono SANO no hace nada (REQ-007 del atajo de espacio).
+let brainMicOpening = 0; // getUserMedia del Cerebro en vuelo (incluye el cartel de permiso): no reabrir encima
+let brainMicLastError = null; // ultimo error al abrir: con el permiso denegado no se insiste solo (no repetir el cartel del navegador)
+let brainMicMissingNoticeShown = false; // la nota «no hay otro conectado» sale una vez por episodio
+let brainZeroSince = 0; // desde cuando el microfono entrega CEROS exactos (captura muerta o silenciada por el auricular); 0 = entrega audio
+let brainLastQuietRestartAt = 0;
+let _brainHealthBuf = null;
+const BRAIN_MIC_HEALTH_MS = 3000;
+// Un microfono de verdad siempre tiene piso de ruido, aunque la sala este en silencio: CEROS exactos sostenidos = la captura no entrega nada.
+const BRAIN_DEAD_SILENCE_MS = 8000;
+// Con el espacio o al bajar la palanca alcanza menos, pero nunca un instante: recien abierto, el analizador entrega ceros unos milisegundos.
+const BRAIN_FORCE_SILENCE_MS = 1500;
+const BRAIN_QUIET_RESTART_MIN_MS = 15000; // con la palanca arriba un rato largo: un reintento silencioso cada 15 s como mucho
+
+function brainMicIsDead() {
+  return !hasLiveAudioTrack(brainStream) || !brainAudioCtx || brainAudioCtx.state === "closed";
+}
+
+// true si el analizador entrega exactamente cero AHORA (lectura en punto flotante: el ruido de una sala silenciosa no es cero exacto).
+function brainMicIsDigitallySilent() {
+  if (!brainAnalyser) return false;
+  if (!_brainHealthBuf || _brainHealthBuf.length !== brainAnalyser.fftSize) _brainHealthBuf = new Float32Array(brainAnalyser.fftSize);
+  brainAnalyser.getFloatTimeDomainData(_brainHealthBuf);
+  return _brainHealthBuf.every((v) => v === 0);
+}
+
+// Se mide cada 250 ms (tickBrainState): desde cuando el microfono entrega CEROS exactos sin interrupcion.
+function trackBrainSilence() {
+  if (!brainAnalyser) return;
+  if (!brainMicIsDigitallySilent()) brainZeroSince = 0;
+  else if (!brainZeroSince) brainZeroSince = performance.now();
+}
+
+// `force`: lo pide el usuario (espacio) o el fin de un silencio de la pista -- reabre si el microfono esta muerto o lleva un rato en ceros.
+function brainMicHealthCheck({ force = false } = {}) {
+  if (!brainModeActive || brainMicRestarting || brainMicOpening > 0) return;
+  if (brainMicIsDead()) {
+    if (!force && isMicPermissionError(brainMicLastError)) return;
+    restartBrainModeForMic({ quiet: true });
+    return;
+  }
+  if (brainAudioCtx.state === "suspended") brainAudioCtx.resume().catch(() => {}); // reanudar no toca el hardware
+  const now = performance.now();
+  const zerosFor = brainZeroSince ? now - brainZeroSince : 0;
+  const idle = !brainSending && !brainPendingText && brainTranscriptionsPending === 0 && !brainRecorder; // nada que perder al reabrir
+  const longDeadSilence = zerosFor >= BRAIN_DEAD_SILENCE_MS && now - brainLastQuietRestartAt >= BRAIN_QUIET_RESTART_MIN_MS;
+  if ((force && zerosFor >= BRAIN_FORCE_SILENCE_MS) || (idle && longDeadSilence)) {
+    brainLastQuietRestartAt = now;
+    restartBrainModeForMic({ quiet: true });
+  }
+}
+setInterval(() => brainMicHealthCheck(), BRAIN_MIC_HEALTH_MS);
 
 // REQ-004: click activa/desactiva -- sin modal de confirmacion (a
 // diferencia de Record, el modo Cerebro no genera un resumen aparte al
@@ -5871,7 +9106,8 @@ brainBtnEl.addEventListener("click", () => {
   // apaga (mismo patron de una conversacion continua en Copilot/ChatGPT/
   // Claude/Gemini). Un click accidental sobre el icono activo no corta el
   // microfono ni pierde una intervencion que se estaba transcribiendo.
-  if (!brainModeActive) startBrainMode();
+  // spec control-microfono-windows REQ-005: aviso antes de empezar si el microfono esta silenciado en Windows (solo el clic manual, no la reconexion del plug and play).
+  if (!brainModeActive && canStartVoiceMode("brain")) startWithMicCheck("brain", () => startBrainMode()); // fix-conflicto-modos-voz-simultaneos REQ-002/003
 });
 
 // REQ-004/007: Escape es el otro disparador de salida, equivalente a
@@ -5905,16 +9141,97 @@ document.addEventListener("keydown", (e) => {
 // Sin importar el foco del teclado (decision explicita del usuario: en
 // Modo Cerebro normalmente no se esta escribiendo a mano, se habla por el
 // microfono) -- a diferencia de Escape (arriba), que si aplica siempre.
+// spec cerebro-espacio-turnos (pedido del usuario 2026-10-19): ademas de lo de arriba, Espacio es el boton de turnos del Cerebro:
+//   apagado -> ENCIENDE | escuchando -> ENVIA lo dicho | procesando -> vuelve a ESCUCHAR | Vision hablando -> INTERRUMPE (sin cambios) | Esc apaga siempre.
+// Con el modo APAGADO Espacio NO puede robarse la barra mientras se escribe: no enciende con el foco en un campo de texto, con una ventana modal abierta, con Ctrl/Alt/Meta/Shift ni repetido.
+function spaceMayTurnTheBrainOn(e) {
+  if (e.repeat || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return false;
+  const el = document.activeElement;
+  if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return false;
+  if (document.querySelector(".dashboard-overlay:not(.hidden)")) return false; // cualquier ventana modal abierta
+  return true;
+}
+
+// spec cerebro-hablar-con-espacio-y-audio-agrupado: «Mantener Espacio para hablar». keydown (la primera, no la repeticion) = graba YA; keyup = cierra y envia. Entre pulsaciones esta sordo (el detector de voz esta fuera, ver vadTick).
+function pushKeydown(e) {
+  if (!brainModeActive) {
+    // Apagado: enciende (mismas guardas que el modo automatico). Esa pulsacion SOLO enciende: su soltada no envia nada.
+    if (!spaceMayTurnTheBrainOn(e)) return;
+    e.preventDefault();
+    brainPttIgnoreKeyup = true;
+    if (canStartVoiceMode("brain")) startWithMicCheck("brain", () => startBrainMode());
+    return;
+  }
+  e.preventDefault(); // evita el scroll de pagina / activar un boton enfocado con espacio
+  if (e.repeat || brainPttHeld) return; // mantener apretada no reinicia ni reenvia
+  brainPttIgnoreKeyup = false;
+  if (isSpeaking()) cancelSpeech(); // interrumpe a Vision, pero NO descarta lo pendiente (aca cada soltada ya envia)
+  brainPttHeld = true;
+  brainManualListen = false;
+  if (!brainRecorder && brainPttBegin) brainPttBegin(); // graba con la misma funcion que usa el detector
+}
+
+function pushRelease() {
+  if (!brainPttHeld) return;
+  brainPttHeld = false;
+  // Hay algo que cerrar/enviar (frase grabandose, transcripcion en curso o texto en cola): el aviso «nada dicho» lo da flushBrainSendRequest al terminar. Sin nada, lo da requestBrainSend de inmediato.
+  brainPttHintIfEmpty = Boolean((brainRecorder && brainRecorder.state !== "inactive") || brainTranscriptionsPending > 0 || brainPendingText.trim());
+  requestBrainSend();
+}
+
+document.addEventListener("keyup", (e) => {
+  if (e.code !== "Space" && e.key !== " ") return;
+  if (!isBrainPushMode()) return;
+  if (brainPttIgnoreKeyup) {
+    brainPttIgnoreKeyup = false; // la soltada de la pulsacion que encendio el modo
+    return;
+  }
+  if (brainModeActive) pushRelease();
+});
+// Alt+Tab o pestaña oculta con la barra apretada: el navegador NUNCA manda el keyup. Se trata como soltar para no dejar el microfono grabando para siempre.
+window.addEventListener("blur", () => { if (brainModeActive && brainPttHeld) pushRelease(); });
+document.addEventListener("visibilitychange", () => { if (document.hidden && brainModeActive && brainPttHeld) pushRelease(); });
+
 document.addEventListener("keydown", (e) => {
   if (e.code !== "Space" && e.key !== " ") return;
-  if (!brainModeActive || !isBrainSpaceInterruptEnabled()) return;
+  if (isBrainPushMode()) { // REQ-007: la persona eligio hablar con Espacio, asi que NO depende del interruptor de «interrumpir»
+    pushKeydown(e);
+    return;
+  }
+  if (!isBrainSpaceInterruptEnabled()) return;
+  if (!brainModeActive) {
+    // Apagado: enciende por el MISMO camino que el boton (un solo modo de voz a la vez + aviso de microfono silenciado).
+    if (!spaceMayTurnTheBrainOn(e)) return;
+    e.preventDefault();
+    if (canStartVoiceMode("brain")) startWithMicCheck("brain", () => startBrainMode());
+    return;
+  }
   e.preventDefault(); // evita el scroll de pagina / activar un boton enfocado con espacio
   if (isSpeaking()) { // spec voz-fish-audio REQ-010: tambien corta el audio de los motores de voz
     cancelSpeech();
+    // REQ-008: reset liviano de la ronda en curso -- NO toca brainStream/VAD. (Vision hablando: IGUAL QUE ANTES, sin cambios.)
+    clearTimeout(brainAutoSendTimer);
+    brainPendingText = "";
+    // spec fix-cerebro-escucha-y-microfono REQ-005 (enmienda de REQ-007, aprobada 2026-10-10): con el Cerebro SORDO -- sin pista viva, o
+    // entregando ceros exactos (palanca del auricular, driver dormido) -- el espacio reabre el microfono; con uno sano sigue sin tocar nada.
+    brainMicHealthCheck({ force: true });
+    return;
   }
-  // REQ-008: reset liviano de la ronda en curso -- NO toca brainStream/VAD.
-  clearTimeout(brainAutoSendTimer);
-  brainPendingText = "";
+  if (e.repeat) return; // mantener la barra apretada no repite las acciones NUEVAS (enviar / volver a escuchar); el camino de arriba queda como siempre
+  // spec fix-cerebro-escucha-y-microfono REQ-005: Espacio revisa la salud del microfono y reabre uno sordo, pero SOLO cuando no hay nada que perder: reabrirlo
+  // descarta lo dicho y todavia no enviado. Con texto pendiente, una frase grabandose o una transcripcion en curso se envia primero (el microfono sordo se cura solo
+  // en la verificacion de cada 3 s). Si lo reabrio, el modo se esta re-armando y no hay frase que cerrar ni enviar.
+  if (!brainPendingText.trim() && !brainRecorder && brainTranscriptionsPending === 0 && !brainSending) {
+    brainMicHealthCheck({ force: true });
+    if (brainMicRestarting) return;
+  }
+  const processing = brainSending || state.sending > 0 || brainTranscriptionsPending > 0;
+  if (processing && !brainManualListen && !brainRecorder && !brainSpeechActive) {
+    // Procesando: el modo vuelve a escuchar (el microfono nunca se cerro) y lo que se diga sale como mensaje nuevo al terminar el turno; el turno en curso NO se cancela.
+    brainManualListen = true;
+    return;
+  }
+  requestBrainSend(); // escuchando: cierra la frase y envia lo dicho
 });
 
 // -------------------------------------------------------------------------
@@ -5943,9 +9260,26 @@ document.addEventListener("fullscreenchange", () => {
 // Skills / Comandos / Credenciales. ("Proyecto local" se elimino -- ahora
 // es siempre por sesion, ver modal de nueva sesion / edicion de sesion.)
 // =========================================================================
+// spec gestor-conexiones (pedido del usuario 2026-10-09: «ya con esto podemos borrar la solapa Credenciales porque no cumpliria
+// ninguna funcion»): con la configuracion ya en Vision, el servidor no lee ni guarda el .env.enc y esa pestaña no sirve: se oculta.
+// Antes de importar sigue, porque ahi es donde se cargan las claves de voz y de BigQuery sin editar el .env.
+async function syncCredentialsTab() {
+  const tabEl = document.querySelector('.settings-tab[data-tab="credentials"]');
+  if (!tabEl) return;
+  let active;
+  try {
+    active = Boolean((await (await apiFetchOk(`${API_BASE}/api/vault/status`)).json()).active);
+  } catch {
+    return; // sin respuesta se deja como esta
+  }
+  tabEl.style.display = active ? "none" : "";
+  if (active && tabEl.classList.contains("active")) switchSettingsTab("connections");
+}
+
 function openSettings(tab) {
   settingsOverlayEl.classList.remove("hidden");
   if (tab) switchSettingsTab(tab);
+  syncCredentialsTab();
   loadModelSettingsPane();
   loadAppearanceSettingsPane();
   loadAudioSettingsPane();
@@ -5977,8 +9311,11 @@ function switchSettingsTab(tabName) {
   // REQ-009: "bajo demanda" -- el medidor solo captura mientras la
   // pestaña Audio esta REALMENTE visible, se corta apenas se cambia a
   // cualquier otra pestaña (Modelo, Apariencia, etc).
-  if (tabName === "audio") startMicMeter();
-  else stopMicMeter();
+  if (tabName === "audio") {
+    startMicMeter();
+    refreshAudioPanel(); // spec control-microfono-windows REQ-001: estado de los micrófonos de Windows (solo lectura al abrir)
+    refreshMeetingSourceSettings(); // spec audio-sistema-modo-reunion REQ-011: lo guardado (la ventana de arranque tambien lo cambia)
+  } else stopMicMeter();
   // spec agentes-programados: al abrir "Agentes" se refresca la lista
   // unificada (agentes+alarmas) y arranca el polling "bajo demanda" de
   // estado/historial SOLO mientras esta pestaña esta visible.
@@ -6015,15 +9352,14 @@ const THEME_KEY = "vision.theme";
 const VALID_THEMES = ["dark", "light", "dark-blue"];
 const cfgThemeSelectEl = document.getElementById("cfg-theme-select");
 
-function applyTheme(theme) {
+// REQ-016 (spec fix-detener-y-progreso-visible): `persist: false` al cargar la pagina -- reaplicar el tema guardado no es un
+// cambio del usuario, y con el navegador lleno no debe avisar «no se pudo guardar tu preferencia» sin que haya tocado nada.
+function applyTheme(theme, { persist = true } = {}) {
   const resolved = VALID_THEMES.includes(theme) ? theme : "light";
   if (resolved === "dark") delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme = resolved;
-  try {
-    localStorage.setItem(THEME_KEY, resolved);
-  } catch {
-    // noop -- sin localStorage el tema no persiste entre recargas, pero sigue aplicado en esta sesion
-  }
+  // Sin localStorage el tema no persiste entre recargas, pero sigue aplicado en esta sesion (y se avisa una vez).
+  if (persist) savePreference(THEME_KEY, resolved);
 }
 
 function getSavedTheme() {
@@ -6033,12 +9369,8 @@ function getSavedTheme() {
   // de tema oscuro antes de que este modulo cargue). Si el usuario ya
   // eligio "dark" o "dark-blue" explicitamente alguna vez, esa
   // preferencia se respeta.
-  try {
-    const saved = localStorage.getItem(THEME_KEY);
-    return VALID_THEMES.includes(saved) ? saved : "light";
-  } catch {
-    return "light";
-  }
+  const saved = readPreference(THEME_KEY);
+  return VALID_THEMES.includes(saved) ? saved : "light";
 }
 
 function loadAppearanceSettingsPane() {
@@ -6052,7 +9384,7 @@ if (cfgThemeSelectEl) {
 // Re-aplica al cargar el modulo (redundante con el <script> inline del
 // <head> en el caso normal, pero es la unica via si localStorage cambio
 // en otra pestaña/dispositivo, o si ese script inline no llego a correr).
-applyTheme(getSavedTheme());
+applyTheme(getSavedTheme(), { persist: false });
 
 // -------------------------------------------------------------------------
 // Tab: Audio (REQ-009/010, spec narracion-agente-efimera) -- activar/
@@ -6063,6 +9395,7 @@ applyTheme(getSavedTheme());
 // -------------------------------------------------------------------------
 const cfgTtsEnabledEl = document.getElementById("cfg-tts-enabled");
 const cfgTtsTechReportEl = document.getElementById("cfg-tts-tech-report"); // spec informe-tecnico-hablado
+const cfgTtsTechLevelEl = document.getElementById("cfg-tts-tech-level"); // REQ-012
 const cfgTtsVoiceSelectEl = document.getElementById("cfg-tts-voice-select");
 const cfgTtsTestBtnEl = document.getElementById("cfg-tts-test-btn");
 const cfgMicSelectEl = document.getElementById("cfg-mic-select");
@@ -6082,6 +9415,13 @@ const cfgBrainAutosendPauseEl = document.getElementById("cfg-brain-autosend-paus
 const cfgBrainAutosendPauseFieldEl = document.getElementById("cfg-brain-autosend-pause-field");
 // REQ-004 (spec atajo-espacio-modo-cerebro): checkbox del atajo de espacio.
 const cfgBrainSpaceInterruptEnabledEl = document.getElementById("cfg-brain-space-interrupt-enabled");
+const cfgBrainListenModeEl = document.getElementById("cfg-brain-listen-mode");
+const cfgBrainSensitivityEl = document.getElementById("cfg-brain-sensitivity");
+const cfgBrainSensitivityFieldEl = document.getElementById("cfg-brain-sensitivity-field");
+const cfgBrainSensitivityNoteEl = document.getElementById("cfg-brain-sensitivity-note");
+const cfgMicMeterMarkEl = document.getElementById("cfg-mic-meter-mark");
+// REQ-006 (spec aviso-proceso-terminado): interruptor «Avisarme cuando termine».
+const cfgNotifyFinishEl = document.getElementById("cfg-notify-finish");
 
 // Bug real reportado por el usuario: hablando en español, Whisper a veces
 // transcribia en INGLES -- sin forzar el idioma, Whisper hace auto-
@@ -6093,19 +9433,12 @@ const cfgBrainSpaceInterruptEnabledEl = document.getElementById("cfg-brain-space
 const STT_LANGUAGE_KEY = "vision.stt.language";
 
 function getSavedSttLanguage() {
-  try {
-    return localStorage.getItem(STT_LANGUAGE_KEY) || "";
-  } catch {
-    return "";
-  }
+  return readPreference(STT_LANGUAGE_KEY) || "";
 }
 
 function setSavedSttLanguage(lang) {
-  try {
-    localStorage.setItem(STT_LANGUAGE_KEY, lang || "");
-  } catch {
-    // noop -- sin localStorage la preferencia no persiste entre recargas, pero sigue aplicada en esta sesion
-  }
+  // REQ-016: sin localStorage la preferencia no persiste entre recargas, pero sigue aplicada en esta sesion (y se avisa una vez)
+  savePreference(STT_LANGUAGE_KEY, lang || "");
 }
 
 if (cfgSttLanguageSelectEl) {
@@ -6146,23 +9479,16 @@ let _micUsingFallback = false;
 let _micFallbackNoticeShown = false;
 
 function getSavedMic() {
-  try {
-    return {
-      deviceId: localStorage.getItem(MIC_DEVICE_KEY) || "",
-      label: localStorage.getItem(MIC_LABEL_KEY) || "",
-    };
-  } catch {
-    return { deviceId: "", label: "" };
-  }
+  return {
+    deviceId: readPreference(MIC_DEVICE_KEY) || "",
+    label: readPreference(MIC_LABEL_KEY) || "",
+  };
 }
 
 function setSavedMic(deviceId, label) {
-  try {
-    localStorage.setItem(MIC_DEVICE_KEY, deviceId || "");
-    localStorage.setItem(MIC_LABEL_KEY, deviceId ? label || "" : "");
-  } catch {
-    // noop -- sin localStorage la elección no persiste entre recargas, pero sigue aplicada en esta sesión
-  }
+  // REQ-016: sin localStorage la elección no persiste entre recargas, pero sigue aplicada en esta sesión (y se avisa una vez)
+  savePreference(MIC_DEVICE_KEY, deviceId || "");
+  savePreference(MIC_LABEL_KEY, deviceId ? label || "" : "");
 }
 
 // Busca el micrófono guardado entre los conectados AHORA (`mics`, entradas
@@ -6215,6 +9541,7 @@ async function openMicStream(extraAudio = {}) {
       });
       _micUsingFallback = false;
       _micFallbackNoticeShown = false;
+      maybeWatchNoSignal(stream); // spec control-microfono-windows REQ-009: no hace nada salvo tras un arranque manual
       return stream;
     } catch (err) {
       if (err?.name !== "OverconstrainedError" && err?.name !== "NotFoundError") throw err;
@@ -6223,6 +9550,7 @@ async function openMicStream(extraAudio = {}) {
   const hasExtra = Object.keys(extraAudio).length > 0;
   const stream = await navigator.mediaDevices.getUserMedia({ audio: hasExtra ? extraAudio : true });
   _micUsingFallback = deviceId !== ""; // null (no conectado) o un id que no se pudo abrir
+  maybeWatchNoSignal(stream); // spec control-microfono-windows REQ-009: no hace nada salvo tras un arranque manual
   return stream;
 }
 
@@ -6282,12 +9610,36 @@ async function handleMicDeviceChange() {
   // cerrar y reabrir la pestaña), y el medidor se reengancha si su
   // micrófono desapareció o apareció el elegido.
   populateMicOptions();
-  if (isAudioSettingsPaneOpen()) startMicMeter();
+  if (isAudioSettingsPaneOpen()) {
+    startMicMeter();
+    refreshAudioPanel(); // spec control-microfono-windows: el panel de Windows sigue al plug and play
+  }
   refreshActiveMicStreams();
 }
 
 if (navigator.mediaDevices?.addEventListener) {
   navigator.mediaDevices.addEventListener("devicechange", handleMicDeviceChange);
+}
+
+// spec control-microfono-windows: el modulo recibe las utilidades de app.js (mismo patron que vault.js). No abre nada por su cuenta.
+initMicControl({ apiBase: API_BASE, apiFetchOk, friendlyErrorMessage, getSavedMic, openMicStream });
+// spec audio-sistema-modo-reunion: la fuente de la reunion (ventana de arranque y Configuracion > Audio). Tampoco abre nada por su cuenta.
+initMeetingSource({ readPreference, savePreference });
+
+// REQ-002 (spec fix-deteccion-microfono-bluetooth, 2026-09-27): `devicechange`
+// de Chromium NO es confiable para Bluetooth (a veces no dispara al emparejar).
+// El emparejamiento Bluetooth suele hacerse desde Configuración de Windows con
+// la pestaña de Vision en segundo plano, así que al volver el foco a Vision se
+// re-enumera -- un micrófono conectado "afuera" aparece igual, sin recargar.
+// Es aditivo y barato: si no cambió nada, populateMicOptions deja la lista igual.
+if (typeof window !== "undefined" && window.addEventListener) {
+  let _lastMicFocusRefreshAt = 0;
+  window.addEventListener("focus", () => {
+    const now = Date.now();
+    if (now - _lastMicFocusRefreshAt < 1000) return; // evita ráfagas de focus
+    _lastMicFocusRefreshAt = now;
+    handleMicDeviceChange();
+  });
 }
 
 // REQ-012 (spec asistente-contextual-voz): persistencia de las
@@ -6303,23 +9655,21 @@ const BRAIN_AUTOSEND_PAUSE_KEY = "vision.brain.autosendPauseMs";
 const BRAIN_AUTOSEND_PAUSE_DEFAULT_MS = 2000;
 
 function isBrainAutosendEnabled() {
-  try {
-    const raw = localStorage.getItem(BRAIN_AUTOSEND_ENABLED_KEY);
-    return raw === null ? true : raw === "true"; // default: activado
-  } catch {
-    return true;
-  }
+  const raw = readPreference(BRAIN_AUTOSEND_ENABLED_KEY);
+  return raw === null ? true : raw === "true"; // default: activado
 }
 
 function setBrainAutosendEnabled(enabled) {
-  try {
-    localStorage.setItem(BRAIN_AUTOSEND_ENABLED_KEY, String(enabled));
-  } catch {
-    // noop -- sin localStorage la preferencia no persiste entre recargas, pero sigue aplicada en esta sesion
-  }
+  // REQ-016: sin localStorage la preferencia no persiste entre recargas, pero sigue aplicada en esta sesion (y se avisa una vez)
+  savePreference(BRAIN_AUTOSEND_ENABLED_KEY, String(enabled));
 }
 
+// spec autoenvio-cerebro-sin-voz REQ-005: si el navegador no deja guardar, lo escrito rige en memoria hasta recargar
+// (antes la pausa seguia siendo la guardada antes, o la de 2 s, aunque el aviso dijera «vale hasta recargar»).
+let brainAutosendPauseUnsavedSeconds = null;
+
 function getBrainAutosendPauseMs() {
+  if (brainAutosendPauseUnsavedSeconds !== null) return brainAutosendPauseUnsavedSeconds * 1000;
   try {
     const raw = parseInt(localStorage.getItem(BRAIN_AUTOSEND_PAUSE_KEY), 10);
     if (Number.isFinite(raw) && raw >= 1 && raw <= 10) return raw * 1000;
@@ -6329,36 +9679,75 @@ function getBrainAutosendPauseMs() {
   }
 }
 
+// spec autoenvio-cerebro-sin-voz REQ-005: valida el valor escrito y devuelve que se guardo y por que.
+// Fuera de rango -> el limite mas cercano (0 -> 1, 15 -> 10); vacio o no numerico -> el valor por defecto (2 s).
+function normalizeBrainAutosendPause(raw) {
+  const text = String(raw ?? "").trim();
+  const parsed = Number(text);
+  if (text === "" || !Number.isFinite(parsed)) return { seconds: BRAIN_AUTOSEND_PAUSE_DEFAULT_MS / 1000, corrected: true };
+  const rounded = Math.round(parsed);
+  const seconds = Math.max(1, Math.min(10, rounded));
+  return { seconds, corrected: seconds !== parsed };
+}
+
+// Devuelve los segundos guardados (compatibilidad con quien ya lo usaba). `persisted` en la 2da propiedad via setBrainAutosendPauseResult.
 function setBrainAutosendPauseSeconds(seconds) {
-  const clamped = Math.max(1, Math.min(10, parseInt(seconds, 10) || 2));
-  try {
-    localStorage.setItem(BRAIN_AUTOSEND_PAUSE_KEY, String(clamped));
-  } catch {
-    // noop -- ver comentario de setBrainAutosendEnabled
-  }
-  return clamped;
+  return setBrainAutosendPauseResult(seconds).seconds;
+}
+
+function setBrainAutosendPauseResult(raw) {
+  const { seconds, corrected } = normalizeBrainAutosendPause(raw);
+  // Sin localStorage la preferencia no persiste entre recargas, pero sigue aplicada en esta sesion (y se avisa una vez, REQ-016
+  // de fix-detener-y-progreso-visible, ademas del texto de estado de este campo).
+  const persisted = savePreference(BRAIN_AUTOSEND_PAUSE_KEY, String(seconds));
+  brainAutosendPauseUnsavedSeconds = persisted ? null : seconds;
+  return { seconds, corrected, persisted };
 }
 
 // REQ-004 (spec atajo-espacio-modo-cerebro): preferencia del atajo de
 // espacio -- mismo patron de persistencia y default (activado) que
 // BRAIN_AUTOSEND_ENABLED_KEY de arriba.
+// spec cerebro-hablar-con-espacio-y-audio-agrupado REQ-001/012: como escucha el Modo Cerebro. «auto» (de fabrica) = lo de siempre; «push» = Mantener Espacio para hablar.
+const BRAIN_LISTEN_MODE_KEY = "vision.brain.listenMode";
+function getBrainListenMode() {
+  return readPreference(BRAIN_LISTEN_MODE_KEY) === "push" ? "push" : "auto"; // cualquier otro valor guardado = automatico
+}
+function isBrainPushMode() {
+  return getBrainListenMode() === "push";
+}
 const BRAIN_SPACE_INTERRUPT_KEY = "vision.brain.spaceInterruptEnabled";
 
 function isBrainSpaceInterruptEnabled() {
-  try {
-    const raw = localStorage.getItem(BRAIN_SPACE_INTERRUPT_KEY);
-    return raw === null ? true : raw === "true"; // default: activado
-  } catch {
-    return true;
-  }
+  const raw = readPreference(BRAIN_SPACE_INTERRUPT_KEY);
+  return raw === null ? true : raw === "true"; // default: activado
 }
 
 function setBrainSpaceInterruptEnabled(enabled) {
-  try {
-    localStorage.setItem(BRAIN_SPACE_INTERRUPT_KEY, String(enabled));
-  } catch {
-    // noop -- sin localStorage la preferencia no persiste entre recargas, pero sigue aplicada en esta sesion
-  }
+  // REQ-016: sin localStorage la preferencia no persiste entre recargas, pero sigue aplicada en esta sesion (y se avisa una vez)
+  savePreference(BRAIN_SPACE_INTERRUPT_KEY, String(enabled));
+}
+
+// spec cerebro-hablar-con-espacio-y-audio-agrupado REQ-010/012: la marca del medidor cae donde cae el umbral (umbral x 300 %, la escala del propio medidor); la sensibilidad solo vale en modo Automatico.
+function syncBrainListenSettings() {
+  if (cfgMicMeterMarkEl) cfgMicMeterMarkEl.style.left = `${(brainSilenceThreshold() * 300).toFixed(1)}%`;
+  const push = isBrainPushMode();
+  if (cfgBrainSensitivityEl) cfgBrainSensitivityEl.disabled = push;
+  if (cfgBrainSensitivityFieldEl) cfgBrainSensitivityFieldEl.classList.toggle("settings-field-disabled", push);
+  if (cfgBrainSensitivityNoteEl) cfgBrainSensitivityNoteEl.textContent = push ? "Solo vale con el modo Automático: con «Mantener Espacio para hablar» el ruido no se tiene en cuenta." : "";
+}
+if (cfgBrainListenModeEl) {
+  cfgBrainListenModeEl.addEventListener("change", () => {
+    savePreference(BRAIN_LISTEN_MODE_KEY, cfgBrainListenModeEl.value === "push" ? "push" : "auto");
+    brainPttHeld = false; // cambiar de modo con la barra apretada no deja nada grabando
+    syncBrainListenSettings();
+    if (brainModeActive) renderBrainBanner(brainBtnEl.dataset.state);
+  });
+}
+if (cfgBrainSensitivityEl) {
+  cfgBrainSensitivityEl.addEventListener("change", () => {
+    savePreference(BRAIN_SENSITIVITY_KEY, cfgBrainSensitivityEl.value); // el detector lee el umbral en cada cuadro: se aplica en vivo
+    syncBrainListenSettings();
+  });
 }
 
 if (cfgBrainAutosendEnabledEl) {
@@ -6369,14 +9758,48 @@ if (cfgBrainAutosendEnabledEl) {
     }
   });
 }
+// REQ-005: se guarda al escribir (con un pequeno retraso, para no guardar "1" mientras se tipea "10") y tambien en "change".
+// El texto de estado dice que se guardo; si el valor era invalido, a cual se corrigio. Mientras se tipea NO se reescribe el campo:
+// la correccion del numero se refleja recien en "change".
+const cfgBrainAutosendPauseStatusEl = document.getElementById("cfg-brain-autosend-pause-status");
+let _brainPauseSaveTimer = null;
+function saveBrainAutosendPauseFromField({ rewriteField }) {
+  const typed = cfgBrainAutosendPauseEl.value;
+  const { seconds, corrected, persisted } = setBrainAutosendPauseResult(typed);
+  if (rewriteField) cfgBrainAutosendPauseEl.value = seconds;
+  if (cfgBrainAutosendPauseStatusEl) {
+    let text = `Guardado: ${seconds} s`;
+    if (corrected) text = `${typed.trim() === "" ? "Vacío" : `“${typed}”`} no es válido; se guardó ${seconds} s`;
+    if (!persisted) {
+      // REQ-005: sin «Guardado» (seria falso); el valor rige igual hasta recargar (getBrainAutosendPauseMs).
+      const unsaved = `No se pudo guardar; vale solo hasta recargar (${seconds} s)`;
+      text = corrected ? `${typed.trim() === "" ? "Vacío" : `“${typed}”`} no es válido. ${unsaved}` : unsaved;
+    }
+    cfgBrainAutosendPauseStatusEl.textContent = text;
+  }
+}
 if (cfgBrainAutosendPauseEl) {
+  cfgBrainAutosendPauseEl.addEventListener("input", () => {
+    clearTimeout(_brainPauseSaveTimer);
+    _brainPauseSaveTimer = setTimeout(() => saveBrainAutosendPauseFromField({ rewriteField: false }), 400);
+  });
   cfgBrainAutosendPauseEl.addEventListener("change", () => {
-    cfgBrainAutosendPauseEl.value = setBrainAutosendPauseSeconds(cfgBrainAutosendPauseEl.value);
+    clearTimeout(_brainPauseSaveTimer);
+    saveBrainAutosendPauseFromField({ rewriteField: true });
   });
 }
 if (cfgBrainSpaceInterruptEnabledEl) {
   cfgBrainSpaceInterruptEnabledEl.addEventListener("change", () => {
     setBrainSpaceInterruptEnabled(cfgBrainSpaceInterruptEnabledEl.checked);
+  });
+}
+// REQ-006/007 (spec aviso-proceso-terminado): prenderlo es un clic del usuario, asi que es el momento de pedir el permiso si el navegador
+// todavia no lo decidio; apagarlo no pide nada.
+if (cfgNotifyFinishEl) {
+  cfgNotifyFinishEl.addEventListener("change", () => {
+    setNotifyOnFinishEnabled(cfgNotifyFinishEl.checked);
+    if (cfgNotifyFinishEl.checked) requestNotifyPermission();
+    refreshNotifyPermissionStatus();
   });
 }
 
@@ -6405,6 +9828,7 @@ if ("speechSynthesis" in window && "onvoiceschanged" in window.speechSynthesis) 
 function loadAudioSettingsPane() {
   if (cfgTtsEnabledEl) cfgTtsEnabledEl.checked = isTtsEnabled();
   if (cfgTtsTechReportEl) cfgTtsTechReportEl.checked = isTechReportEnabled();
+  if (cfgTtsTechLevelEl) cfgTtsTechLevelEl.value = getTechReportLevel();
   loadVoiceSettings(); // spec voz-fish-audio (no bloquea el resto del panel)
   if (cfgSttLanguageSelectEl) cfgSttLanguageSelectEl.value = getSavedSttLanguage();
   // Alarma del loop (configurable): refleja el estado guardado.
@@ -6422,6 +9846,13 @@ function loadAudioSettingsPane() {
   if (cfgBrainAutosendPauseEl) cfgBrainAutosendPauseEl.value = getBrainAutosendPauseMs() / 1000;
   // REQ-004: refleja el estado guardado del atajo de espacio.
   if (cfgBrainSpaceInterruptEnabledEl) cfgBrainSpaceInterruptEnabledEl.checked = isBrainSpaceInterruptEnabled();
+  // spec cerebro-hablar-con-espacio-y-audio-agrupado REQ-009/012: como escucha y con que sensibilidad.
+  if (cfgBrainListenModeEl) cfgBrainListenModeEl.value = getBrainListenMode();
+  if (cfgBrainSensitivityEl) cfgBrainSensitivityEl.value = getBrainSensitivity();
+  syncBrainListenSettings();
+  // REQ-006/007 (spec aviso-proceso-terminado): el interruptor y el estado del permiso del navegador.
+  if (cfgNotifyFinishEl) cfgNotifyFinishEl.checked = isNotifyOnFinishEnabled();
+  refreshNotifyPermissionStatus();
   populateTtsVoiceOptions();
   const bestVoice = pickBestSpanishMaleVoice();
   if (cfgTtsVoiceSelectEl && !cfgTtsVoiceSelectEl.value && bestVoice) {
@@ -6439,23 +9870,26 @@ if (cfgTtsEnabledEl) {
 if (cfgTtsTechReportEl) {
   cfgTtsTechReportEl.addEventListener("change", () => setTechReportEnabled(cfgTtsTechReportEl.checked));
 }
+if (cfgTtsTechLevelEl) {
+  cfgTtsTechLevelEl.addEventListener("change", () => setTechReportLevel(cfgTtsTechLevelEl.value));
+}
 if (cfgTtsVoiceSelectEl) {
   cfgTtsVoiceSelectEl.addEventListener("change", () => setSavedVoiceURI(cfgTtsVoiceSelectEl.value));
 }
 if (cfgLoopAlarmTypeEl) {
   cfgLoopAlarmTypeEl.addEventListener("change", () => {
-    try { localStorage.setItem(LOOP_ALARM_TYPE_KEY, cfgLoopAlarmTypeEl.value); } catch { /* noop */ }
+    savePreference(LOOP_ALARM_TYPE_KEY, cfgLoopAlarmTypeEl.value); // REQ-016: si no se guarda, rige hasta recargar
   });
 }
 if (cfgLoopAlarmIntervalEl) {
   cfgLoopAlarmIntervalEl.addEventListener("change", () => {
-    try { localStorage.setItem(LOOP_ALARM_INTERVAL_KEY, cfgLoopAlarmIntervalEl.value); } catch { /* noop */ }
+    savePreference(LOOP_ALARM_INTERVAL_KEY, cfgLoopAlarmIntervalEl.value);
   });
 }
 if (cfgLoopAlarmVolumeEl && cfgLoopAlarmVolumeValEl) {
   cfgLoopAlarmVolumeEl.addEventListener("input", () => {
     cfgLoopAlarmVolumeValEl.textContent = Math.round(parseFloat(cfgLoopAlarmVolumeEl.value) * 100) + "%";
-    try { localStorage.setItem(LOOP_ALARM_VOLUME_KEY, cfgLoopAlarmVolumeEl.value); } catch { /* noop */ }
+    savePreference(LOOP_ALARM_VOLUME_KEY, cfgLoopAlarmVolumeEl.value);
   });
 }
 if (cfgLoopAlarmTestEl) {
@@ -8198,7 +11632,10 @@ if (cfgMicSelectEl) {
     _micFallbackNoticeShown = false;
     // Cambiar de microfono mientras la pestaña esta abierta reinicia el
     // medidor sobre el nuevo dispositivo elegido.
-    if (isAudioSettingsPaneOpen()) startMicMeter();
+    if (isAudioSettingsPaneOpen()) {
+      startMicMeter();
+      refreshAudioPanel(); // spec control-microfono-windows: el panel de Windows pasa al micrófono elegido
+    }
     // Y si Cerebro o una reunión están escuchando, pasan al nuevo ya.
     refreshActiveMicStreams();
   });
@@ -8976,39 +12413,95 @@ const connBqDatasetsToggleEl = document.getElementById("conn-bq-datasets-toggle"
 const connBqDatasetsListEl = document.getElementById("conn-bq-datasets-list");
 const connSpListsToggleEl = document.getElementById("conn-sp-lists-toggle");
 const connSpListsListEl = document.getElementById("conn-sp-lists-list");
+const connFileNoteEl = document.getElementById("conn-file-note");
+const connCfToggleEl = document.getElementById("conn-cf-toggle");
+const connCfListEl = document.getElementById("conn-cf-list");
 
 const MB_IN_BYTES = 1024 * 1024;
 
-async function _refreshConnStatusList() {
-  connStatusListEl.innerHTML = '<div class="conn-status-row"><span class="connector-dot checking"></span>Verificando…</div>';
-  try {
-    const resp = await apiFetch(`${API_BASE}/api/connectors/status`);
-    const data = await resp.json();
-    const connectors = data.connectors || [];
+// Dibuja Configuración > Conexiones desde la ÚLTIMA prueba (`_connSnapshot`, ver checkConnectionsNow): no prueba nada por su cuenta.
+// spec interruptores-conexiones-skills REQ-006: el estado solo trae lo ACTIVO (lo apagado no se prueba); lo apagado se lista igual, con su interruptor, desde la
+// lista de interruptores. Una fila por conexión, en orden alfabético estable.
+function renderConnStatusList() {
+  const snap = _connSnapshot;
+  if (!snap || !connStatusListEl) return;
+  if (snap.error) {
     connStatusListEl.innerHTML = "";
-    connectors.forEach((c) => {
-      const row = document.createElement("div");
-      row.className = "conn-status-row";
-      const dot = document.createElement("span");
-      dot.className = `connector-dot ${c.status}`;
-      const label = document.createElement("span");
-      label.className = "conn-status-label";
-      label.textContent = CONNECTOR_LABELS[c.name] || c.name;
-      const detail = document.createElement("span");
-      detail.className = "conn-status-detail";
-      detail.textContent = c.status === "online" ? "Conectado" : (c.detail || "Sin conexión");
-      if (c.technical) detail.title = `Detalle técnico: ${c.technical}`;
-      row.append(dot, label, detail);
-      connStatusListEl.appendChild(row);
-    });
-    connStatusStatusEl.textContent = "";
-  } catch (err) {
-    connStatusListEl.innerHTML = "";
-    connStatusStatusEl.textContent = friendlyErrorMessage(err);
+    connStatusStatusEl.textContent = friendlyErrorMessage(snap.error);
     connStatusStatusEl.className = "settings-status error";
+    return;
+  }
+  const statusByName = new Map(snap.connectors.map((c) => [connectorDisplayName(c), c]));
+  const rows = snap.switches.map((sw) => ({
+    sw,
+    c: statusByName.get(sw.display) || { name: sw.type, display: sw.display, status: "off", detail: sw.env_disabled ? "Desactivada en el .env" : "Desactivada" },
+  }));
+  const withSwitch = new Set(snap.switches.map((s) => s.display));
+  snap.connectors.filter((c) => !withSwitch.has(connectorDisplayName(c))).forEach((c) => rows.push({ sw: null, c }));
+  (snap.capabilities || []).forEach((cap) => rows.push({ sw: null, c: cap, cap }));
+  connStatusListEl.innerHTML = "";
+  sortByConnectionName(rows, (r) => connectorDisplayName(r.c)).forEach(({ sw, c, cap }) => {
+    const row = document.createElement("div");
+    row.className = "conn-status-row";
+    const dot = document.createElement("span");
+    dot.className = `connector-dot ${c.status}`;
+    const label = document.createElement("span");
+    label.className = "conn-status-label";
+    label.textContent = connectorDisplayName(c);
+    const detail = document.createElement("span");
+    detail.className = "conn-status-detail";
+    detail.textContent = cap ? cap.detail : (c.status === "online" ? "Conectado" : (c.detail || "Sin conexión")); // todo texto del servidor va como textContent
+    if (c.technical) detail.title = `Detalle técnico: ${c.technical}`;
+    row.append(dot, label, detail);
+    if (cap) {
+      // Outlook y Teams / Office: su interruptor es el del servidor (el mismo de la ventana del gestor); al cambiarlo se relee su estado y se repintan las dos listas
+      row.dataset.enabled = String(cap.enabled);
+      row.appendChild(
+        buildSwitch({
+          checked: cap.enabled,
+          label: `${cap.enabled ? "Desactivar" : "Activar"} ${cap.display}`,
+          onToggle: async (next) => {
+            await apiFetchOk(`${API_BASE}${cap.switchPath}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ enabled: next }),
+            });
+            await refreshCapabilities();
+          },
+        }),
+      );
+    }
+    if (sw) {
+      row.dataset.enabled = String(sw.enabled);
+      // El interruptor quedó distinto de lo que se probó: se avisa en la fila, sin volver a probar ni moverla (se aplica con «Actualizar estado»).
+      const probedOn = statusByName.has(sw.display);
+      if (sw.enabled !== probedOn && !sw.env_disabled) {
+        row.dataset.pending = "true";
+        detail.textContent = sw.enabled ? "Activada: tocá «Actualizar estado»" : "Desactivada: tocá «Actualizar estado»";
+      }
+      const toggle = buildSwitch({
+        checked: sw.enabled,
+        disabled: sw.env_disabled && !sw.enabled,
+        label: `${sw.enabled ? "Desactivar" : "Activar"} ${sw.display}`,
+        onToggle: async (next) => {
+          const fresh = await postConnectionSwitch(sw.key, next);
+          updateConnectionsSummary(fresh);
+          applySwitchesToConnSnapshot(fresh); // se guarda y se ve en el interruptor; el estado y el panel lateral esperan a «Actualizar estado»
+          connStatusStatusEl.textContent = "Guardado. Cuando termines, tocá «Actualizar estado» para ver cómo quedan acá y en el panel lateral.";
+          connStatusStatusEl.className = "settings-status";
+        },
+      });
+      row.appendChild(toggle);
+    }
+    connStatusListEl.appendChild(row);
+  });
+  if (!snap.pending) {
+    connStatusStatusEl.textContent = "";
+    connStatusStatusEl.className = "settings-status";
   }
 }
-connStatusRefreshEl.addEventListener("click", _refreshConnStatusList);
+// «Actualizar estado» es lo único que vuelve a probar: actualiza esta lista y el panel lateral juntos, con la misma prueba.
+connStatusRefreshEl.addEventListener("click", () => checkConnectionsNow());
 
 async function _loadConnThresholds() {
   connThresholdsStatusEl.textContent = "";
@@ -9064,7 +12557,12 @@ function _buildConnTreeItem(text, onExpand) {
   li.textContent = text;
   if (onExpand) {
     li.classList.add("conn-tree-item-expandable");
-    li.addEventListener("click", () => onExpand(li));
+    li.addEventListener("click", (event) => {
+      // Un nodo hijo vive DENTRO del <li> de su padre: sin este filtro, tocar un hijo tambien disparaba el manejador del padre y lo colapsaba
+      // (pasaba en SharePoint: tocar el nombre de una lista contraia el sitio). Solo cuenta el clic que cae en ESTE nodo, no en uno anidado.
+      if (event.target instanceof Element && event.target.closest("li") !== li) return;
+      onExpand(li);
+    });
   }
   return li;
 }
@@ -9122,37 +12620,202 @@ async function _expandBqTables(datasetLi, datasetId) {
   }
 }
 
-let _spListsLoaded = false;
+// spec conexiones-con-nombre REQ-010: una rama por cada conexion SharePoint con nombre, cada una con SUS listas (carga perezosa al abrirla).
+// El boton original «SharePoint — listas» sigue siendo el contenedor; sus hijos se arman desde GET /api/connections.
+let _spConnectionsLoaded = false;
+async function _loadSpConnectionBranches() {
+  connSpListsListEl.innerHTML = "<li>Buscando conexiones…</li>";
+  const resp = await apiFetch(`${API_BASE}/api/connections`);
+  if (!resp.ok) throw await httpErrorFromResponse(resp);
+  const data = await resp.json();
+  const sites = (data.connections || []).filter((c) => c.type === "sharepoint");
+  connSpListsListEl.innerHTML = "";
+  if (!sites.length) {
+    connSpListsListEl.appendChild(_buildConnTreeItem("No hay conexiones de SharePoint configuradas."));
+    return;
+  }
+  sites.forEach((site) => {
+    connSpListsListEl.appendChild(
+      _buildConnTreeItem(`🗂 ${site.display}`, (li) => _expandSpLists(li, site.name))
+    );
+  });
+}
+
+async function _expandSpLists(siteLi, connectionName) {
+  const existing = siteLi.querySelector(".conn-tree-sublist");
+  if (existing) {
+    existing.classList.toggle("hidden");
+    return;
+  }
+  const sublist = document.createElement("ul");
+  sublist.className = "conn-tree-list conn-tree-sublist";
+  sublist.innerHTML = "<li>Cargando listas…</li>";
+  siteLi.appendChild(sublist);
+  try {
+    const resp = await apiFetch(`${API_BASE}/api/config/connections/sharepoint/lists?name=${encodeURIComponent(connectionName)}`);
+    if (!resp.ok) throw await httpErrorFromResponse(resp);
+    const data = await resp.json();
+    sublist.innerHTML = "";
+    (data.lists || []).forEach((name) => sublist.appendChild(_buildConnTreeItem(`📋 ${name}`)));
+    if (!(data.lists || []).length) sublist.appendChild(_buildConnTreeItem("(sin listas)"));
+  } catch (err) {
+    renderListError(sublist, friendlyErrorMessage(err));
+  }
+}
+
 connSpListsToggleEl.addEventListener("click", async () => {
   const expanded = connSpListsToggleEl.getAttribute("aria-expanded") === "true";
   connSpListsToggleEl.setAttribute("aria-expanded", String(!expanded));
   connSpListsToggleEl.querySelector(".conn-tree-caret").textContent = expanded ? "▶" : "▼";
   connSpListsListEl.classList.toggle("hidden", expanded);
-  if (expanded || _spListsLoaded) return;
-
-  connSpListsListEl.innerHTML = "<li>Cargando listas…</li>";
+  if (expanded || _spConnectionsLoaded) return;
   try {
-    const resp = await apiFetch(`${API_BASE}/api/config/connections/sharepoint/lists`);
-    if (!resp.ok) throw await httpErrorFromResponse(resp);
-    const data = await resp.json();
-    connSpListsListEl.innerHTML = "";
-    (data.lists || []).forEach((name) => {
-      connSpListsListEl.appendChild(_buildConnTreeItem(`📋 ${name}`));
-    });
-    _spListsLoaded = true;
+    await _loadSpConnectionBranches();
+    _spConnectionsLoaded = true;
   } catch (err) {
     renderListError(connSpListsListEl, friendlyErrorMessage(err));
   }
 });
 
+// spec conexiones-con-nombre Fase B (REQ-006/010): una rama por cada conexion de Confluence, con sus SECCIONES (ej. «MP&L Procedures»); cada pagina
+// carga sus hijos de forma perezosa al abrirla (un espacio entero trae cientos). Todo texto de Confluence se pinta con textContent: nunca innerHTML.
+let _cfConnectionsLoaded = false;
+
+function _cfNodeLabel(prefix, title) {
+  return `${prefix} ${title}`;
+}
+
+async function _cfExpandChildren(pageLi, pageId, connectionName) {
+  const existing = pageLi.querySelector(":scope > .conn-tree-sublist");
+  if (existing) {
+    existing.classList.toggle("hidden");
+    return;
+  }
+  const sublist = document.createElement("ul");
+  sublist.className = "conn-tree-list conn-tree-sublist";
+  sublist.innerHTML = "<li>Cargando…</li>";
+  pageLi.appendChild(sublist);
+  try {
+    const resp = await apiFetch(`${API_BASE}/api/confluence/children?id=${encodeURIComponent(pageId)}&connection=${encodeURIComponent(connectionName)}`);
+    if (!resp.ok) throw await httpErrorFromResponse(resp);
+    const data = await resp.json();
+    sublist.innerHTML = "";
+    (data.children || []).forEach((child) => {
+      sublist.appendChild(
+        _buildConnTreeItem(_cfNodeLabel("📄", child.title), (li) => _cfExpandChildren(li, child.id, connectionName))
+      );
+    });
+    if (!(data.children || []).length) sublist.appendChild(_buildConnTreeItem("(sin subpáginas)"));
+  } catch (err) {
+    renderListError(sublist, friendlyErrorMessage(err));
+  }
+}
+
+async function _loadCfConnectionBranches() {
+  connCfListEl.innerHTML = "<li>Buscando conexiones…</li>";
+  const resp = await apiFetch(`${API_BASE}/api/connections`);
+  if (!resp.ok) throw await httpErrorFromResponse(resp);
+  const data = await resp.json();
+  const sites = (data.connections || []).filter((c) => c.type === "confluence");
+  connCfListEl.innerHTML = "";
+  if (!sites.length) {
+    connCfListEl.appendChild(_buildConnTreeItem("No hay conexiones de Confluence configuradas."));
+    return;
+  }
+  sites.forEach((site) => {
+    const sections = (site.info && site.info.sections) || [];
+    const branch = _buildConnTreeItem(
+      `🌐 ${site.display}${site.status === "incomplete" ? " — faltan CONFLUENCE_EMAIL / CONFLUENCE_API_TOKEN en tu .env" : ""}`,
+      (li) => {
+        const existing = li.querySelector(":scope > .conn-tree-sublist");
+        if (existing) {
+          existing.classList.toggle("hidden");
+          return;
+        }
+        const sublist = document.createElement("ul");
+        sublist.className = "conn-tree-list conn-tree-sublist";
+        if (!sections.length) sublist.appendChild(_buildConnTreeItem("Esta conexión no tiene secciones: agregalas en connections.json."));
+        sections.forEach((section) => {
+          sublist.appendChild(
+            _buildConnTreeItem(_cfNodeLabel("📚", section.name), (sectionLi) => _cfExpandChildren(sectionLi, section.page_id, site.name))
+          );
+        });
+        li.appendChild(sublist);
+      }
+    );
+    connCfListEl.appendChild(branch);
+  });
+}
+
+connCfToggleEl.addEventListener("click", async () => {
+  const expanded = connCfToggleEl.getAttribute("aria-expanded") === "true";
+  connCfToggleEl.setAttribute("aria-expanded", String(!expanded));
+  connCfToggleEl.querySelector(".conn-tree-caret").textContent = expanded ? "▶" : "▼";
+  connCfListEl.classList.toggle("hidden", expanded);
+  if (expanded || _cfConnectionsLoaded) return;
+  try {
+    await _loadCfConnectionBranches();
+    _cfConnectionsLoaded = true;
+  } catch (err) {
+    renderListError(connCfListEl, friendlyErrorMessage(err));
+  }
+});
+
+// spec conexiones-con-nombre REQ-011: connections.json se relee solo; si esta roto, se avisa aca (la ultima lectura valida sigue funcionando).
+function connSpToggleIsOpen() {
+  return connSpListsToggleEl.getAttribute("aria-expanded") === "true";
+}
+
+function connCfToggleIsOpen() {
+  return connCfToggleEl.getAttribute("aria-expanded") === "true";
+}
+
+async function _refreshConnFileNote() {
+  if (!connFileNoteEl) return;
+  // Se invalida ANTES de esperar la respuesta: si el usuario abre una rama mientras la relectura de connections.json todavia no llego, no puede ver la lista vieja
+  // (con la suite completa, bajo carga, la respuesta tardaba lo suficiente como para que pasara).
+  _spConnectionsLoaded = false;
+  _cfConnectionsLoaded = false;
+  try {
+    const resp = await apiFetch(`${API_BASE}/api/connections`);
+    const data = resp.ok ? await resp.json() : null;
+    if (!data) return;
+    // Si una rama se abrio mientras esperabamos esta respuesta, se arma de nuevo con los datos frescos (y vuelve a quedar marcada como cargada).
+    if (connSpToggleIsOpen()) _loadSpConnectionBranches().then(() => { _spConnectionsLoaded = true; }).catch(() => {});
+    if (connCfToggleIsOpen()) _loadCfConnectionBranches().then(() => { _cfConnectionsLoaded = true; }).catch(() => {});
+    connFileNoteEl.textContent = data.error
+      ? `⚠ ${data.error}`
+      : `Las conexiones se editan en ${data.file}. Se releen solas al guardar el archivo.`;
+    connFileNoteEl.className = data.error ? "settings-status error" : "settings-hint";
+  } catch {
+    // sin red: el estado de abajo ya muestra el error de conexion
+  }
+}
+
+// spec gestor-conexiones Fase B: el gestor de conexiones (frontend/js/vault.js) va arriba del todo de esta pestaña. Lo que se guarda ahí se ve en la lista de
+// estado y en el panel lateral recién con «Actualizar estado» (misma regla que los interruptores, decisión del usuario 2026-10-08).
+let _vaultStarted = false;
+function onVaultChanged() {
+  connStatusStatusEl.textContent = "Guardado. Cuando termines, tocá «Actualizar estado» para ver cómo quedan acá y en el panel lateral.";
+  connStatusStatusEl.className = "settings-status";
+}
+
 async function loadConnectionsSettingsPane() {
-  await Promise.all([_refreshConnStatusList(), _loadConnThresholds()]);
+  if (!_vaultStarted) {
+    _vaultStarted = true;
+    initVault({ rootId: "vault-root", API_BASE, apiFetchOk, friendlyErrorMessage, showConfirmModal, buildSwitch, onChanged: onVaultChanged });
+  } else {
+    refreshVault();
+  }
+  // abrir la pestaña muestra la última prueba (la misma del panel lateral); solo si todavía no hubo ninguna, la hace
+  const status = _connSnapshot ? Promise.resolve(renderConnStatusList()) : checkConnectionsNow();
+  await Promise.all([status, _loadConnThresholds(), _refreshConnFileNote()]);
 }
 
 credClearEl.addEventListener("click", async () => {
   const confirmed = await showConfirmModal({
     title: "Quitar todas las credenciales",
-    message: "Se van a borrar TODAS las credenciales guardadas de los 4 conectores. Esta acción no se puede deshacer.",
+    message: "Se van a borrar TODAS las credenciales guardadas (BigQuery y voz). Esta acción no se puede deshacer.",
     acceptLabel: "Quitar todo",
   });
   if (!confirmed) return;
@@ -9168,7 +12831,7 @@ credClearEl.addEventListener("click", async () => {
   await _refreshCredFieldTitles();
 });
 
-// -- Tab: Servidor (spec jarvis-mobile-pwa) ----------------------------------
+// -- Tab: Red > Servidor (spec jarvis-mobile-pwa; la pestaña se llamaba «Servidor» y desde la spec proxy-autoheal es «Red», con Servidor y Proxy) ----------------
 // A diferencia de las demas pestañas, esta NO persiste nada en el backend
 // -- API_BASE/token viven solo en el localStorage de ESTE navegador/
 // dispositivo (ver getApiBase/getAccessToken/setServerConnection mas
@@ -9185,7 +12848,124 @@ function loadServerSettingsPane() {
   cfgServerTokenEl.value = getAccessToken();
   cfgServerStatusEl.textContent = "";
   cfgServerStatusEl.className = "settings-status";
+  loadProxyPane();
 }
+
+// -- Tab: Red > Proxy (spec proxy-autoheal REQ-007) ---------------------------
+// A diferencia de «Servidor» (que vive en el localStorage de ESTE navegador), esto cambia por donde sale a internet el BACKEND y se guarda cifrado en la base de Vision:
+// por eso habla con `/api/proxy/*`, que responde solo a esta página en esta PC. La lista y el aviso vienen del servidor; todo se pinta con textContent.
+const cfgProxyInuseEl = document.getElementById("cfg-proxy-inuse");
+const cfgProxySavedEl = document.getElementById("cfg-proxy-saved");
+const cfgProxyListEl = document.getElementById("cfg-proxy-list");
+const cfgProxyAddressEl = document.getElementById("cfg-proxy-address");
+const cfgProxyTestEl = document.getElementById("cfg-proxy-test");
+const cfgProxySaveEl = document.getElementById("cfg-proxy-save");
+const cfgProxyReconnectEl = document.getElementById("cfg-proxy-reconnect");
+const cfgProxyStatusEl = document.getElementById("cfg-proxy-status");
+
+const PROXY_SOURCE_LABELS = {
+  guardado: "Guardada",
+  predeterminado: "Nombre de la empresa",
+  dns: "Que indica la red de la empresa",
+  pac: "Que indica Windows",
+  directo: "Conexión directa",
+  manual: "Escrita acá",
+};
+
+function proxyShortName(url) {
+  return url ? url.replace(/^https?:\/\//, "") : "Conexión directa";
+}
+
+function setProxyStatus(text, kind = "") {
+  cfgProxyStatusEl.textContent = text;
+  cfgProxyStatusEl.className = kind ? `settings-status ${kind}` : "settings-status";
+}
+
+function setProxyBusy(busy) {
+  for (const btn of [cfgProxyTestEl, cfgProxySaveEl, cfgProxyReconnectEl]) btn.disabled = busy;
+}
+
+function renderProxySnapshot(snap) {
+  cfgProxyInuseEl.textContent = snap.in_use ? proxyShortName(snap.in_use) : "Sin proxy (conexión directa o la que elija el sistema)";
+  cfgProxySavedEl.textContent = snap.saved ? proxyShortName(snap.saved) : "Ninguna";
+  // Distintas A PROPOSITO: Vision salio directo por ahora y conserva lo guardado por si en otra red sí sirve (no es un error)
+  if (snap.kept_saved) cfgProxySavedEl.textContent += " (se conserva: ahora no responde y Vision usa otra salida)";
+  const rows = (snap.candidates || []).map((c) => {
+    const row = document.createElement("div");
+    row.className = "proxy-row";
+    row.dataset.state = c.alive ? "up" : "down";
+    const name = document.createElement("span");
+    name.className = "proxy-row-name";
+    name.textContent = proxyShortName(c.url);
+    const source = document.createElement("span");
+    source.className = "proxy-row-source";
+    source.textContent = PROXY_SOURCE_LABELS[c.source] || "";
+    const stateEl = document.createElement("span");
+    stateEl.className = "proxy-row-state";
+    stateEl.textContent = c.alive ? (c.ms != null ? `responde (${c.ms} ms)` : "responde") : "no responde";
+    row.append(name, source, stateEl);
+    return row;
+  });
+  cfgProxyListEl.replaceChildren(...rows);
+}
+
+async function proxyCall(path, { post = true, body } = {}) {
+  const options = post ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body ?? {}) } : {};
+  const resp = await apiFetchOk(`${API_BASE}/api/proxy${path}`, options);
+  return resp.json();
+}
+
+async function loadProxyPane() {
+  try {
+    renderProxySnapshot(await proxyCall("/status", { post: false }));
+  } catch (err) {
+    setProxyStatus(`No se pudo leer el estado de la salida a internet. ${friendlyErrorMessage(err)}`, "error");
+  }
+}
+
+async function runProxyAction(label, action) {
+  setProxyBusy(true);
+  setProxyStatus(label);
+  try {
+    await action();
+  } catch (err) {
+    setProxyStatus(friendlyErrorMessage(err), "error");
+  } finally {
+    setProxyBusy(false);
+  }
+}
+
+cfgProxyReconnectEl.addEventListener("click", () =>
+  runProxyAction("Buscando una salida que funcione…", async () => {
+    const snap = await proxyCall("/reconnect");
+    renderProxySnapshot(snap);
+    if (snap.action === "none" || snap.action === "error") setProxyStatus(snap.message, "error");
+    else setProxyStatus(snap.message ? `Listo. ${snap.message}` : "Listo. La salida a internet responde.", "ok");
+  }),
+);
+
+cfgProxyTestEl.addEventListener("click", () =>
+  runProxyAction("Probando…", async () => {
+    const one = await proxyCall("/test", { body: { address: cfgProxyAddressEl.value.trim() } });
+    const what = one.url ? proxyShortName(one.url) : "La conexión directa";
+    if (one.alive) setProxyStatus(`${what} responde${one.ms != null ? ` (${one.ms} ms)` : ""}.`, "ok");
+    else setProxyStatus(`${what} no responde. Revisá que estés conectado a la VPN de tu empresa y probá de nuevo.`, "error");
+  }),
+);
+
+cfgProxySaveEl.addEventListener("click", () =>
+  runProxyAction("Guardando y reconectando…", async () => {
+    const out = await proxyCall("/apply", { body: { address: cfgProxyAddressEl.value.trim() } });
+    renderProxySnapshot(out);
+    if (!out.applied) {
+      setProxyStatus("Esa dirección no responde, así que no se cambió nada. Revisá que estés conectado a la VPN de tu empresa y probá de nuevo.", "error");
+    } else if (!out.saved) {
+      setProxyStatus("Listo. Vision ya usa esa salida, pero no quedó guardada: primero importá tu configuración en Conexiones.", "ok");
+    } else {
+      setProxyStatus("Listo. Vision usa esa salida y la dejó guardada.", "ok");
+    }
+  }),
+);
 
 // REQ-107/108 ELIMINADOS (spec configuracion-limpieza-credenciales-servidor,
 // 2026-09-20): se habia agregado una lista de IPs locales detectadas para
@@ -10147,6 +13927,121 @@ function selectSlashCommand(command) {
   renderCommandModal(command);
 }
 
+// ---------------------------------------------------------------------------
+// /limpiar-adjuntos (spec adjuntar-archivos-chat REQ-009): 1) vista previa de lo
+// que se libera con un checkbox "Conservar" por fila; 2) borra del DISCO lo no
+// conservado; 3) informa lo liberado REAL (archivos + base de datos compactada).
+// ---------------------------------------------------------------------------
+async function renderAttachmentsCleanupModal() {
+  commandModalBodyEl.innerHTML = "";
+  commandModalOverlayEl.classList.remove("hidden"); // sin esto el modal se arma pero nunca se ve
+  const status = document.createElement("p");
+  status.className = "cleanup-summary";
+  status.textContent = "Buscando adjuntos…";
+  commandModalBodyEl.appendChild(status);
+
+  let preview;
+  try {
+    const resp = await apiFetchOk(`${API_BASE}/api/sessions/${encodeURIComponent(state.sessionId)}/attachments/cleanup-preview`);
+    preview = await resp.json();
+  } catch (err) {
+    status.textContent = `No se pudo revisar los adjuntos. ${friendlyErrorMessage(err)}`;
+    return;
+  }
+  const rows = preview.rows || [];
+  if (rows.length === 0) {
+    status.textContent = "Esta sesión no tiene adjuntos para limpiar.";
+    return;
+  }
+
+  status.textContent = "Se van a borrar del disco los archivos que NO marques como «Conservar». Los archivos leídos en su lugar nunca se borran: solo se quita la referencia.";
+  const list = document.createElement("div");
+  list.className = "cleanup-list";
+  const keep = new Map();
+  const updateTotal = () => {
+    let bytes = 0;
+    for (const r of rows) if (r.deletable && !keep.get(r.id)) bytes += r.bytes || 0;
+    total.textContent = `Se liberarán aproximadamente ${formatFileSize(bytes)} (más lo que se compacte en la base de datos).`;
+  };
+  for (const r of rows) {
+    const row = document.createElement("div");
+    row.className = "cleanup-row";
+    row.dataset.locked = String(!r.deletable);
+    const name = document.createElement("span");
+    name.className = "cleanup-row-name";
+    name.textContent = r.kind === "images" ? r.name : `${r.name}${r.missing ? " (ya no está en el disco)" : ""}`;
+    name.title = r.path || r.name;
+    const size = document.createElement("span");
+    size.className = "cleanup-row-size";
+    size.textContent = r.inplace ? "en su lugar" : formatFileSize(r.bytes || 0);
+    row.append(name, size);
+    if (r.kind === "orphan") {
+      const note = document.createElement("span");
+      note.className = "cleanup-row-note";
+      note.textContent = "sin usar";
+      row.appendChild(note);
+    }
+    if (!r.deletable) {
+      const note = document.createElement("span");
+      note.className = "cleanup-row-note";
+      note.textContent = "lo usa otra sesión";
+      row.appendChild(note);
+    } else {
+      const label = document.createElement("label");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.onchange = () => {
+        keep.set(r.id, cb.checked);
+        updateTotal();
+      };
+      label.append(cb, document.createTextNode("Conservar"));
+      row.appendChild(label);
+    }
+    list.appendChild(row);
+  }
+  const total = document.createElement("p");
+  total.className = "cleanup-summary";
+  commandModalBodyEl.append(list, total);
+  updateTotal();
+
+  const actions = document.createElement("div");
+  actions.className = "confirm-actions";
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "acc-action-btn secondary";
+  cancelBtn.textContent = "Cancelar";
+  cancelBtn.onclick = closeCommandModal;
+  const applyBtn = document.createElement("button");
+  applyBtn.type = "button";
+  applyBtn.className = "acc-action-btn";
+  applyBtn.textContent = "Borrar";
+  applyBtn.onclick = async () => {
+    const ids = rows.filter((r) => r.deletable && !keep.get(r.id)).map((r) => r.id);
+    if (ids.length === 0) {
+      closeCommandModal();
+      return;
+    }
+    applyBtn.disabled = true;
+    applyBtn.textContent = "Borrando…";
+    try {
+      const resp = await apiFetchOk(`${API_BASE}/api/sessions/${encodeURIComponent(state.sessionId)}/attachments/cleanup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ delete: ids }),
+      });
+      const result = await resp.json();
+      closeCommandModal();
+      appendMessage("system-note", `Adjuntos limpiados: se liberaron ${formatFileSize(result.freed_bytes)}.`, { persist: false });
+    } catch (err) {
+      applyBtn.disabled = false;
+      applyBtn.textContent = "Borrar";
+      total.textContent = `No se pudo borrar. ${friendlyErrorMessage(err)}`;
+    }
+  };
+  actions.append(cancelBtn, applyBtn);
+  commandModalBodyEl.appendChild(actions);
+}
+
 function renderCommandModal(command) {
   commandModalTitleEl.textContent = `/${command.name}`;
   commandModalBodyEl.innerHTML = "";
@@ -10212,9 +14107,13 @@ function renderCommandModal(command) {
         // spec gestion-contexto-conversacion REQ-002: accion manual real
         // sobre session.messages, sin crear un turno de chat artificial.
         try {
+          // spec aviso-contexto-largo REQ-006: resume con el modelo elegido en el selector (sin cuerpo = el de siempre).
+          const compactModel = selectedModelForRequest();
           const resp = await apiFetch(
             `${API_BASE}/api/commands/compact/${state.sessionId}`,
-            { method: "POST" }
+            compactModel
+              ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: compactModel }) }
+              : { method: "POST" }
           );
           const data = await resp.json();
           if (!resp.ok) {
@@ -10234,6 +14133,25 @@ refreshContextUsage();
             `No se pudo resumir la conversación. ${friendlyErrorMessage(err)}`,
             { persist: false }
           );
+        }
+        return;
+      }
+      if (command.action === "update") {
+        // spec comando-update-sesiones-publicas REQ-010: resume lo NUEVO de las conversaciones publicas de otras personas (con su CSID) y lista sus
+        // archivos. Las notas ya quedaron guardadas en SQLite: se repinta el chat desde ahi para verlas. Una falla se dice con una frase, nunca muda.
+        const updateSessionId = state.sessionId;
+        appendMessage("system-note", "Buscando novedades en las conversaciones públicas de esta carpeta…", { persist: false });
+        try {
+          const resp = await apiFetch(`${API_BASE}/api/commands/update/${encodeURIComponent(updateSessionId)}`, { method: "POST" });
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok) throw httpError(resp.status, data);
+          if (updateSessionId !== state.sessionId) return; // cambio de sesion mientras tanto: no se pinta sobre la nueva
+          if (data.updated > 0) await activateSession(updateSessionId); // trae las notas nuevas desde SQLite
+          appendMessage("system-note", data.message || "Listo.", { persist: false });
+          refreshContextUsage();
+        } catch (err) {
+          if (updateSessionId !== state.sessionId) return;
+          appendMessage("system-note", `No pude traer las novedades. ${friendlyErrorMessage(err)}`, { persist: false });
         }
         return;
       }
@@ -10328,6 +14246,12 @@ if (command.kind === "loop") {
 
   if (command.kind === "clear") {
     renderClearConversationModal();
+    return;
+  }
+
+  if (command.kind === "attachments-cleanup") {
+    // spec adjuntar-archivos-chat REQ-009: vista previa con "Conservar" y recien despues borra.
+    renderAttachmentsCleanupModal();
     return;
   }
 
@@ -10465,7 +14389,7 @@ commandModalBodyEl.appendChild(p);
 // Clear conversacion (pedido del usuario 2026-09): borra TODA la conversacion
 // de la sesion (preguntas y respuestas, viejas y nuevas). Modal de confirmacion
 // porque es destructivo; al confirmar llama POST /api/session/{id}/clear y
-// resetea el DOM, la caché de localStorage y la cola.
+// resetea el DOM, el historial en pantalla (y la copia chica de una sesion sin carpeta) y la cola.
 function renderClearConversationModal() {
   const p = document.createElement("p");
   p.className = "confirm-message";
@@ -10506,10 +14430,10 @@ async function clearConversation() {
       appendMessage("error", `No se pudo limpiar la conversación. ${httpError(resp.status, data).message}`);
       return;
     }
-    // Reset del estado visible: DOM, caché de historial y cola de turnos.
+    // Reset del estado visible: DOM, historial en pantalla (y su copia chica, si la sesion no tiene carpeta) y cola de turnos.
     clearMessagesDom();
     chatHistory.length = 0;
-    persistChatHistory();
+    removeLocalCopy(state.sessionId);
     if (typeof queuedTurns !== "undefined" && queuedTurns.clear) queuedTurns.clear();
     appendMessage("system-note", "Conversación de la sesión borrada.");
   } catch (err) {
@@ -10629,6 +14553,8 @@ document.addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !questionPanelEl.classList.contains("hidden")) {
     questionPanelEl.classList.add("hidden");
+    // REQ-018 (spec fix-detener-y-progreso-visible): omitida por el usuario, no vuelve a aparecer al regresar a la sesion ni la marca.
+    if (questionPanelEl.dataset.sessionId === state.sessionId) resolvePendingQuestion(state.sessionId);
   }
 });
 
@@ -10653,13 +14579,23 @@ sendMessage = async function (...args) {
   const turnText = typeof args[0] === "string" ? args[0] : null;
   await _originalSendMessage(...args);
   touchCurrentSessionInIndex(turnSessionId, turnText);
-  if (document.getElementById("acc-context").open) refreshContextUsage();
+  refreshContextUsage(); // REQ-017: tambien con el acordeon «Contexto» cerrado (y si el turno termino detenido o con error)
 };
 
 renderSessionsPanel();
 refreshSessionsFromBackend();
 refreshProjectFooter();
 refreshModelFooter();
+
+// REQ-016 (spec fix-detener-y-progreso-visible): el chat de la sesion activa sale de SQLite (ver restoreActiveSessionOnLoad); recien
+// despues se ordenan, una sola vez, las copias viejas del navegador (la restauracion todavia puede necesitar la copia de una
+// sesion sin carpeta como red de seguridad). REQ-017: el % real de «Contexto» desde que abre la pagina, aunque este cerrado.
+const _initialHistoryRestore = restoreActiveSessionOnLoad();
+(async () => {
+  await _initialHistoryRestore;
+  await migrateLocalCopiesOnce();
+})();
+refreshContextUsage();
 
 // REQ-001/002/003/004 (spec pantalla-bienvenida-ojo): splash screen que se
 // ve EN CADA carga de pagina, antes de que el usuario vea/use el chat.
@@ -10675,13 +14611,23 @@ initSplashScreen();
   // si el usuario cambia de sesion mientras esta funcion espera, no hay
   // que tocar el indice de la sesion NUEVA con la actividad de esta.
   const loadSessionId = state.sessionId;
+  // REQ-016/REQ-018 (spec fix-detener-y-progreso-visible, revision F2): si el usuario activa otra sesion (o va y vuelve) mientras la
+  // carga espera, esto ya no le corresponde: antes se enganchaba al turno de la sesion de la carga como si fuera de la nueva (su texto
+  // aparecia en el chat de la otra, se guardaba en SU copia y su boton quedaba en «Detener»). Al volver, activateSession se re-engancha.
+  const loadActivation = _sessionActivations;
+  const stillOnLoadSession = () => _sessionActivations === loadActivation && state.sessionId === loadSessionId;
+  // REQ-016: primero el historial (de SQLite): el turno en curso se engancha debajo de su propio mensaje (turnContainers), y el
+  // aviso de «sesión perdida» de abajo mira si hay historial.
+  await _initialHistoryRestore;
+  if (!stillOnLoadSession()) return;
   try {
     const statusResp = await apiFetch(`${API_BASE}/api/session/${loadSessionId}/status`);
     const statusData = await statusResp.json();
+    if (!stillOnLoadSession()) return;
     // spec proyecto-por-sesion REQ-006: rellena ID/ruta al cargar la
     // pagina (F5), no solo al crear/cambiar de sesion.
     updateMetaSessionId(state.sessionId);
-    if (statusData.project_path) updateMetaSessionPath(statusData.project_path);
+    paintSessionPathFromStatus(statusData);
     // BUG REAL corregido: este handler de F5/recarga (a diferencia de
     // activateSession, que SI lo hacia) nunca llamaba a
     // updatePersistenceBanner -- el banner "sin carpeta de proyecto"
@@ -10692,6 +14638,7 @@ initSplashScreen();
     // siempre viene fresco en cada respuesta de /status, hay que pintarlo
     // aca tambien).
     updatePersistenceBanner(statusData.persistence_available);
+    rememberSessionFolder(loadSessionId, statusData.persistence_available); // REQ-016: decide si le corresponde copia chica
     // spec carpeta-por-sesion REQ-008: sin bloqueo aca -- una sesion sin
     // carpeta sigue funcionando en memoria; el banner de persistencia de
     // arriba ya avisa, y el modal se abre solo cuando haga falta de
@@ -10723,19 +14670,22 @@ initSplashScreen();
       try {
         setConnStatus("busy", "Vision sigue pensando en esta sesión…");
         const resp = await apiFetch(`${API_BASE}/api/chat/stream/${loadSessionId}`);
-        await renderIncomingStream(resp, statusData.active_turn_id);
+        // Revision F2: el stream es de la sesion de la carga aunque el usuario cambie mientras llega (sin el tercer argumento quedaba
+        // atribuido a la sesion activa de ese momento).
+        await renderIncomingStream(resp, statusData.active_turn_id, loadSessionId);
         if (connStatusEl.dataset.state === "busy") setConnStatus("online", "Vision en línea");
         touchCurrentSessionInIndex(loadSessionId);
       } finally {
         state.sending -= 1;
         if (state.sending < 0) state.sending = 0;
       }
+        settleSendButtonAfterAttach(loadSessionId);
     }
     // REQ-006: si `exists` viene false, esta sesion tiene historial
     // persistido en localStorage que el backend (probablemente reiniciado)
     // ya no reconoce. Se avisa una sola vez, con estilo distinto a un
     // error comun.
-    if (statusData.exists === false && chatHistory.length > 0) {
+    if (statusData.exists === false && chatHistory.length > 0 && stillOnLoadSession()) {
       appendMessage(
         "system-orphan",
         "⚠️ Esta sesión se perdió (el servidor se reinició). Se preserva tu historial visual, pero Vision no recuerda el contexto anterior — el próximo mensaje arranca una conversación nueva del lado del servidor.",
@@ -10777,7 +14727,8 @@ async function pollActiveSessionForExternalActivity() {
   // reenganche, igual que sendMessage() -- asi los 3 caminos se excluyen
   // entre si a traves del mismo contador compartido, no solo contra si
   // mismos.
-  if (state.sending > 0 || _idleReattachInFlight) return;
+  // REQ-016: hasta que el historial de la carga (SQLite) este pintado, el reenganche lo hace reattachIfBusyOnLoad.
+  if (state.sending > 0 || _idleReattachInFlight || !_historyRestoreDone) return;
   const sessionId = state.sessionId;
   if (!sessionId) return;
   _idleReattachInFlight = true; // evita que ESTE poll se re-dispare a si mismo mientras espera el /status
@@ -10801,6 +14752,7 @@ async function pollActiveSessionForExternalActivity() {
       state.sending -= 1;
       if (state.sending < 0) state.sending = 0;
     }
+    settleSendButtonAfterAttach(sessionId);
   } catch {
     // Sin conexion momentanea, o la sesion ya no existe -- se reintenta
     // solo en el proximo tick, no es critico.
@@ -10840,6 +14792,209 @@ function setSendButtonState(newState) {
   }
 }
 
+// Un turno al que el frontend se ENGANCHA (edicion de un mensaje ya respondido, recarga de pagina a mitad de turno, cambio de sesion,
+// poll de fondo) no pasa por el `finally` de sendMessage(), que es lo unico que devolvia el boton a "Enviar": quedaba pegado en
+// "Detener" hasta recargar, y con el guard de submit el usuario no podia mandar otro mensaje. Se llama al terminar el stream enganchado.
+// No toca nada si hay otro envio en curso (state.sending > 0) ni si el stream era de una sesion que ya no es la activa (el boton es global).
+function settleSendButtonAfterAttach(attachedSessionId) {
+  if (state.sending > 0) return;
+  if (attachedSessionId !== state.sessionId) return;
+  setSendButtonState("idle");
+}
+
+// Detener TAJANTE (pedido del usuario 2026-10-05, «se queda pegado sin detener»): el boton no puede quedarse en «Deteniendo…» esperando UN evento SSE
+// que puede no llegar (stream cortado, evento perdido, POST /stop que fallo o no llego al servidor). Mientras el boton diga «Deteniendo…» se
+// consulta el estado real de la sesion cada segundo: si ya no esta ocupada, vuelve a «Enviar»; si sigue ocupada, se REINTENTA el Detener. El
+// backend ya no espera a las herramientas lentas mas alla de su plazo de gracia (STOP_GRACE_S de llm/loop.py).
+// REQ-007 (spec fix-detener-y-progreso-visible): lo que vivio el usuario (2026-10-11) fue un Vision de desarrollo que se reinicio a mitad del
+// turno: el proceso viejo seguia con el turno pero ya no atendia conexiones, y el POST de Detener quedo colgado SIN respuesta. Como ese fetch
+// no tenia plazo y el vigilante arrancaba recien cuando el POST contestaba, el boton quedo en «Deteniendo…» sin limite y sin explicar nada.
+// Ahora el POST tiene plazo (5 s) y cada consulta del vigilante el suyo (3 s); si Vision no contesta se avisa UNA vez en lenguaje claro y se
+// sigue consultando y reintentando el Detener cada ~5 s (antes: una sola vez); el boton vuelve a «Enviar» cuando la sesion queda libre o
+// Vision vuelve sin el turno (con «Listo…» si se habia avisado), y a los ~30 s sin contacto se sugiere recargar y se suelta el boton.
+const STOP_REQUEST_TIMEOUT_MS = 5000;
+const STOP_STATUS_TIMEOUT_MS = 3000;
+const STOP_WATCH_INTERVAL_MS = 1000;
+const STOP_WATCH_RETRY_MS = 5000;
+const STOP_UNREACHABLE_RELEASE_MS = 30_000;
+// REQ-007: cuando el boton ya volvio por otro camino pero se habia avisado «no responde», se sigue esperando a Vision solo para cerrar ese
+// aviso con «Listo…»; con un tope, para no consultar para siempre a un Vision que se cerro.
+const STOP_CONFIRM_MAX_MS = 120_000;
+const STOP_UNREACHABLE_NOTE = "Vision no responde todavía: puede estar reiniciándose. Sigo intentando…";
+const STOP_RECOVERED_NOTE = "Listo: Vision ya no está trabajando.";
+const STOP_RELOAD_NOTE =
+  "Vision sigue sin responder después de 30 segundos. Si no vuelve en un rato, recargá la página con Ctrl+Shift+R; si tampoco carga, cerrá y volvé a abrir Vision.";
+// REQ-014 f (spec fix-detener-y-progreso-visible)
+const STOP_OTHER_TURN_NOTE =
+  "Esa respuesta ya había terminado y Vision ya está con el siguiente mensaje. Si querés frenarlo también, apretá Detener de nuevo.";
+
+// REQ-007: el vigilante vigente. Uno solo: un Detener nuevo, un cambio de sesion o el fin del vigilante dejan sin efecto al anterior.
+let _stopWatch = null;
+
+// REQ-007: fetch con plazo para lo que no puede quedar colgado (Detener y su vigilante). Un Vision que se esta reiniciando acepta la conexion
+// pero no contesta nunca: sin plazo, el `await` espera para siempre. El cuerpo tambien se lee dentro del plazo (puede no llegar nunca).
+// Lanza si no hubo respuesta a tiempo o si fallo la red; una respuesta no-ok vuelve con `ok: false` (Vision contesto, aunque sea un error).
+async function apiFetchJsonWithin(url, timeoutMs, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await apiFetch(url, { ...options, signal: controller.signal });
+    let data = null;
+    try {
+      data = await resp.json();
+    } catch (err) {
+      if (err && err.name === "AbortError") throw err;
+      // cuerpo vacio o ilegible: alcanza con saber que Vision contesto
+    }
+    return { ok: resp.ok, data };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// REQ-007: "nothing" = Vision contesto que no habia turno que detener; "sent" = contesto (pedido recibido, o un error: el vigilante decide
+// mirando el estado); "no-answer" = sin respuesta en el plazo o sin red. En ese ultimo caso el pedido PUDO haber llegado al servidor.
+// REQ-014 f (spec fix-detener-y-progreso-visible): `turnId` = el turno que el usuario estaba viendo (null = el que este corriendo, como
+// siempre). "other-turn" = ese turno ya habia terminado y Vision esta con OTRO (el siguiente de la cola): no se lo freno, y el proximo
+// Detener ya apunta a ese otro.
+async function postStopRequest(sessionId, turnId = null) {
+  try {
+    const options = { method: "POST" };
+    if (turnId) {
+      options.headers = { "Content-Type": "application/json" };
+      options.body = JSON.stringify({ turn_id: turnId });
+    }
+    const { ok, data: body } = await apiFetchJsonWithin(`${API_BASE}/api/chat/${sessionId}/stop`, STOP_REQUEST_TIMEOUT_MS, options);
+    const data = ok && body ? body : {};
+    if (data.stopped === false && data.reason === "other_turn_active") {
+      noteWatchedTurn(sessionId, data.active_turn_id);
+      return "other-turn";
+    }
+    // `stopped: false` = no habia turno: no va a llegar ningun evento 'stopped' (fix del boton colgado, ver el click de Detener).
+    if (data.stopped === false) return "nothing";
+    return "sent";
+  } catch (err) {
+    console.warn("El pedido de Detener no tuvo respuesta:", err);
+    return "no-answer";
+  }
+}
+
+// REQ-007: estado de la sesion para el vigilante, o null si Vision no contesto a tiempo o contesto algo que no sirve para decidir.
+async function fetchStopWatchStatus(sessionId) {
+  try {
+    const { ok, data } = await apiFetchJsonWithin(
+      `${API_BASE}/api/session/${encodeURIComponent(sessionId)}/status`,
+      STOP_STATUS_TIMEOUT_MS,
+    );
+    return ok && data && typeof data.busy === "boolean" ? data : null;
+  } catch {
+    return null; // sin respuesta: el vigilante lo cuenta como «Vision no responde»
+  }
+}
+
+// REQ-007: un Detener nuevo sobre la MISMA sesion mientras el anterior seguia vigilando (p. ej. el usuario lo vuelve a apretar despues de que
+// se solto a los 30 s) hereda lo ya avisado: la nota de «no responde» sale una sola vez y el «Listo…» final sigue cerrandola.
+function startStopWatch(sessionId, targetTurnId = null) {
+  const prev = _stopWatch && _stopWatch.sessionId === sessionId ? _stopWatch : null;
+  const now = Date.now();
+  _stopWatch = {
+    sessionId,
+    startedAt: now,
+    lastStopAt: now, // el POST del click cuenta como el primer intento
+    stopInFlight: false,
+    unreachableSince: null, // desde cuando no se puede hablar con Vision (null = hubo contacto)
+    unreachableNoted: prev ? prev.unreachableNoted : false,
+    reloadNoted: prev ? prev.reloadNoted : false,
+    // REQ-014 f: el turno que el usuario estaba viendo al apretar Detener (va en cada reintento, asi tampoco un reintento frena al
+    // siguiente de la cola). null = no se sabia: los reintentos van sin id, como siempre.
+    targetTurnId: targetTurnId || (prev ? prev.targetTurnId : null),
+    // el turno que se esta deteniendo: el que se apunto, o si no se sabia, el del primer estado «ocupada» que se vio
+    turnId: targetTurnId || (prev ? prev.turnId : null),
+  };
+  return _stopWatch;
+}
+
+function endStopWatch(watch) {
+  if (_stopWatch === watch) _stopWatch = null;
+}
+
+function noteStopUnreachable(watch) {
+  if (watch.unreachableNoted) return;
+  watch.unreachableNoted = true;
+  appendMessage("system-note", STOP_UNREACHABLE_NOTE, { persist: false });
+}
+
+// REQ-007: reintento del Detener cada ~STOP_WATCH_RETRY_MS mientras la sesion siga ocupada (o sin respuesta). Sin solapar pedidos: cada uno
+// tiene su plazo y el siguiente sale recien cuando el anterior termino (contesto, fallo o vencio).
+function retryStopIfDue(watch) {
+  if (watch.stopInFlight || Date.now() - watch.lastStopAt < STOP_WATCH_RETRY_MS) return;
+  watch.stopInFlight = true;
+  watch.lastStopAt = Date.now();
+  postStopRequest(watch.sessionId, watch.targetTurnId).finally(() => {
+    watch.stopInFlight = false;
+  });
+}
+
+async function watchStopUntilIdle(watch) {
+  const { sessionId } = watch;
+  const current = () => _stopWatch === watch && sessionId === state.sessionId;
+  let confirmingSince = 0; // cuando el boton dejo de decir «Deteniendo…» (0 = todavia lo dice)
+  try {
+    while (current()) {
+      await new Promise((resolve) => setTimeout(resolve, STOP_WATCH_INTERVAL_MS));
+      if (!current()) return;
+      if (sendOrStopBtnEl.dataset.state !== "stopping") {
+        // El boton ya volvio por otro camino (evento 'stopped'/'done', fin del stream, o se solto a los 30 s). Si nunca se aviso que Vision no
+        // respondia no queda nada que hacer; si se aviso, se espera a poder confirmarlo para cerrar ese aviso con «Listo…».
+        if (!watch.unreachableNoted) return;
+        if (!confirmingSince) confirmingSince = Date.now();
+        if (Date.now() - confirmingSince > STOP_CONFIRM_MAX_MS) return;
+      }
+      const status = await fetchStopWatchStatus(sessionId);
+      if (!current()) return;
+      // El estado del boton se vuelve a leer DESPUES de la consulta: un evento 'stopped'/'done' pudo llegar mientras tanto.
+      const stopping = sendOrStopBtnEl.dataset.state === "stopping";
+      if (status === null) {
+        if (!stopping) continue; // esperando a Vision solo para el «Listo…»
+        if (watch.unreachableSince === null) watch.unreachableSince = Date.now();
+        noteStopUnreachable(watch);
+        retryStopIfDue(watch); // «Sigo intentando…»: si Vision vuelve con el turno vivo, el pedido llega
+        if (Date.now() - watch.unreachableSince >= STOP_UNREACHABLE_RELEASE_MS) {
+          // Nunca «Deteniendo…» sin limite. Si esta pagina sigue recibiendo el turno (su stream abierto), el boton vuelve a «Detener» para
+          // poder intentarlo de nuevo; si no, a «Enviar». El vigilante sigue esperando a Vision para el «Listo…».
+          if (!watch.reloadNoted) {
+            watch.reloadNoted = true;
+            appendMessage("system-note", STOP_RELOAD_NOTE, { persist: false });
+          }
+          setSendButtonState(state.sending > 0 ? "active" : "idle");
+        }
+        continue;
+      }
+      watch.unreachableSince = null;
+      if (!status.busy) {
+        // La sesion quedo libre (o Vision volvio de un reinicio sin el turno): fin del Detener.
+        if (stopping) setSendButtonState("idle");
+        if (watch.unreachableNoted) appendMessage("system-note", STOP_RECOVERED_NOTE, { persist: false });
+        return;
+      }
+      // Ocupada. `active_turn_id` puede venir vacio un instante mientras el turno se cierra: eso no cambia nada.
+      const turnId = status.active_turn_id || null;
+      if (stopping && watch.turnId === null) watch.turnId = turnId;
+      const otherTurn = Boolean(turnId && watch.turnId && turnId !== watch.turnId);
+      if (otherTurn || (!stopping && !watch.turnId)) {
+        // Ocupada con OTRO turno (el siguiente de la cola, o un mensaje nuevo): ese no se frena. Si el boton seguia esperando, pasa a
+        // «Detener» del turno en curso (su stream lo va a seguir actualizando). Si solo se esperaba para el «Listo…» y no se sabe que turno
+        // es, tambien termina: Vision volvio y esta trabajando, no hay nada que confirmar.
+        if (stopping) setSendButtonState("active");
+        return;
+      }
+      if (stopping) retryStopIfDue(watch); // sigue ocupada con el MISMO turno: se reintenta (no una sola vez)
+    }
+  } finally {
+    endStopWatch(watch);
+  }
+}
+
 sendOrStopBtnEl.addEventListener("click", async (e) => {
   const currentState = sendOrStopBtnEl.dataset.state;
 
@@ -10853,37 +15008,64 @@ sendOrStopBtnEl.addEventListener("click", async (e) => {
 
   if (currentState !== "active") return; // "stopping": deshabilitado, no deberia llegar un click
 
+  const sessionId = state.sessionId;
   setSendButtonState("stopping");
-  try {
-    const resp = await apiFetch(`${API_BASE}/api/chat/${state.sessionId}/stop`, { method: "POST" });
-    // Bug real reportado por el usuario (2026-09-20): "el boton send-btn-
-    // label se queda en detener y luego en deteniendo... queda colgado
-    // ahi y no se detiene, tengo que refrescar". Causa raiz: el boton
-    // vuelve a "idle" SOLO cuando llega el evento SSE 'stopped' (comentario
-    // de abajo) -- pero `POST /api/chat/{id}/stop` (backend) devuelve
-    // `{"stopped": false, "reason": "no_active_turn"}` SIN emitir ningun
-    // evento SSE cuando `session.is_busy` YA es false en el momento en que
-    // llega el pedido (turno terminado solo justo antes del click, o
-    // condicion de carrera real con el loop autonomo terminando su ultimo
-    // turno). Ese evento 'stopped' que nunca iba a llegar dejaba el boton
-    // pegado en "Deteniendo…" para siempre. Confirmado en produccion: el
-    // usuario reporto ver `{"busy":false,...,"active_turn_id":null}` en
-    // /status justo cuando el boton seguia colgado. Fix: si el backend
-    // contesta `stopped: false` (nada que detener), no hay ningun evento
-    // que esperar -- se resetea el boton ACA mismo en vez de quedar
-    // esperando algo que nunca va a pasar.
-    const data = resp.ok ? await resp.json().catch(() => ({})) : {};
-    if (data.stopped === false) {
-      setSendButtonState("idle");
-    }
-    // Si `stopped: true`, el boton vuelve a "idle" cuando llega el evento
-    // 'stopped' (ver handleEvent) -- no aca, porque el backend puede
-    // tardar en cerrar limpio la tool en curso (REQ-001: "esperar cierre
-    // limpio").
-  } catch (err) {
-    console.warn("No se pudo pedir STOP:", err);
-    setSendButtonState("active"); // reintentable
+  // REQ-014 f: se frena el turno que el usuario esta viendo; si justo termino y arranco el siguiente de la cola, ese no se frena.
+  const targetTurnId = watchedTurnIdFor(sessionId);
+  const watch = startStopWatch(sessionId, targetTurnId);
+  const result = await postStopRequest(sessionId, targetTurnId);
+  // Mientras se esperaba la respuesta pudo pasar de todo: otro Detener o un cambio de sesion (manda ese otro vigilante, o ninguno)...
+  if (_stopWatch !== watch || sessionId !== state.sessionId) {
+    endStopWatch(watch);
+    return;
   }
+  // ...o el turno termino solo (el evento 'stopped'/'done' o el fin del stream ya devolvieron el boton): no hay nada que avisar. Solo se sigue
+  // esperando si un Detener anterior ya habia avisado «no responde», para cerrar ese aviso con «Listo…».
+  if (sendOrStopBtnEl.dataset.state !== "stopping") {
+    if (watch.unreachableNoted) watchStopUntilIdle(watch);
+    else endStopWatch(watch);
+    return;
+  }
+  // Bug real reportado por el usuario (2026-09-20): "el boton send-btn-
+  // label se queda en detener y luego en deteniendo... queda colgado
+  // ahi y no se detiene, tengo que refrescar". Causa raiz: el boton
+  // vuelve a "idle" SOLO cuando llega el evento SSE 'stopped' (comentario
+  // de abajo) -- pero `POST /api/chat/{id}/stop` (backend) devuelve
+  // `{"stopped": false, "reason": "no_active_turn"}` SIN emitir ningun
+  // evento SSE cuando `session.is_busy` YA es false en el momento en que
+  // llega el pedido (turno terminado solo justo antes del click, o
+  // condicion de carrera real con el loop autonomo terminando su ultimo
+  // turno). Ese evento 'stopped' que nunca iba a llegar dejaba el boton
+  // pegado en "Deteniendo…" para siempre. Confirmado en produccion: el
+  // usuario reporto ver `{"busy":false,...,"active_turn_id":null}` en
+  // /status justo cuando el boton seguia colgado. Fix: si el backend
+  // contesta `stopped: false` (nada que detener), no hay ningun evento
+  // que esperar -- se resetea el boton ACA mismo en vez de quedar
+  // esperando algo que nunca va a pasar.
+  if (result === "nothing") {
+    setSendButtonState("idle");
+    // REQ-007: si un Detener anterior habia avisado «no responde», Vision ya contesto y no tiene turno: se cierra ese aviso.
+    if (watch.unreachableNoted) appendMessage("system-note", STOP_RECOVERED_NOTE, { persist: false });
+    endStopWatch(watch);
+    return;
+  }
+  // REQ-014 f: el turno que el usuario miraba ya habia terminado y Vision esta con otro (el siguiente de la cola): ese no se frena. Se
+  // avisa, y el boton queda en «Detener» de ese otro turno si esta pagina lo esta recibiendo (el proximo Detener ya apunta a el).
+  if (result === "other-turn") {
+    appendMessage("system-note", STOP_OTHER_TURN_NOTE, { persist: false });
+    setSendButtonState(state.sending > 0 ? "active" : "idle");
+    endStopWatch(watch);
+    return;
+  }
+  // REQ-007: sin respuesta (plazo vencido o sin red) el boton NO vuelve a «Detener» como antes: el pedido pudo haber llegado y el turno
+  // puede estar cortandose. Se avisa una vez y el vigilante sigue consultando y reintentando.
+  if (result === "no-answer") {
+    watch.unreachableSince = watch.startedAt;
+    noteStopUnreachable(watch);
+  }
+  // Si `stopped: true`, el boton vuelve a "idle" cuando llega el evento 'stopped' (ver handleEvent) -- el backend puede tardar en cerrar
+  // limpio la tool en curso (REQ-001: "esperar cierre limpio") --, pero no se queda esperando SOLO ese evento: ver watchStopUntilIdle.
+  watchStopUntilIdle(watch);
 });
 
 // =========================================================================
@@ -10952,7 +15134,8 @@ const LOOP_ALARM_INTERVAL_KEY = "vision.loop.alarmInterval";
 const LOOP_ALARM_VOLUME_KEY = "vision.loop.alarmVolume";
 
 function _loopLs(key, def) {
-  try { const v = localStorage.getItem(key); return v === null ? def : v; } catch { return def; }
+  const v = readPreference(key);
+  return v === null ? def : v;
 }
 function loopAlarmType() { return _loopLs(LOOP_ALARM_TYPE_KEY, "beep"); }
 function loopAlarmIntervalMs() {
@@ -11449,6 +15632,9 @@ async function deleteUserMessage(messageId) {
     acceptLabel: "Eliminar",
   });
   if (!confirmed) return;
+  // REQ-014 b (spec fix-detener-y-progreso-visible): si su turno ya arranco (el modal seguia abierto cuando le toco), el backend lo frena
+  // y lo descarta; lo que llegue de ese turno ya no se guarda ni se lee (ver closeCurrentAssistantTurn).
+  _deletedTurnIds.add(messageId);
 
   const wrap = findUserTurnWrap(messageId);
   const container = wrap ? wrap.closest(".turn-container") : null;
@@ -11459,7 +15645,15 @@ async function deleteUserMessage(messageId) {
   if (idx !== -1) {
     let endIdx = idx + 1;
     while (endIdx < chatHistory.length && chatHistory[endIdx].role !== "user") endIdx += 1;
-    chatHistory.splice(idx, endIdx - idx);
+    // REQ-014 b (spec fix-detener-y-progreso-visible): un mensaje mandado mientras Vision trabajaba queda guardado ANTES de la respuesta
+    // del turno que seguia corriendo; si se borra despues de que arranco, esa respuesta (de OTRO turno, con su propio messageId) se
+    // conserva. Antes se iba con la poda y, al recargar, faltaba la respuesta anterior.
+    for (let i = endIdx - 1; i > idx; i -= 1) {
+      const entry = chatHistory[i];
+      if (entry.messageId && entry.messageId !== messageId) continue;
+      chatHistory.splice(i, 1);
+    }
+    chatHistory.splice(idx, 1);
     persistChatHistory();
   }
 
@@ -11519,9 +15713,17 @@ async function regenerateResponse(userTurnId, assistantMsgEl) {
     persistChatHistory();
   }
 
+  // adjuntar-archivos-chat REQ-003 e: volver a generar la respuesta reenvia TAMBIEN los archivos del
+  // mensaje (antes solo viajaba el texto y las imagenes, y el agente perdia las rutas). `userMsg.attachments`
+  // sale de chatHistory, que los guarda y los recupera tras recargar la pagina.
+  const resentFiles = Array.isArray(userMsg.attachments) ? userMsg.attachments.filter((f) => f && f.path) : [];
   await sendMessage(userMsg.text, {
     messageId: crypto.randomUUID(),
     images: userMsg.images,
+    attachments: resentFiles.length > 0
+      ? resentFiles.map((f) => ({ path: f.path, name: f.name, size: f.size, mime: f.mime, inplace: !!f.inplace }))
+      : null,
+    sentFiles: resentFiles.length > 0 ? resentFiles : null,
   });
 }
 
@@ -11621,7 +15823,7 @@ function markMessagesAfterAsStale(messageId, { removeThis = false } = {}) {
   // tool-call-rows intercaladas).
   clearMessagesDom();
   for (const entry of chatHistory) {
-    appendMessage(entry.role, entry.text, { persist: false, messageId: entry.messageId, time: entry.time, responseType: entry.responseType || null, technical: entry.technical || null, errorKind: entry.errorKind || null });
+    appendMessage(entry.role, entry.text, { persist: false, messageId: entry.messageId, time: entry.time, responseType: entry.responseType || null, technical: entry.technical || null, errorKind: entry.errorKind || null, attachments: entry.attachments || null });
   }
 }
 
@@ -11634,12 +15836,18 @@ function markMessagesAfterAsStale(messageId, { removeThis = false } = {}) {
 // de ESE mensaje (su turnContainer ya existe, reconstruido por
 // markMessagesAfterAsStale antes de llamar a esta funcion).
 async function attachToRelaunchedTurn(messageId) {
+  let attachedSessionId = null;
   try {
     setConnStatus("busy", "Vision está trabajando…");
     resetToolRow();
+    attachedSessionId = state.sessionId;
+    // Detener tajante: apenas se relanza el turno el boton tiene que decir «Detener». Antes quedaba en «Enviar» hasta el PRIMER evento del
+    // modelo (que puede tardar mucho): en ese lapso Vision estaba trabajando y el usuario no podia frenarlo. Igual que hace sendMessage().
+    if (sendOrStopBtnEl.dataset.state === "idle") setSendButtonState("active");
     const resp = await apiFetch(`${API_BASE}/api/chat/stream/${state.sessionId}`);
     await renderIncomingStream(resp, messageId);
   } finally {
     if (connStatusEl.dataset.state === "busy") setConnStatus("online", "Vision en línea");
+    settleSendButtonAfterAttach(attachedSessionId);
   }
 }

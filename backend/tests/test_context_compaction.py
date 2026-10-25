@@ -115,3 +115,41 @@ def test_maybe_compact_triggers_at_threshold(monkeypatch):
     messages = [_user("m" * 4_000)]  # 1000 tokens sobre una ventana de 1000 -> 100%
     assert asyncio.run(cp.maybe_compact("sid", messages, 1_000, "m")) is True
     assert called == ["sid"]
+
+
+# REQ-014 c (spec fix-detener-y-progreso-visible, revision): mientras se espera el resumen del modelo (18 s medidos) el usuario puede
+# borrar o editar historial viejo (el turno que compacta sigue corriendo). La compactacion no puede devolverle lo borrado a la memoria.
+def _history_with_old_and_recent():
+    system = {"role": "system", "content": "sys"}
+    filler = "r" * 12_000  # ~3000 tokens: el turno viejo no entra en el presupuesto reciente (2000)
+    return [system, _user("viejo"), _assistant(filler), _user("BORRAME"), _assistant("resp borrame"), _user("nuevo")]
+
+
+def test_a_recent_message_deleted_while_summarizing_does_not_come_back(monkeypatch):
+    messages = _history_with_old_and_recent()
+
+    async def fake_summarize(transcript: str, model: str) -> str:
+        del messages[3:5]  # el usuario borra el turno «BORRAME» mientras se espera el resumen
+        return "RESUMEN"
+
+    monkeypatch.setattr(cp, "_summarize", fake_summarize)
+
+    assert asyncio.run(cp.compact_session("s", messages, 1_000, "m")) is True
+    contents = [m["content"] for m in messages]
+    assert "BORRAME" not in contents and "resp borrame" not in contents, f"lo borrado volvio a la memoria: {contents}"
+    assert contents[0] == "sys" and "RESUMEN" in contents[1] and contents[2:] == ["nuevo"]
+
+
+def test_an_old_message_deleted_while_summarizing_discards_the_stale_summary(monkeypatch):
+    messages = _history_with_old_and_recent()
+
+    async def fake_summarize(transcript: str, model: str) -> str:
+        assert "Usuario: viejo" in transcript
+        del messages[1:5]  # el usuario borra «viejo» (y todo lo que seguia hasta el turno en curso)
+        return "RESUMEN que habla de viejo"
+
+    monkeypatch.setattr(cp, "_summarize", fake_summarize)
+
+    # El resumen ya no sirve (habla de lo que se borro): no se aplica y la lista queda como la dejo el borrado.
+    assert asyncio.run(cp.compact_session("s", messages, 1_000, "m")) is False
+    assert [m["content"] for m in messages] == ["sys", "nuevo"]

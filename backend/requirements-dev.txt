@@ -7,6 +7,7 @@
 pytest
 pytest-cov      # cobertura (config en backend/.coveragerc): pytest --cov
 pytest-timeout  # un test colgado falla con traceback en vez de trabar la corrida
+ruff            # lint (config en backend/ruff.toml): tests/test_lint_clean.py lo exige; sin esto el test se saltea en silencio
 # playwright (e2e en Chromium real, marcador `e2e`) viene de requirements.txt: desde
 # 2026-09-25 es dependencia de runtime (pedido del usuario). Una vez:
 #   .venv\Scripts\python.exe -m playwright install chromium

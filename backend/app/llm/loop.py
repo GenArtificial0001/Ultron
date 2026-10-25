@@ -35,11 +35,17 @@ import time
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime
+from pathlib import PureWindowsPath
 from typing import Any
 
 import openai
 
-from app.browser_workspace import get_or_create_browser_dir
+from app import attachments as attachments_module
+from app.browser_workspace import (
+    find_index_file,
+    get_browser_dir,
+    get_or_create_browser_dir,
+)
 from app.config import get_settings
 from app.friendly_errors import FriendlyError, describe_model_error, describe_step_limit
 from app.llm import model_fallback
@@ -51,15 +57,28 @@ from app.perf_log import TurnPerfRecorder
 from app.persistence import service as persistence
 from app.project_context import build_project_context_prompt
 from app.session.events import SessionState
-from app.tech_report import LiveNarrator, describe_call
+from app.tech_report import LEVEL_DETAILED, LiveNarrator, describe_call, normalize_level
+from app.token_estimate import estimate_tokens
 from app.tool_timings import describe_operation, get_budget_ms, record_duration
 from app.tools import get_registry
+from app.tools.base import CURRENT_TOOL_CALL_ID
 from app.tools.skill import list_available_skills_xml
 
 logger = logging.getLogger(__name__)
 
 MAX_STEPS = 100
 WARN_STEPS = 20
+
+# Detener TAJANTE (pedido del usuario 2026-10-05, «el boton Detener se queda pegado sin detener»): tras un Detener real las tools en curso tienen
+# este plazo (segundos) para cerrar limpio; pasado el plazo el bucle DEJA DE ESPERARLAS. Solo bash/glob/grep cortan su trabajo al ver `stop_requested`;
+# una consulta a Oracle/SAP/SharePoint/BigQuery o un webfetch es una llamada bloqueante en un hilo que nadie puede interrumpir. El hilo termina solo
+# (no se lo mata: no hay forma segura en Python) y su resultado se descarta. Una EDICION del mensaje NO usa esto: esa espera a las tools (REQ-004).
+STOP_GRACE_S = 2.0
+_STOP_POLL_S = 0.1
+_STOPPED_TOOL_RESULT = (
+    "[detenido por el usuario] Se dejo de esperar esta herramienta al presionar Detener. "
+    "Si ya habia empezado en el sistema externo puede terminar sola, pero su resultado no se usa."
+)
 
 # Bug real reportado por el usuario (2026-09-21, sesion "no ejecute la
 # busqueda" con NGAVS): el modelo puede terminar un paso emitiendo texto que
@@ -116,11 +135,7 @@ def _filter_marker_chunk(carry: str, chunk_text: str) -> tuple[str, str, str | N
     # Caso 1: el buffer YA tiene el prefijo fijo completo pero el label+"]]"
     # todavia no cerro -- sigue bufferizando desde ahi.
     fixed_idx = buf.rfind(_MARKER_PREFIX)
-    if (
-        fixed_idx != -1
-        and "]]" not in buf[fixed_idx:]
-        and len(buf) - fixed_idx < _MARKER_HOLDBACK_THRESHOLD
-    ):
+    if fixed_idx != -1 and "]]" not in buf[fixed_idx:] and len(buf) - fixed_idx < _MARKER_HOLDBACK_THRESHOLD:
         return buf[:fixed_idx], buf[fixed_idx:], found_type
 
     # Caso 2: el buffer TERMINA con un prefijo PARCIAL de "[[TIPO:" (desde un
@@ -194,7 +209,12 @@ def _friendly_event(friendly: FriendlyError, model: str | None = None) -> dict[s
     """Evento SSE `error` para un FriendlyError que no viene de una excepcion
     (ej. spec salto-automatico-modelos REQ-004: todos los modelos en pausa)."""
     when = datetime.now().astimezone().strftime("%H:%M:%S")
-    logger.warning("Turno sin modelo disponible [%s · %s]: %s", friendly.code, when, friendly.message)
+    logger.warning(
+        "Turno sin modelo disponible [%s · %s]: %s",
+        friendly.code,
+        when,
+        friendly.message,
+    )
     return {
         "type": "error",
         "data": {
@@ -206,7 +226,9 @@ def _friendly_event(friendly: FriendlyError, model: str | None = None) -> dict[s
 
 
 def _extra_params_for(
-    model: str, generation_params: dict[str, Any] | None, catalog: dict[str, dict[str, Any]]
+    model: str,
+    generation_params: dict[str, Any] | None,
+    catalog: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     """generation_params filtrados contra los `valid_args` REALES de `model`
     (cada modelo acepta un set distinto; ver `_filter_generation_params`). Sin
@@ -388,15 +410,41 @@ Panel de navegador integrado (vista previa en vivo):
 - Si el usuario pide un dashboard, una visualizacion, un prototipo web, o cualquier cosa \
  que tenga sentido "ver en un navegador", escribi los archivos ahi (con `write`/`edit`, o \
  generalos con `bash`) usando un `index.html` (o `dashboard.html`) como archivo de entrada. \
- Ese contenido se muestra en el panel "Navegador" de los accesos quick.
+ Ese contenido se muestra en el panel "Navegador Integrado" de los accesos rapidos.
 - IMPORTANTE (no lo silencies ni simules que ya se mostro): VOS NO PODES ABRIR ese panel -- \
- es UI del frontend que solo el usuario abre/cierra con el boton "Navegador" del panel de \
- accesos rapidos (o que el propio frontend abre solo cuando hay contenido nuevo). Cuando \
- termines de escribir el contenido, DECILE al usuario que lo abra/revise con el boton \
- "Navegador" en los accesos rapidos (no digas "ya se abrio" ni "ya esta visible"). El panel se \
- auto-actualiza solo una vez abierto; explicale que si no lo ve, presione el boton "Navegador".
+ es UI del frontend que solo el usuario abre/cierra con el boton "Navegador Integrado" del \
+ panel de accesos rapidos (o que el propio frontend lo abre solo la PRIMERA vez que este turno \
+ crea una pagina nueva -- actualizar una pagina existente no lo reabre solo). Cuando termines \
+ de escribir el contenido, DECILE al usuario que lo abra/revise con el boton "Navegador \
+ Integrado" en los accesos rapidos (no digas "ya se abrio" ni "ya esta visible"). El panel se \
+ auto-actualiza solo una vez abierto; explicale que si no lo ve, presione el boton "Navegador \
+ Integrado".
 - Ese contenido es TEMPORAL: vive mientras dure esta sesion de chat: se borra si el usuario \
  elimina la sesion o libera el cache. No es el lugar para guardar nada que deba persistir.
+
+Dashboard AUTONOMO para compartir sin conexion (tool `exportar_dashboard`):
+- Cuando termines de generar un dashboard, preguntale UNA sola vez con la tool `question` si quiere \
+ guardarlo en la carpeta `browser/` de la sesion para compartirlo sin conexion. Opciones del tipo \
+ "Si, guardarlo para compartir" / "No por ahora". NUNCA le pongas el sufijo "(Recomendada)" a ninguna: \
+ guardar es una decision del usuario y el Loop de Tareas no debe contestarla solo. Si dice que no, no \
+ vuelvas a preguntar por ese dashboard. Si el usuario pide exportarlo sin que preguntes, hacelo igual.
+- El HTML autonomo es UN solo archivo que abre con doble click, sin servidor ni red. Reglas: (1) CSS en \
+ <style> y JS en <script>, inline; (2) los datos van en `<script type="application/json" id="datos">` y \
+ se leen con `JSON.parse(document.getElementById("datos").textContent)`; dentro del JSON escribi `</` \
+ como `<\\/`; (3) PROHIBIDO `fetch(`, `XMLHttpRequest`, `import(`, `WebSocket`, `EventSource`; (4) \
+ PROHIBIDO cualquier `http://`, `https://` o `//` en src/href/url()/@import y cualquier archivo \
+ relativo; (5) NO uses CDN: para Chart.js pone `<script data-vendor="chart"></script>` y la tool lo \
+ reemplaza por la libreria de {vendor_dir} (no la copies vos); (6) NO uses `<script type="module">` con \
+ imports; (7) sin wrappers de JS invalidos como `(function(d)=>{{...}})(datos)`: usa funciones normales \
+ (`function main(datos) {{...}}`) o flechas bien formadas; (8) nunca incluyas contrasenas, tokens ni \
+ client_secret.
+- Para datasets grandes NO escribas los datos a mano (tu salida tiene tope de tokens): arma el HTML con un \
+ script de Python via `bash` que lea los datos y los embeba en el JSON.
+- Guarda el HTML armado con `write` o `bash` y llama a `exportar_dashboard(path, nombre)`. La tool lo \
+ valida abriendolo en un navegador real con la red bloqueada. Solo si devuelve `OK: <ruta>` decile al \
+ usuario que esta listo y pasale la ruta. Si devuelve `NO EXPORTADO: ...`, corregi el HTML segun los \
+ motivos y reintenta (maximo 2 veces); despues explicale el problema. NUNCA digas "listo para \
+ compartir" sin un OK de la tool.
 
 Como presentar tus capacidades cuando te preguntan "que podes hacer" o similar:
 - La skill de investigacion interna (Graph/SharePoint/directorio) sigue funcionando \
@@ -415,16 +463,20 @@ presentacion mas orientada a colaboracion que a "buscar todo sobre alguien".
 
 {skills_block}
 
-{project_context_block}"""
+{connections_block}{project_context_block}"""
+
+
+def _vendor_dir_for_prompt() -> str:
+    """REQ-005 (spec dashboards-autonomos-sesion): ruta absoluta de
+    `frontend/vendor/`, que el prompt le informa al modelo."""
+    from app.tools.dashboard_export import vendor_dir  # import diferido: evita ciclo
+
+    return str(vendor_dir())
 
 
 def _build_system_prompt(session_id: str) -> str:
     skills_xml = list_available_skills_xml(session_id)
-    skills_block = (
-        skills_xml
-        if skills_xml
-        else "(no hay skills locales cargadas en esta instalacion)"
-    )
+    skills_block = skills_xml if skills_xml else "(no hay skills locales cargadas en esta instalacion)"
     # Contexto de proyecto (carpeta PROPIA de esta sesion + SharePoint
     # global elegido desde Configuracion) -- ver app/project_context.py.
     # Se recalcula en cada nueva conversacion (no se cachea) para reflejar
@@ -435,19 +487,25 @@ def _build_system_prompt(session_id: str) -> str:
     # app/browser_workspace.py) -- se crea recien aca, la primera vez que
     # arranca una conversacion nueva, no antes.
     browser_dir = get_or_create_browser_dir(session_id)
-    # spec vision-generico REQ-005: el nombre de la empresa sale del .env.
-    company = get_settings().vision_company_name.strip()
+    # spec conexiones-con-nombre REQ-005: que conexiones hay (solo tipo y nombre, nunca campos ni valores). Vacio si no hay nada que elegir.
+    from app import (
+        connections as connections_module,
+    )  # import diferido: evita traer el registro de conexiones al importar el bucle
+
+    connections_text = connections_module.describe_for_prompt()
+    # spec vision-generico REQ-005: el nombre de la empresa sale de la configuracion.
+    company = (getattr(get_settings(), "vision_company_name", "") or "").strip()
     return SYSTEM_PROMPT_TEMPLATE.format(
+        connections_block=f"{connections_text}\n\n" if connections_text else "",
         company_clause=f" para {company}" if company else "",
         skills_block=skills_block,
         project_context_block=project_context,
         browser_dir=browser_dir,
+        vendor_dir=_vendor_dir_for_prompt(),
     )
 
 
-async def _stream_chat_completion(
-    client, session, **kwargs
-) -> AsyncGenerator[Any, None]:
+async def _stream_chat_completion(client, session, **kwargs) -> AsyncGenerator[Any, None]:
     """Puente sync->async: el SDK de OpenAI expone `stream=True` como un
     iterador SINCRONO. Iterarlo directo dentro de una funcion async
     bloquearia el event loop de FastAPI (nada mas podria atenderse
@@ -512,9 +570,7 @@ async def _stream_chat_completion(
         yield item
 
 
-def _filter_generation_params(
-    params: dict[str, Any] | None, valid_args: list[str]
-) -> dict[str, Any]:
+def _filter_generation_params(params: dict[str, Any] | None, valid_args: list[str]) -> dict[str, Any]:
     """Filtra generation_params contra los `valid_args` REALES del modelo
     activo (consultados en vivo via el proveedor de IA /models_metadata, ver
     app/main.py get_model_detail) -- nunca se manda un parametro que el
@@ -539,6 +595,37 @@ def _filter_generation_params(
     return out
 
 
+# REQ-003/010 (spec adjuntar-archivos-chat): campos de un adjunto que se
+# persisten en el part 'file' (el resto del dict del cliente se descarta).
+_FILE_PART_KEYS = (
+    "name",
+    "path",
+    "size",
+    "mime",
+    "kind",
+    "inplace",
+    "pages",
+    "token_estimate",
+)
+
+
+def _browser_index_snapshot(session_id: str) -> tuple[str | None, float | None]:
+    """REQ-002 (spec navegador-integrado-ventana): huella minima de la
+    pagina de entrada de la carpeta de vista previa (`backend/browser/
+    <session_id>/`) -- nombre del archivo + su mtime, o (None, None) si
+    todavia no hay ninguna. Se usa para comparar el estado ANTES/DESPUES
+    de un turno completo, sin importar que tool la creo (write/edit/bash),
+    a diferencia de detectar por tool individual."""
+    name = find_index_file(session_id)
+    if name is None:
+        return None, None
+    try:
+        mtime = (get_browser_dir(session_id) / name).stat().st_mtime
+    except OSError:
+        return None, None
+    return name, mtime
+
+
 async def run_turn(
     session: SessionState,
     user_message: str,
@@ -548,7 +635,9 @@ async def run_turn(
     user_message_id: str | None = None,
     images: list[str] | None = None,
     voice_confirm: bool = False,
+    attachments: list[dict[str, Any]] | None = None,
     narrate: bool = False,
+    narrate_level: str = "summary",
 ) -> AsyncGenerator[dict[str, Any], None]:
     """Wrapper fino de `_run_turn_impl` (ver su docstring para el
     comportamiento real del turno) -- investigacion de rendimiento 2026-09
@@ -559,9 +648,39 @@ async def run_turn(
     TODO el cuerpo de `_run_turn_impl` (que tiene varios `return` internos y
     un loop de hasta MAX_STEPS pasos) hubiera significado re-indentar una
     funcion de cientos de lineas; delegar a una funcion interna con un
-    unico punto de entrada/salida es mas seguro."""
+    unico punto de entrada/salida es mas seguro.
+
+    REQ-002/REQ-007 (spec navegador-integrado-ventana): ademas se toma una
+    huella de la pagina de entrada de la carpeta de vista previa ANTES de
+    ejecutar el turno y se compara DESPUES -- si no existia y ahora existe,
+    se yieldea (ver mas abajo) un evento 'browser-page-created' JUSTO ANTES
+    del evento terminal ('done'/'error'/'stopped'); si ya existia y cambio
+    de mtime, 'browser-page-updated'. Es DELIBERADAMENTE a nivel de TURNO
+    completo (no dentro de la tool `write`/`edit`/`bash`): la deteccion
+    debe disparar sin importar que tool escribio el archivo (ej. un script
+    de `bash` que corre `fig.write_html(...)` de plotly), y debe ignorar
+    reescrituras de una pagina que YA existia al empezar el turno (eso es
+    una actualizacion, REQ-007, no una pagina 'nueva' que amerite abrir el
+    panel solo -- la decision de abrir es 100% del usuario, REQ-001).
+
+    Bug real encontrado armando el test e2e (2026-09-28): la primera
+    implementacion empujaba este evento con `session.push_event` desde el
+    `finally`, DESPUES de que el evento 'done' ya habia sido reenviado a la
+    cola por `_launch_turn` (`app/main.py`) -- pero la conexion SSE que
+    espera UN turno puntual (`wait_for_turn_id`, el caso normal del POST
+    /api/chat) cierra la conexion apenas ve 'done', SIN drenar el resto de
+    la cola primero (a diferencia de una reconexion generica, que si
+    chequea `queue.empty()`). El evento nuevo llegaba a la cola, pero la
+    conexion ya se habia cerrado. Fix real: se yieldea DENTRO del propio
+    generador, intercalado justo ANTES del evento terminal -- el orden
+    exacto en el que `_launch_turn` los reenvia a la cola queda
+    garantizado: 'browser-page-created'/'browser-page-updated' primero,
+    'done' despues."""
     perf = TurnPerfRecorder(session_id, model or get_settings().llm_model)
     status = "done"
+    before_name, before_mtime = _browser_index_snapshot(session_id)
+    _TERMINAL_TYPES = ("done", "error", "stopped")
+    browser_event_emitted = False
     try:
         async for event in _run_turn_impl(
             session,
@@ -573,133 +692,264 @@ async def run_turn(
             user_message_id=user_message_id,
             images=images,
             voice_confirm=voice_confirm,
+            attachments=attachments,
             narrate=narrate,
+            narrate_level=narrate_level,
         ):
+            if event.get("type") in _TERMINAL_TYPES and not browser_event_emitted:
+                browser_event_emitted = True
+                after_name, after_mtime = _browser_index_snapshot(session_id)
+                if after_name is not None:
+                    if before_name is None:
+                        yield {
+                            "type": "browser-page-created",
+                            "data": {
+                                "file": after_name,
+                                "message_id": user_message_id,
+                            },
+                        }
+                    elif after_mtime != before_mtime:
+                        yield {
+                            "type": "browser-page-updated",
+                            "data": {
+                                "file": after_name,
+                                "message_id": user_message_id,
+                            },
+                        }
             yield event
     except BaseException:
         status = "error"
         raise
     finally:
         await asyncio.to_thread(perf.finish, status)
+        # Red de seguridad: si el turno termino SIN pasar por ninguno de los
+        # 3 tipos terminales de arriba (ej. limite de MAX_STEPS -- ese
+        # camino yieldea 'error' asi que ya esta cubierto, pero por si
+        # aparece otro final atipico en el futuro) el evento no se pierde,
+        # aunque en ese caso vuelve a depender de `push_event` (mejor
+        # esfuerzo, no garantiza el orden con un 'done' que ya se haya
+        # emitido por otra via).
+        if not browser_event_emitted:
+            after_name, after_mtime = _browser_index_snapshot(session_id)
+            if after_name is not None:
+                if before_name is None:
+                    session.push_event(
+                        "browser-page-created",
+                        {"file": after_name, "message_id": user_message_id},
+                    )
+                elif after_mtime != before_mtime:
+                    session.push_event(
+                        "browser-page-updated",
+                        {"file": after_name, "message_id": user_message_id},
+                    )
 
 
-async def _run_turn_impl(
-    session: SessionState,
-    user_message: str,
-    session_id: str,
-    perf: TurnPerfRecorder,
-    model: str | None = None,
-    generation_params: dict[str, Any] | None = None,
-    user_message_id: str | None = None,
-    images: list[str] | None = None,
-    voice_confirm: bool = False,
-    narrate: bool = False,
-) -> AsyncGenerator[dict[str, Any], None]:
-    """Ejecuta un turno completo del agente (potencialmente varias vueltas
-    de tool-calling) para un nuevo mensaje del usuario. Yields eventos
-    dict listos para serializar como SSE.
+def _empty_promise_correction() -> dict[str, str]:
+    """Mensaje 'system' que se inyecta cuando el modelo anuncio una accion sin
+    ejecutarla (bug real 2026-09-21).
 
-    `session_id`: usado solo para armar el system prompt la primera vez
-    (informarle al agente la ruta de su carpeta de vista previa en vivo,
-    ver app/browser_workspace.py) -- el historial/estado real vive en
-    `session` (SessionState), no aca.
-    `model`: id/alias del proveedor de IA a usar en ESTE turno (ver /api/models y el
-    selector del frontend). Si no se especifica, usa settings.llm_model
-    (el default fijado en .env).
-    `generation_params`: dict con temperature/top_p/max_tokens/
-    reasoning_effort/verbosity elegidos en Configuracion -- se filtran
-    contra los valid_args reales del modelo antes de mandarse (ver
-    _filter_generation_params).
-    `user_message_id` (persistencia-sqlite-sesiones REQ-002): id estable
-    del UserTurn (mismo id que usa parada-y-cola-mensajes) para persistir
-    el mensaje 'user' con un id predecible; si no se pasa (ej. llamadas
-    viejas/tests), se genera uno interno solo para esta sesion de proceso
-    -- no afecta el comportamiento en memoria, solo el id con el que
-    quedaria la fila en SQLite.
-    `images` (spec contexto-multimodal REQ-006): lista de data URIs
-    base64 (`data:image/jpeg;base64,...`) YA comprimidas por el frontend
-    (REQ-003) -- si viene no vacia, `session.messages` recibe un mensaje
-    'user' con `content` en formato LISTA (texto + N bloques image_url),
-    en vez del string plano de siempre. `user_message` (str) se mantiene
-    SIEMPRE como el texto plano por separado -- se sigue usando tal cual
-    para el autonombrado de sesion (REQ-006 gestion-sesiones) y otros usos
-    que asumen texto, sin tener que tocarlos.
-    `voice_confirm` (spec asistente-contextual-voz REQ-006/009/011): True
-    cuando este turno se origino en una intervencion del modo Cerebro
-    (conversacion por voz continua). Activa 2 comportamientos exclusivos
-    de ese modo, sin afectar el chat de texto normal (False, default):
-    (1) REQ-011: se le agrega al modelo una instruccion de como actuar
-    ante una transcripcion de voz ambigua (preguntar en vez de asumir al
-    azar, salvo que pueda inferir razonablemente que se le pide). (2)
-    REQ-009: si el modelo pide ejecutar una tool `dangerous=True` (bash/
-    write/edit), esta funcion la INTERCEPTA antes de `registry.dispatch`
-    -- no la ejecuta, le devuelve al modelo un resultado de tool
-    indicandole que debe preguntar "¿estas seguro?" en su respuesta (que
-    se lee por TTS) y guarda esa tool pendiente en
-    `session.voice_pending_confirmation`. La SIGUIENTE vez que este mismo
-    `session_id` reciba un turno con `voice_confirm=True` (la respuesta
-    hablada del usuario a esa pregunta), esta funcion detecta la
-    confirmacion pendiente, la limpia, y bypassea la interceptacion por
-    UNA sola vuelta de tool-calling -- si el modelo interpreto la
-    respuesta como afirmativa, vuelve a pedir la misma tool y esta vez SI
-    se ejecuta; si la interpreto como negativa, simplemente no la vuelve
-    a pedir (la interpretacion de la respuesta es tarea del LLM, no de
-    este codigo -- ver instruccion inyectada mas abajo)."""
-    settings = get_settings()
-    registry = get_registry()
+    Va como 'system' y no como 'user' para que nunca parezca que lo escribio el
+    usuario: la PROXIMA llamada del mismo turno lo ve y no puede repetir la
+    promesa vacia sin violar una instruccion explicita."""
+    return {
+        "role": "system",
+        "content": (
+            "[Corrección automática de Vision] Tu respuesta anterior "
+            "solo tenía texto anunciando una acción (buscar, cargar "
+            "el plan, ejecutar algo), pero NO llamaste a ninguna "
+            "herramienta real -- ni siquiera `todowrite`. Esto está "
+            "PROHIBIDO: nunca anuncies una acción sin ejecutarla en "
+            "el mismo turno. No pidas disculpas ni repitas la "
+            "promesa en texto: emití AHORA la tool-call real "
+            "(`todowrite` primero, si el pedido es planificable), "
+            "sin más texto de anuncio antes."
+        ),
+    }
 
-    # Catalogo de VisionLLM (valid_args de cada modelo, alias, aptitud para datos
-    # secretos) -- reusa el cache de app.main; si la consulta falla se sigue sin
-    # catalogo, para no romper el chat por un problema transitorio de
-    # /models_metadata.
-    catalog: dict[str, dict[str, Any]] = {}
-    try:
-        from app.main import _MODELS_CACHE, list_models  # import diferido: evita ciclo
 
-        if _MODELS_CACHE.get("by_id") is None:
-            # Investigacion de rendimiento 2026-09: list_models() hace un GET
-            # sincronico al proveedor de IA (/models_metadata) -- sin to_thread, esto
-            # bloqueaba el event loop entero (todas las sesiones) cada vez
-            # que el cache de 5 min expiraba, no solo esta sesion.
-            await asyncio.to_thread(list_models)
-        catalog = _MODELS_CACHE.get("by_id") or {}
-    except Exception:
-        logger.debug("No se pudo cargar el catalogo de modelos del proveedor de IA", exc_info=True)
-
-    # spec salto-automatico-modelos: con el salto activo, el modelo de CADA paso
-    # lo elige el picker (REQ-002/003/004/009): el elegido a mano en el selector,
-    # o el primero de la lista en modo Automatico, y si esta en pausa el
-    # siguiente. Apagado (default), todo sigue como siempre (REQ-006).
-    # spec varios-proveedores REQ-004/007: todo modelo viaja como
-    # "proveedor/modelo" (uno sin prefijo es del proveedor principal).
-    from app.main import default_model_id  # import diferido: evita ciclo
-
-    model = llm_providers.canonical(model) if model else None
-    fallback_settings = model_fallback.load_settings()
-    picker = (
-        model_fallback.TurnModelPicker(fallback_settings, model, default_model_id(settings.llm_model), catalog)
-        if fallback_settings.enabled
-        else None
+def _plan_first_message(tool_name: str) -> str:
+    """Resultado que ve el modelo cuando pide una tool de accion sin haber
+    cargado antes el plan con `todowrite` (Regla N°1, ver `_PLAN_FIRST_TOOLS`).
+    La tool NO se ejecuta: este texto ocupa el lugar de su resultado."""
+    return (
+        f"[Regla de planificacion (pedido del usuario)] Aun no hay un "
+        f"plan de tareas cargado, y queres ejecutar `{tool_name}`. La regla es "
+        f"inflexible: PRIMERO EL PLAN, DESPUES EJECUTA. Cargá el plan "
+        f"completo con la tool `todowrite` (los pasos concretos de ESTE "
+        f"proceso: conectarse a la fuente, analizar/ubicar las tablas, "
+        f"buscar los datos, resumir la respuesta) y recién después ejecuta "
+        f"`{tool_name}`. No ejecutes ninguna accion antes de tener el plan."
     )
-    active_model = picker.home if picker is not None else (model or default_model_id(settings.llm_model))
-    extra_params = _extra_params_for(active_model, generation_params, catalog)
 
-    # persistencia-sqlite-sesiones: el system prompt NUNCA se persiste en
-    # SQLite (se reconstruye siempre en vivo, ver _build_system_prompt --
-    # asi refleja el contexto de proyecto/skills actual, no uno viejo
-    # congelado). Por eso el chequeo no puede ser "session.messages esta
-    # vacio" cuando la sesion se recupera desde disco (REQ-003): en ese
-    # caso session.messages YA tiene mensajes viejos pero NINGUNO es
-    # 'system' -- sin este chequeo explicito, el modelo perderia sus
-    # instrucciones en cualquier sesion recuperada tras un reinicio.
-    if not any(m.get("role") == "system" for m in session.messages):
-        _sysprompt_start = time.monotonic()
-        session.messages.insert(
-            0, {"role": "system", "content": _build_system_prompt(session_id)}
-        )
-        perf.mark_system_prompt_built((time.monotonic() - _sysprompt_start) * 1000)
 
-    user_msg_id = user_message_id or str(uuid.uuid4())
+# REQ-009 (asistente-contextual-voz): resultado que ve el modelo en lugar de la
+# ejecucion real de una tool peligrosa pedida desde el Modo Cerebro. No se
+# ejecuta nada; el modelo debe preguntar "¿estas seguro?" en su respuesta, que
+# se lee por voz, y esperar la contestacion del usuario.
+_VOICE_CONFIRM_REQUIRED_MESSAGE = (
+    "[Confirmación requerida, Modo Cerebro] Esta herramienta es "
+    "potencialmente peligrosa (modifica archivos o ejecuta comandos) y "
+    "esta intervención viene de una conversación por voz. Todavía NO se "
+    "ejecutó. En tu respuesta de texto (que el usuario va a escuchar por "
+    "voz), preguntale explícitamente si confirma que querés proceder "
+    "(ej. '¿Estás seguro de que querés que haga esto?') y esperá su "
+    "respuesta antes de intentar de nuevo esta herramienta."
+)
+
+
+# REQ-003 (spec fix-detener-y-progreso-visible): mientras el modelo escribe los argumentos de una tool-call (el `tool-call` recien sale
+# al FINAL del stream) se avisa a la pantalla con `tool-writing` -- caso real medido: un `write` de 15 KB tardo ~69 s sin ningun evento,
+# con la tarjeta quieta en «Ejecutando comando… 91%». Un aviso apenas se conoce el nombre y despues, a lo sumo, uno cada este intervalo
+# por tool-call (y solo si llegaron caracteres nuevos): la pantalla ve crecer el tamaño sin inundar el stream con un evento por fragmento.
+TOOL_WRITING_INTERVAL_S = 0.5
+
+# Valor COMPLETO del argumento "path"/"file_path" dentro del JSON parcial de los argumentos. Exige que la clave venga despues de `{` o
+# `,` (fuera de cualquier string: adentro de un string JSON todas las comillas van escapadas, `\"path\"`, asi que un "path" escrito en
+# el CONTENIDO del archivo nunca coincide) y que el valor ya haya cerrado su comilla. Lineal: sin retroceso catastrofico.
+_ARG_PATH_RE = re.compile(r'[{,]\s*"(?:path|file_path)"\s*:\s*"((?:[^"\\]|\\.)*)"')
+_MAX_WRITING_PATH_CHARS = 200
+
+
+def _partial_args_basename(partial_args: str) -> str | None:
+    """REQ-003: nombre del archivo (basename) que el modelo esta escribiendo, sacado del JSON PARCIAL de los argumentos; None si
+    todavia no llego entero o no hay. Nunca lanza: es solo un dato para la pantalla."""
+    match = _ARG_PATH_RE.search(partial_args)
+    if match is None:
+        return None
+    try:
+        value = json.loads(f'"{match.group(1)}"')
+    except ValueError:
+        return None
+    # PureWindowsPath entiende "\" y "/" como separador (el modelo usa cualquiera de los dos, en cualquier sistema).
+    name = PureWindowsPath(value).name if isinstance(value, str) else ""
+    return name[:_MAX_WRITING_PATH_CHARS] or None
+
+
+class _ToolWritingNotices:
+    """REQ-003: decide cuando avisar `tool-writing` para cada tool-call del paso (por su `index` en el stream). Un objeto por paso."""
+
+    def __init__(self) -> None:
+        self._last_at: dict[int, float] = {}
+        self._last_chars: dict[int, int] = {}
+        self._path: dict[int, str] = {}
+
+    def event_for(self, idx: int, entry: dict[str, Any]) -> dict[str, Any] | None:
+        if not entry["name"]:
+            return None  # sin nombre todavia no hay nada que mostrar
+        chars = len(entry["arguments"])
+        now = time.monotonic()
+        last_at = self._last_at.get(idx)
+        if last_at is not None and (chars == self._last_chars.get(idx) or now - last_at < TOOL_WRITING_INTERVAL_S):
+            return None
+        self._last_at[idx], self._last_chars[idx] = now, chars
+        path = self._path.get(idx)
+        if path is None:
+            path = _partial_args_basename(entry["arguments"])
+            if path is not None:
+                self._path[idx] = path  # una vez completo no cambia: no se vuelve a buscar
+        return {
+            "type": "tool-writing",
+            "data": {"id": entry["id"], "name": entry["name"], "chars": chars, "path": path},
+        }
+
+
+def _thinking_label(step: int, turn_had_tools: bool) -> str:
+    """REQ-002 (spec fix-detener-y-progreso-visible): texto de la espera al modelo en CADA paso. Antes de la primera herramienta es
+    «Pensando…» (tambien si se repite el paso por un salto de modelo o una edicion); despues de un resultado, el numero de paso humano."""
+    if step == 0 or not turn_had_tools:
+        return "Pensando…"
+    return f"Pensando el próximo paso… (paso {step + 1})"
+
+
+def _operation_key(call: dict[str, Any]) -> str:
+    """Clave con la que se busca el tiempo historico de una tool-call.
+
+    Casi siempre es el nombre de la tool; para `skill` es `skill:<nombre>`, el
+    mismo criterio que usa `app/tools/skill.py` al registrar la duracion real
+    (spec barra-progreso-adaptativa REQ-002/004/005). Si los argumentos no son
+    un JSON valido se usa el nombre de la tool, sin fallar."""
+    key = call["name"]
+    if key == "skill":
+        try:
+            skill_name = json.loads(call["arguments"] or "{}").get("name", "")
+            if skill_name:
+                key = f"skill:{skill_name}"
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    return key
+
+
+async def _gather_tools_stoppable(session: SessionState, coros: list[Any]) -> list[str]:
+    """Como `asyncio.gather` de las tool-calls de un paso, pero un Detener real corta la espera.
+
+    Sin Detener se comporta IGUAL que antes (espera a todas). Con un Detener real (`stop_requested` sin `edit_pending_text`) las tools que sigan
+    corriendo tienen `STOP_GRACE_S` segundos para cerrar limpio; las que no, quedan con `_STOPPED_TOOL_RESULT` y el turno sigue hacia `stopped`.
+    Las tareas abandonadas NO se cancelan con `.cancel()` (AGENTS.md: cancelacion cooperativa): se les agrega un callback que consume su
+    resultado o excepcion, para que no queden «exception never retrieved» en el log, y terminan solas."""
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    stop_deadline: float | None = None
+    while True:
+        pending = [t for t in tasks if not t.done()]
+        if not pending:
+            break
+        real_stop = session.stop_requested and session.edit_pending_text is None
+        if real_stop and stop_deadline is None:
+            stop_deadline = time.monotonic() + STOP_GRACE_S
+        if stop_deadline is not None and time.monotonic() >= stop_deadline:
+            break
+        await asyncio.wait(pending, timeout=_STOP_POLL_S, return_when=asyncio.ALL_COMPLETED)
+    results: list[str] = []
+    for task in tasks:
+        if task.done():
+            results.append(task.result())
+        else:
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            results.append(_STOPPED_TOOL_RESULT)
+    return results
+
+
+def _assistant_tool_message(assistant_text: str, ordered_calls: list[dict[str, Any]]) -> dict[str, Any]:
+    """Mensaje 'assistant' en formato OpenAI con las tool_calls del paso.
+    `content` queda en None si el modelo no escribio texto antes de pedirlas."""
+    return {
+        "role": "assistant",
+        "content": assistant_text or None,
+        "tool_calls": [
+            {
+                "id": call["id"],
+                "type": "function",
+                "function": {"name": call["name"], "arguments": call["arguments"]},
+            }
+            for call in ordered_calls
+        ],
+    }
+
+
+def _apply_message_edit(session: SessionState) -> dict[str, Any]:
+    """Aplica la edicion pedida del mensaje en curso y devuelve el evento
+    `message-edited` para el frontend (REQ-004, parada-y-cola-mensajes).
+
+    Una edicion tambien marca `stop_requested`, pero con `edit_pending_text`: no
+    es un STOP real. Se reemplaza el mensaje `user` de este turno EN EL LUGAR,
+    dejando intactos los tool_calls y resultados ya generados, y el bucle
+    sigue llamando al modelo con ese historial para que reuse lo que pueda.
+    Lo usan los dos puntos donde el bucle detecta el pedido: entre pasos y al
+    cortar el streaming. Exige `edit_pending_text` no nulo (el llamador lo chequea)."""
+    new_text = session.edit_pending_text or ""  # el `or ""` solo calma al tipador
+    session.stop_requested = False
+    session.edit_pending_text = None
+    session.replace_active_user_message(new_text)
+    return {"type": "message-edited", "data": {"text": new_text}}
+
+
+def _persist_user_text(
+    session_id: str,
+    user_message: str,
+    attachments: list[dict[str, Any]] | None,
+    user_msg_id: str,
+    active_model: str,
+) -> None:
+    """Asegura la sesion en SQLite, la autonombra si todavia no tiene nombre y guarda el texto LIMPIO del mensaje del usuario."""
     persistence.ensure_session(session_id, model=active_model)
     # gestion-sesiones REQ-006: mismo criterio "primeras palabras del
     # primer mensaje" que ya usa el frontend (touchCurrentSessionInIndex
@@ -716,10 +966,37 @@ async def _run_turn_impl(
     # titulo "Nueva sesion - <timestamp>" sin poder autonombrarse nunca).
     if user_message.strip():
         persistence.maybe_autoname_session(session_id, user_message[:40])
+    elif attachments:
+        # REQ-003 d: sin texto, el autonombrado usa el nombre del primer archivo.
+        persistence.maybe_autoname_session(session_id, attachments_module.autoname_from(attachments)[:40])
     persistence.record_message_start(session_id, user_msg_id, "user")
-    persistence.record_part_start(
-        session_id, user_msg_id, str(uuid.uuid4()), "text", {"text": user_message}
-    )
+    persistence.record_part_start(session_id, user_msg_id, str(uuid.uuid4()), "text", {"text": user_message})
+
+
+def _append_user_message(
+    session: SessionState,
+    session_id: str,
+    user_message: str,
+    user_msg_id: str,
+    images: list[str] | None,
+    attachments: list[dict[str, Any]] | None,
+) -> None:
+    """Agrega al historial el mensaje del usuario tal como lo ve el MODELO (texto + aviso de adjuntos; con imagenes, una lista de
+    bloques) y persiste cada adjunto y cada imagen como su propio part. El texto persistido sigue limpio."""
+    # REQ-003 (spec adjuntar-archivos-chat): el aviso de rutas lo arma el
+    # BACKEND y se agrega SOLO al contenido que ve el LLM; el texto persistido
+    # y mostrado (`user_message`) queda limpio (REQ-003 a). Cada adjunto se
+    # persiste como su propio part 'file' (REQ-010), asi el aviso se rearma tras
+    # un reinicio (`db.load_messages`).
+    llm_user_text = attachments_module.with_notice(user_message, attachments) if attachments else user_message
+    for att in attachments or []:
+        persistence.record_part_start(
+            session_id,
+            user_msg_id,
+            str(uuid.uuid4()),
+            "file",
+            {k: v for k, v in att.items() if k in _FILE_PART_KEYS},
+        )
 
     if images:
         # REQ-006/008: content en formato lista -- un bloque de texto (aun
@@ -727,10 +1004,10 @@ async def _run_turn_impl(
         # "text":""} junto a imagenes es valido pero innecesario) seguido
         # de un bloque image_url por imagen, SIEMPRE base64 inline (nunca
         # URL externa -- esa variante es exclusiva de OpenAI, rechazada
-        # por Gemini/Claude/on-prem segun la la documentacion del proveedor).
+        # por Gemini/Claude/on-prem segun la skill skill-interna).
         content_blocks: list[dict[str, Any]] = []
-        if user_message:
-            content_blocks.append({"type": "text", "text": user_message})
+        if llm_user_text:
+            content_blocks.append({"type": "text", "text": llm_user_text})
         for data_uri in images:
             content_blocks.append({"type": "image_url", "image_url": {"url": data_uri}})
         session.messages.append({"role": "user", "content": content_blocks})
@@ -743,12 +1020,17 @@ async def _run_turn_impl(
         # les agrega soporte explicito para que sea funcional de punta a
         # punta (ver app/persistence/db.py y transcript.py).
         for data_uri in images:
-            persistence.record_part_start(
-                session_id, user_msg_id, str(uuid.uuid4()), "image", {"url": data_uri}
-            )
+            persistence.record_part_start(session_id, user_msg_id, str(uuid.uuid4()), "image", {"url": data_uri})
     else:
-        session.messages.append({"role": "user", "content": user_message})
+        session.messages.append({"role": "user", "content": llm_user_text})
 
+
+def _voice_and_narration_instruction(
+    session: SessionState, voice_confirm: bool, narrate: bool, narrate_level: str
+) -> tuple[str, bool, str]:
+    """Instrucciones extra que se le suman al mensaje segun el modo (Modo Cerebro, respuesta hablada a una confirmacion pendiente,
+    informe tecnico hablado) y deja `session.narrate`/`narrate_level` al dia. Devuelve `(instruccion, voice_confirm_bypass,
+    narrate_level_normalizado)`. Consume `session.voice_pending_confirmation`: una confirmacion nunca sobrevive mas de 1 turno."""
     # REQ-009 (spec asistente-contextual-voz): si habia una tool peligrosa
     # esperando confirmacion hablada Y este turno tambien viene del modo
     # Cerebro (la respuesta hablada del usuario a "¿estas seguro?"), se
@@ -804,6 +1086,8 @@ async def _run_turn_impl(
     # el recorrido en vivo) y `todowrite` anuncia el avance del plan. Mismo
     # mecanismo que la instruccion del Modo Cerebro: va en el mensaje del turno.
     session.narrate = narrate
+    narrate_level = normalize_level(narrate_level)
+    session.narrate_level = narrate_level
     if narrate:
         voice_confirm_instruction += (
             "\n\n[Informe técnico hablado] El usuario escucha en voz alta lo que hacés: cuando escribas "
@@ -811,26 +1095,181 @@ async def _run_turn_impl(
             "hace y dónde va (HTML <!-- -->, JS/CSS // o /* */, Python #, SQL --), incluidas las "
             "conexiones a bases de datos o APIs."
         )
-    if voice_confirm_instruction:
-        # Se agrega como continuacion del ULTIMO mensaje user recien
-        # insertado (arriba) -- funciona tanto para el formato string
-        # plano como para el formato lista con imagenes (se agrega un
-        # bloque de texto adicional en ese caso, nunca se pisa el ya
-        # existente).
-        last = session.messages[-1]
-        if isinstance(last.get("content"), list):
-            last["content"].append(
-                {"type": "text", "text": voice_confirm_instruction.strip()}
+        # REQ-015 (reapertura 2): en el nivel Detallado se comenta TODO y se abre con el diseno.
+        if narrate_level == LEVEL_DETAILED:
+            voice_confirm_instruction += (
+                " Nivel detallado: comentá TODO el código, cada bloque, no solo las secciones: cada "
+                "etiqueta de estructura (encabezado, menú, contenido, pie de página), cada regla o grupo "
+                "de estilos y cada función, con una línea corta en español que diga qué hace y por qué. "
+                "Si armás una página o un dashboard, abrí el archivo con un comentario de cabecera que "
+                "cuente el diseño y qué va a mostrar (indicadores, gráficos, filtros); es lo primero que "
+                "el usuario va a escuchar."
             )
-        else:
-            last["content"] = (last.get("content") or "") + voice_confirm_instruction
+    return voice_confirm_instruction, voice_confirm_bypass, narrate_level
 
-    # REQ-001/004: se limpia cualquier stop pendiente de un turno anterior
-    # (ej. si este mismo run_turn es el reinicio disparado por editar un
-    # mensaje en curso -- ver app/main.py endpoint PATCH de mensaje).
-    session.stop_requested = False
-    session.edit_pending_text = None
 
+def _append_to_last_user_message(session: SessionState, instruction: str) -> None:
+    """Suma `instruction` como continuacion del ULTIMO mensaje de usuario recien agregado: con `content` string se concatena; con
+    la lista de bloques de imagenes se agrega un bloque de texto, sin pisar los existentes."""
+    # Se agrega como continuacion del ULTIMO mensaje user recien
+    # insertado (arriba) -- funciona tanto para el formato string
+    # plano como para el formato lista con imagenes (se agrega un
+    # bloque de texto adicional en ese caso, nunca se pisa el ya
+    # existente).
+    last = session.messages[-1]
+    if isinstance(last.get("content"), list):
+        last["content"].append({"type": "text", "text": instruction.strip()})
+    else:
+        last["content"] = (last.get("content") or "") + instruction
+
+
+def _record_user_turn(
+    session: SessionState,
+    session_id: str,
+    user_message: str,
+    active_model: str,
+    user_message_id: str | None,
+    images: list[str] | None,
+    attachments: list[dict[str, Any]] | None,
+    voice_confirm: bool,
+    narrate: bool,
+    narrate_level: str,
+) -> tuple[bool, str]:
+    """Registra el mensaje del usuario en el historial y en SQLite, y le agrega
+    las instrucciones propias de cada modo (voz, informe tecnico hablado).
+
+    Es la primera mitad de `_run_turn_impl`, sacada a su propia funcion (BL-024
+    fase 2) sin cambiar su comportamiento: no hace `yield` ni llama al modelo,
+    solo prepara el estado del turno. Devuelve `(voice_confirm_bypass,
+    narrate_level)`:
+    - `voice_confirm_bypass`: True si este turno es la respuesta hablada a una
+      confirmacion pendiente (el bucle no debe volver a interceptar la tool).
+    - `narrate_level`: el nivel ya normalizado, que el bucle usa despues para
+      crear los narradores en vivo."""
+
+    user_msg_id = user_message_id or str(uuid.uuid4())
+    _persist_user_text(session_id, user_message, attachments, user_msg_id, active_model)
+    _append_user_message(session, session_id, user_message, user_msg_id, images, attachments)
+    voice_confirm_instruction, voice_confirm_bypass, narrate_level = _voice_and_narration_instruction(
+        session, voice_confirm, narrate, narrate_level
+    )
+    if voice_confirm_instruction:
+        _append_to_last_user_message(session, voice_confirm_instruction)
+
+    return voice_confirm_bypass, narrate_level
+
+
+async def _load_model_catalog() -> dict[str, dict[str, Any]]:
+    """Catalogo del proveedor de IA (`valid_args`, alias, aptitud de cada modelo) desde el cache de `app.main`. Si la consulta falla devuelve
+    lo que haya (`{}`): el chat sigue sin catalogo, o sea sin parametros opcionales, en vez de romperse por un problema transitorio
+    de `/models_metadata`."""
+    # Catalogo del proveedor de IA (valid_args de cada modelo, alias, aptitud para datos
+    # secretos) -- reusa el cache de app.main; si la consulta falla se sigue sin
+    # catalogo, para no romper el chat por un problema transitorio de
+    # /models_metadata.
+    catalog: dict[str, dict[str, Any]] = {}
+    try:
+        from app.main import _MODELS_CACHE, list_models  # import diferido: evita ciclo
+
+        if _MODELS_CACHE.get("by_id") is None:
+            # Investigacion de rendimiento 2026-09: list_models() hace un GET
+            # sincronico al proveedor de IA (/models_metadata) -- sin to_thread, esto
+            # bloqueaba el event loop entero (todas las sesiones) cada vez
+            # que el cache de 5 min expiraba, no solo esta sesion.
+            await asyncio.to_thread(list_models)
+        catalog = _MODELS_CACHE.get("by_id") or {}
+    except Exception:
+        logger.debug("No se pudo cargar el catalogo de modelos del proveedor de IA", exc_info=True)
+    return catalog
+
+
+def _ensure_system_prompt(session: SessionState, session_id: str, perf: TurnPerfRecorder) -> None:
+    """Pone el system prompt como PRIMER mensaje si la sesion no lo tiene (sesion nueva o recuperada de SQLite tras un reinicio)."""
+    # persistencia-sqlite-sesiones: el system prompt NUNCA se persiste en
+    # SQLite (se reconstruye siempre en vivo, ver _build_system_prompt --
+    # asi refleja el contexto de proyecto/skills actual, no uno viejo
+    # congelado). Por eso el chequeo no puede ser "session.messages esta
+    # vacio" cuando la sesion se recupera desde disco (REQ-003): en ese
+    # caso session.messages YA tiene mensajes viejos pero NINGUNO es
+    # 'system' -- sin este chequeo explicito, el modelo perderia sus
+    # instrucciones en cualquier sesion recuperada tras un reinicio.
+    if not any(m.get("role") == "system" for m in session.messages):
+        _sysprompt_start = time.monotonic()
+        session.messages.insert(0, {"role": "system", "content": _build_system_prompt(session_id)})
+        perf.mark_system_prompt_built((time.monotonic() - _sysprompt_start) * 1000)
+
+
+def _prune_history_best_effort(session: SessionState, active_model: str) -> dict:
+    """spec aviso-compactacion-automatica REQ-001/002: poda los resultados viejos de herramientas si la conversacion llego al umbral y dice
+    que paso (`action` = none | pruned | needs_summary, con `before_pct`/`after_pct`/`window`). NO llama al modelo y NUNCA lanza: ante
+    cualquier problema devuelve `none` y el turno sigue como siempre. Va ANTES de `_compact_history_best_effort` para poder avisar antes de
+    la espera del resumen (caso real 2026-10-24: una sesion al 100 % quedo en 43 % sin aviso porque solo se podo)."""
+    from app.main import resolve_context_window  # import diferido: evita ciclo
+    from app.session.compaction import prepare_compaction
+
+    try:
+        window = resolve_context_window(active_model)
+        report = prepare_compaction(session.messages, window)
+    except Exception:  # noqa: BLE001 -- avisar es accesorio: jamas corta el turno
+        logger.warning("No se pudo podar el historial de la sesion antes del turno", exc_info=True)
+        return {"action": "none", "before_pct": 0, "after_pct": 0, "window": 0}
+    return {**report, "window": window}
+
+
+def _compaction_notice(kind: str, report: dict, after_pct: int | None = None) -> str:
+    """Los textos que ve la persona al compactar (spec aviso-compactacion-automatica REQ-004..008): sin jerga ni codigos."""
+    if kind == "start":
+        return "Estoy resumiendo la conversación para poder seguir (ya es muy larga). Puede tardar unos segundos."
+    if kind == "pruned":
+        return (
+            "Limpié los resultados viejos de las herramientas para liberar espacio: la conversación pasó de "
+            f"{report['before_pct']}% a {report['after_pct']}% de lo que el modelo puede leer. Si necesitás alguno, pedímelo de nuevo."
+        )
+    if kind == "summarized":
+        return (
+            "Resumí la parte más vieja de esta conversación para poder seguir (ya era muy larga): pasó de "
+            f"{report['before_pct']}% a {after_pct}% de lo que el modelo puede leer. Lo importante se conserva."
+        )
+    return "No pude resumir la conversación esta vez; sigo con lo que hay. Si el modelo la rechaza por larga, escribí /compact o /clear."
+
+
+async def _compaction_events(
+    session: SessionState, session_id: str, active_model: str, picker: model_fallback.TurnModelPicker | None
+) -> AsyncGenerator[dict, None]:
+    """Poda/compacta el historial antes del turno y AVISA a la persona (spec aviso-compactacion-automatica REQ-004..007).
+
+    - `pruned` (la poda de resultados viejos alcanzo): UNA nota con los porcentajes, sin nota de inicio.
+    - `needs_summary`: nota de inicio ANTES de pedir el resumen (la espera dura segundos), y despues la de cierre, o la de «no pude» si el
+      resumen no se hizo; el turno sigue igual (nunca se corta).
+    - `none`: nada que avisar. Si de todos modos algo compacto (`maybe_compact` devuelve True), se avisa como siempre.
+    Los avisos son accesorios (no se guardan en el historial) y la logica de compactar no cambia: sigue siendo `_compact_history_best_effort`."""
+    report = _prune_history_best_effort(session, active_model)
+    action = report["action"]
+    if action == "pruned":
+        yield {"type": "system-note", "data": {"text": _compaction_notice("pruned", report)}}
+    elif action == "needs_summary":
+        yield {"type": "system-note", "data": {"text": _compaction_notice("start", report)}}
+
+    compacted = await _compact_history_best_effort(session, session_id, active_model, picker)
+
+    if compacted:
+        # REQ-014 b (spec fix-detener-y-progreso-visible): la compactacion rearma `session.messages` (resumen nuevo + turnos
+        # recientes) y deja el mensaje de este turno al final. Lo de ANTES de este turno pasa a ser todo lo demas: si el
+        # usuario borra este mensaje, se descarta solo lo suyo (sin esto se podia llevar el resumen de toda la conversacion).
+        if getattr(session, "turn_baseline", None) is not None:
+            session.turn_baseline = list(session.messages[:-1])
+        window = report.get("window") or 0
+        after = round(estimate_tokens(session.messages) / window * 100) if window else report["after_pct"]
+        yield {"type": "system-note", "data": {"text": _compaction_notice("summarized", report, after)}}
+    elif action == "needs_summary":
+        yield {"type": "system-note", "data": {"text": _compaction_notice("failed", report)}}
+
+
+async def _compact_history_best_effort(
+    session: SessionState, session_id: str, active_model: str, picker: model_fallback.TurnModelPicker | None
+) -> bool:
+    """Poda y compacta el historial si supera el 85% del contexto del modelo activo. Mejor esfuerzo: si falla, el turno sigue sin
+    compactar (el resumen se pide ANTES de tocar el historial, asi que no queda nada a medias). Devuelve si compacto."""
     # spec gestion-contexto-conversacion REQ-001: antes de la primera
     # llamada al LLM, poda y compacta si el historial supera el 85% del
     # contexto del modelo activo.
@@ -847,9 +1286,7 @@ async def _run_turn_impl(
     # tocar el historial, asi que no queda nada a medias).
     compact_model = picker.first_available() if picker is not None else active_model
     try:
-        compacted = await maybe_compact(
-            session_id, session.messages, context_window, compact_model
-        )
+        compacted = await maybe_compact(session_id, session.messages, context_window, compact_model)
     except Exception as exc:  # noqa: BLE001 -- compactar es mejor esfuerzo, nunca corta el turno
         compacted = False
         if picker is not None:
@@ -860,14 +1297,140 @@ async def _run_turn_impl(
             compact_model,
             exc,
         )
-    if compacted:
-        yield {
-            "type": "system-note",
-            "data": {
-                "text": "Resumí la parte más vieja de esta conversación para poder seguir "
-                "(ya era muy larga). Lo importante se conserva."
-            },
-        }
+    return compacted
+
+
+async def _run_turn_impl(
+    session: SessionState,
+    user_message: str,
+    session_id: str,
+    perf: TurnPerfRecorder,
+    model: str | None = None,
+    generation_params: dict[str, Any] | None = None,
+    user_message_id: str | None = None,
+    images: list[str] | None = None,
+    voice_confirm: bool = False,
+    attachments: list[dict[str, Any]] | None = None,
+    narrate: bool = False,
+    narrate_level: str = "summary",
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Ejecuta un turno completo del agente (potencialmente varias vueltas
+    de tool-calling) para un nuevo mensaje del usuario. Yields eventos
+    dict listos para serializar como SSE.
+
+    `session_id`: usado solo para armar el system prompt la primera vez
+    (informarle al agente la ruta de su carpeta de vista previa en vivo,
+    ver app/browser_workspace.py) -- el historial/estado real vive en
+    `session` (SessionState), no aca.
+    `model`: id/alias del proveedor de IA a usar en ESTE turno (ver /api/models y el
+    selector del frontend). Si no se especifica, usa settings.llm_model
+    (el default fijado en .env).
+    `generation_params`: dict con temperature/top_p/max_tokens/
+    reasoning_effort/verbosity elegidos en Configuracion -- se filtran
+    contra los valid_args reales del modelo antes de mandarse (ver
+    _filter_generation_params).
+    `user_message_id` (persistencia-sqlite-sesiones REQ-002): id estable
+    del UserTurn (mismo id que usa parada-y-cola-mensajes) para persistir
+    el mensaje 'user' con un id predecible; si no se pasa (ej. llamadas
+    viejas/tests), se genera uno interno solo para esta sesion de proceso
+    -- no afecta el comportamiento en memoria, solo el id con el que
+    quedaria la fila en SQLite.
+    `images` (spec contexto-multimodal REQ-006): lista de data URIs
+    base64 (`data:image/jpeg;base64,...`) YA comprimidas por el frontend
+    (REQ-003) -- si viene no vacia, `session.messages` recibe un mensaje
+    'user' con `content` en formato LISTA (texto + N bloques image_url),
+    en vez del string plano de siempre. `user_message` (str) se mantiene
+    SIEMPRE como el texto plano por separado -- se sigue usando tal cual
+    para el autonombrado de sesion (REQ-006 gestion-sesiones) y otros usos
+    que asumen texto, sin tener que tocarlos.
+    `voice_confirm` (spec asistente-contextual-voz REQ-006/009/011): True
+    cuando este turno se origino en una intervencion del modo Cerebro
+    (conversacion por voz continua). Activa 2 comportamientos exclusivos
+    de ese modo, sin afectar el chat de texto normal (False, default):
+    (1) REQ-011: se le agrega al modelo una instruccion de como actuar
+    ante una transcripcion de voz ambigua (preguntar en vez de asumir al
+    azar, salvo que pueda inferir razonablemente que se le pide). (2)
+    REQ-009: si el modelo pide ejecutar una tool `dangerous=True` (bash/
+    write/edit), esta funcion la INTERCEPTA antes de `registry.dispatch`
+    -- no la ejecuta, le devuelve al modelo un resultado de tool
+    indicandole que debe preguntar "¿estas seguro?" en su respuesta (que
+    se lee por TTS) y guarda esa tool pendiente en
+    `session.voice_pending_confirmation`. La SIGUIENTE vez que este mismo
+    `session_id` reciba un turno con `voice_confirm=True` (la respuesta
+    hablada del usuario a esa pregunta), esta funcion detecta la
+    confirmacion pendiente, la limpia, y bypassea la interceptacion por
+    UNA sola vuelta de tool-calling -- si el modelo interpreto la
+    respuesta como afirmativa, vuelve a pedir la misma tool y esta vez SI
+    se ejecuta; si la interpreto como negativa, simplemente no la vuelve
+    a pedir (la interpretacion de la respuesta es tarea del LLM, no de
+    este codigo -- ver instruccion inyectada mas abajo)."""
+    # MAPA DEL TURNO (BL-024): esta funcion es larga a proposito porque es un
+    # generador que comparte estado entre fases (`yield` no se puede repartir en
+    # sub-funciones sin reescribir el protocolo de eventos). Las fases, en orden:
+    #   1. Preparacion: catalogo de modelos, picker del salto automatico, system
+    #      prompt, mensaje del usuario (`_record_user_turn`) y compactacion.
+    #   2. Bucle `for _step in range(MAX_STEPS)`, una vuelta por llamada al modelo:
+    #      a. chequeo de stop/edicion entre pasos (`_apply_message_edit`);
+    #      b. eleccion del modelo del paso (picker) y aviso `model-switch`;
+    #      c. streaming: texto (filtrando el marcador `[[TIPO: ...]]`), tool-calls
+    #         acumuladas y narracion en vivo; reintento unico ante 401 y salto al
+    #         siguiente modelo si falla antes de responder;
+    #      d. sin tool-calls: promesa vacia (reintento) o cierre con `done`;
+    #      e. con tool-calls: se ejecutan en paralelo (`_dispatch_or_intercept`,
+    #         que aplica la regla de plan primero y la confirmacion por voz).
+    #   3. Si se agotan los pasos: evento `error` de limite (nunca silencio).
+    # Invariante: cada turno termina con UN solo evento terminal
+    # (`done`, `error` o `stopped`); lo fija `tests/test_loop_characterization.py`.
+    settings = get_settings()
+    registry = get_registry()
+
+    catalog = await _load_model_catalog()
+
+    # spec salto-automatico-modelos: con el salto activo, el modelo de CADA paso
+    # lo elige el picker (REQ-002/003/004/009): el elegido a mano en el selector,
+    # o el primero de la lista en modo Automatico, y si esta en pausa el
+    # siguiente. Apagado (default), todo sigue como siempre (REQ-006).
+    # spec varios-proveedores REQ-004/007: todo modelo viaja como
+    # "proveedor/modelo" (uno sin prefijo es del proveedor principal).
+    from app.main import default_model_id  # import diferido: evita ciclo
+
+    model = llm_providers.canonical(model) if model else None
+    fallback_settings = model_fallback.load_settings()
+    picker = (
+        model_fallback.TurnModelPicker(fallback_settings, model, default_model_id(settings.llm_model), catalog)
+        if fallback_settings.enabled
+        else None
+    )
+    active_model = picker.home if picker is not None else (model or default_model_id(settings.llm_model))
+    extra_params = _extra_params_for(active_model, generation_params, catalog)
+    session.active_model = active_model  # REQ-006: lo lee la tool `read`
+
+    _ensure_system_prompt(session, session_id, perf)
+
+    voice_confirm_bypass, narrate_level = _record_user_turn(
+        session,
+        session_id,
+        user_message,
+        active_model,
+        user_message_id,
+        images,
+        attachments,
+        voice_confirm,
+        narrate,
+        narrate_level,
+    )
+
+    # REQ-001/004: se limpia cualquier stop pendiente de un turno anterior
+    # (ej. si este mismo run_turn es el reinicio disparado por editar un
+    # mensaje en curso -- ver app/main.py endpoint PATCH de mensaje).
+    # REQ-014 b (spec fix-detener-y-progreso-visible): salvo que el usuario ya haya BORRADO este mensaje (el borrado llego entre
+    # que el turno salio de la cola y este punto): ese Detener es de ESTE turno y no se pierde -- sin esto el turno se
+    # respondia entero aunque el usuario lo hubiera borrado.
+    session.stop_requested = user_message_id is not None and user_message_id in getattr(session, "discard_turn_ids", ())
+    session.edit_pending_text = None
+
+    async for notice in _compaction_events(session, session_id, active_model, picker):
+        yield notice
 
     # REQ-002 (spec clasificador-tipo-respuesta): filtro del marcador
     # `[[TIPO: xxx]]` -- ver `_filter_marker_chunk` para el detalle. `_carry`
@@ -912,11 +1475,7 @@ async def _run_turn_impl(
                 # CONTINUA el mismo loop llamando de nuevo al LLM con ese
                 # historial enriquecido. El modelo ve su propio progreso
                 # previo y decide que reusar.
-                new_text = session.edit_pending_text
-                session.stop_requested = False
-                session.edit_pending_text = None
-                session.replace_active_user_message(new_text)
-                yield {"type": "message-edited", "data": {"text": new_text}}
+                yield _apply_message_edit(session)
                 continue
 
             # STOP real (no edicion): no se agrega nada falso al historial
@@ -957,6 +1516,7 @@ async def _run_turn_impl(
                 return
             if _step == 0 or choice.model != active_model or choice.notice:
                 active_model = choice.model or active_model
+                session.active_model = active_model  # REQ-006: lo lee la tool `read`
                 extra_params = _extra_params_for(active_model, generation_params, catalog)
                 yield {
                     "type": "model-switch",
@@ -984,32 +1544,44 @@ async def _run_turn_impl(
         # tool-call conocida), nunca antes, para no dejar filas vacias.
         assistant_msg_id = str(uuid.uuid4())
         text_part_id = str(uuid.uuid4())
-        text_part_started = False
+        # Dos banderas, no una (bug real, auditoria 2026-10-08): con una sola, si el
+        # modelo pedia una tool ANTES de escribir texto en el mismo paso, el part de
+        # texto nunca se insertaba y su update final caia sobre un id inexistente --
+        # ese texto no quedaba en SQLite y no volvia tras recargar ni reiniciar.
+        assistant_msg_started = False  # fila `message` del assistant de este paso ya insertada
+        text_part_started = False  # part 'text' de este paso ya insertado
         tool_part_ids: dict[str, str] = {}
 
         # REQ-002 (spec barra-progreso-adaptativa): estimacion generica de
-        # "pensando" antes de la primera llamada al LLM de este turno --
-        # solo en _step==0 (las vueltas posteriores de tool-calling ya
-        # tienen su propio progress-estimate por tool, ver mas abajo). Se
-        # guarda `thinking_start` para registrar la duracion real cuando
-        # este primer paso termine (con o sin tool-calls).
-        thinking_start = None
-        if _step == 0:
-            thinking_start = time.monotonic()
-            # to_thread: get_budget_ms lee tool_timings.json del disco en
-            # cada llamada (sin cache en memoria) -- sin esto bloqueaba el
-            # event loop compartido por I/O de disco chica pero constante.
-            budget_ms, has_history = await asyncio.to_thread(get_budget_ms, "thinking")
-            yield {
-                "type": "progress-estimate",
-                "data": {
-                    "id": "thinking",
-                    "operation": "thinking",
-                    "label": "Pensando…",
-                    "budget_ms": budget_ms,
-                    "has_history": has_history,
-                },
-            }
+        # "pensando" antes de cada llamada al LLM. Se guarda `thinking_start`
+        # para registrar la duracion real cuando el PRIMER paso termine (con
+        # o sin tool-calls).
+        # REQ-002 (spec fix-detener-y-progreso-visible): antes se emitia SOLO
+        # en _step==0, y la espera al modelo entre pasos (el tramo mas largo
+        # del turno real del 2026-10-11) se veia como «Ejecutando comando…»
+        # de un comando que ya habia terminado. Ahora va en TODOS los pasos
+        # («Pensando el próximo paso… (paso N)» despues de un resultado), con
+        # el mismo presupuesto "thinking". Solo se REGISTRA la duracion del
+        # paso 0, como siempre: no se cambia que se mide, para no mezclar en
+        # la estimacion el primer paso (prompt entero) con los siguientes.
+        thinking_start = time.monotonic() if _step == 0 else None
+        # to_thread: get_budget_ms lee tool_timings.json del disco en
+        # cada llamada (sin cache en memoria) -- sin esto bloqueaba el
+        # event loop compartido por I/O de disco chica pero constante.
+        budget_ms, has_history = await asyncio.to_thread(get_budget_ms, "thinking")
+        yield {
+            "type": "progress-estimate",
+            "data": {
+                "id": "thinking",
+                "operation": "thinking",
+                "label": _thinking_label(_step, turn_had_tools),
+                "step": _step + 1,
+                "budget_ms": budget_ms,
+                "has_history": has_history,
+            },
+        }
+        # REQ-003 (spec fix-detener-y-progreso-visible): avisos de «escribiendo los argumentos» de este paso.
+        writing_notices = _ToolWritingNotices()
 
         # Reintenta UNA vez ante 401: el token cacheado del SDK del proveedor de IA
         # puede invalidarse antes de su TTL nominal (revocacion de sesion
@@ -1017,14 +1589,25 @@ async def _run_turn_impl(
         # references/troubleshooting.md "401 / access token errors"). En
         # ese caso se fuerza un cliente con token nuevo y se reintenta el
         # mismo request antes de rendirse y mostrarle el error al usuario.
-        for attempt in range(2):
+        # REQ-002 (spec fix-corte-proveedor): y repite UNA vez el paso si el proveedor de IA corta la conexion a mitad de la
+        # respuesta antes de que el usuario haya visto texto de este paso (caso real 2026-10-14: RemoteProtocolError
+        # 2 min 30 s despues de empezar a responder). Son dos reintentos independientes -- por eso banderas propias en
+        # vez del `range(2)` de antes --: el del corte NO pide token nuevo y es con el MISMO modelo (no pasa por el
+        # salto automatico: un corte no es un limite ni una caida del modelo, ver model_fallback.TRIGGER_CODES).
+        refresh_token = False
+        retried_401 = False
+        retried_cut = False
+        # REQ-003 (spec fix-corte-proveedor): estado de TURNO que un intento cortado pudo tocar sin mostrar nada (un
+        # marcador `[[TIPO:` a medio llegar); el reintento arranca desde aca, como si el intento cortado no hubiera existido.
+        carry_at_step_start, response_type_at_step_start = _carry, response_type
+        while True:
             # to_thread: en cache-miss (cada ~30min, o al forzar refresh tras
             # un 401), get_client hace un POST sincronico de OAuth a Azure AD
             # -- bloquearia el event loop entero mientras dura ese request.
             try:
                 # spec varios-proveedores REQ-005: el cliente del proveedor de
                 # ESTE paso (el salto puede cambiar de proveedor a mitad del turno).
-                client = await asyncio.to_thread(get_client, force_refresh=(attempt == 1), model=active_model)
+                client = await asyncio.to_thread(get_client, force_refresh=refresh_token, model=active_model)
             except Exception as exc:  # noqa: BLE001 -- login/red ANTES de hablar con el modelo
                 # Antes quedaba fuera de todo try: sin VPN o con el login de
                 # el proveedor de IA roto, la excepcion subia hasta el turno en background
@@ -1040,9 +1623,7 @@ async def _run_turn_impl(
                 # REQ-005 (spec salto-automatico-modelos): copia con ids de
                 # tool-call que el modelo destino acepta; session.messages no
                 # se toca (Gemini necesita los suyos originales).
-                messages=history_for_model(
-                    session.messages, model_fallback.resolve(active_model, catalog)[0]
-                ),
+                messages=history_for_model(session.messages, model_fallback.resolve(active_model, catalog)[0]),
                 # spec modo-plan-loop REQ-002/003: en Modo Plan, write/edit/
                 # bash quedan AUSENTES del payload -- se resuelve en CADA
                 # llamada (no una vez al arrancar el turno) por si el modo
@@ -1050,11 +1631,7 @@ async def _run_turn_impl(
                 # final_step: se pasa SIN tools para que el modelo concluya
                 # en texto (ver comentario arriba) y el turno no muera
                 # agotando MAX_STEPS con un error.
-                tools=(
-                    None
-                    if final_step
-                    else registry.definitions(exclude_dangerous=session.mode == "plan")
-                ),
+                tools=(None if final_step else registry.definitions(exclude_dangerous=session.mode == "plan")),
                 stream=True,
                 **extra_params,
             )
@@ -1088,9 +1665,7 @@ async def _run_turn_impl(
                         # el marcador crudo, sin importar cuantas veces el
                         # modelo lo re-emita en este turno ni si cae partido
                         # entre dos chunks.
-                        chunk_text, _carry, found_type = _filter_marker_chunk(
-                            _carry, delta.content
-                        )
+                        chunk_text, _carry, found_type = _filter_marker_chunk(_carry, delta.content)
                         if found_type and response_type is None:
                             response_type = found_type
                             yield {
@@ -1109,9 +1684,9 @@ async def _run_turn_impl(
                             # (mensaje 'assistant' + part 'text' vacio) --
                             # si el proceso crashea a mitad del streaming,
                             # ya queda registrado que el turno arranco.
-                            persistence.record_message_start(
-                                session_id, assistant_msg_id, "assistant"
-                            )
+                            if not assistant_msg_started:
+                                persistence.record_message_start(session_id, assistant_msg_id, "assistant")
+                                assistant_msg_started = True
                             persistence.record_part_start(
                                 session_id,
                                 assistant_msg_id,
@@ -1125,18 +1700,14 @@ async def _run_turn_impl(
                             # persistirlo en la fila `message.response_type` para
                             # que el badge sobreviva a una recarga del historial.
                             if response_type:
-                                persistence.update_message_response_type(
-                                    session_id, assistant_msg_id, response_type
-                                )
+                                persistence.update_message_response_type(session_id, assistant_msg_id, response_type)
                         assistant_text += chunk_text
                         yield {"type": "text-delta", "data": {"text": chunk_text}}
 
                     if delta and delta.tool_calls:
                         for tc in delta.tool_calls:
                             idx = tc.index
-                            entry = tool_calls_acc.setdefault(
-                                idx, {"id": "", "name": "", "arguments": ""}
-                            )
+                            entry = tool_calls_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
                             if tc.id:
                                 entry["id"] = tc.id
                                 if entry["id"] not in tool_part_ids:
@@ -1145,11 +1716,9 @@ async def _run_turn_impl(
                                     # el nombre/argumentos todavia pueden
                                     # llegar incompletos, se actualizan
                                     # despues del REQ-005 de tool-result.
-                                    if not text_part_started:
-                                        persistence.record_message_start(
-                                            session_id, assistant_msg_id, "assistant"
-                                        )
-                                        text_part_started = True
+                                    if not assistant_msg_started:
+                                        persistence.record_message_start(session_id, assistant_msg_id, "assistant")
+                                        assistant_msg_started = True
                                     part_id = str(uuid.uuid4())
                                     tool_part_ids[entry["id"]] = part_id
                                     persistence.record_part_start(
@@ -1171,12 +1740,25 @@ async def _run_turn_impl(
                                     # REQ-008: recorrido en vivo del codigo
                                     # mientras el modelo lo escribe.
                                     if narrate and entry["name"]:
-                                        narrator = live_narrators.setdefault(idx, LiveNarrator(entry["name"]))
+                                        narrator = live_narrators.setdefault(
+                                            idx, LiveNarrator(entry["name"], level=narrate_level)
+                                        )
                                         for spoken in narrator.feed(tc.function.arguments):
                                             yield {
                                                 "type": "narration",
-                                                "data": {"text": spoken, "call_id": entry["id"]},
+                                                "data": {
+                                                    "text": spoken,
+                                                    "call_id": entry["id"],
+                                                    # REQ-015: la presentacion del diseno no se descarta.
+                                                    "lead": spoken == narrator.lead_phrase,
+                                                },
                                             }
+                                # REQ-003 (spec fix-detener-y-progreso-visible): «Escribiendo <archivo>… N KB»
+                                # mientras llegan los argumentos (uno al conocerse el nombre, despues a lo sumo
+                                # cada TOOL_WRITING_INTERVAL_S). No toca la persistencia ni la narracion de arriba.
+                                writing_event = writing_notices.event_for(idx, entry)
+                                if writing_event is not None:
+                                    yield writing_event
                 else:
                     # `for...else`: corre si el loop termino SIN pasar por
                     # el `break` de arriba -- incluye el caso nuevo donde
@@ -1191,7 +1773,9 @@ async def _run_turn_impl(
                         stopped_mid_stream = True
                 break  # stream completo sin error -> no reintentar
             except openai.AuthenticationError as exc:
-                if attempt == 0:
+                if not retried_401:
+                    retried_401 = True
+                    refresh_token = True
                     logger.warning(
                         "el proveedor de IA devolvio 401, reintentando con token refrescado: %s",
                         exc,
@@ -1199,6 +1783,7 @@ async def _run_turn_impl(
                     assistant_text = ""
                     tool_calls_acc = {}
                     live_narrators = {}
+                    writing_notices = _ToolWritingNotices()
                     continue
                 yield _model_error_event(
                     exc,
@@ -1221,9 +1806,40 @@ async def _run_turn_impl(
                     )
                     jump_to_next_model = True
                     break
-                yield _model_error_event(
-                    exc, active_model, session.messages, "Error llamando al proveedor de IA"
-                )
+                # REQ-002/003 (spec fix-corte-proveedor): el proveedor de IA corto la conexion a mitad de la respuesta. Se repite el
+                # paso UNA vez solo si el usuario todavia no vio texto de este paso (`text_part_started`: se marca justo
+                # antes del primer `text-delta`; repetir despues duplicaria lo que ya leyo) y no apreto Detener. Puede
+                # haber quedado una tool-call a medio llegar: nunca se ejecuto (las tools corren recien con el stream
+                # completo), asi que basta con olvidarla aca y en SQLite.
+                if (
+                    not retried_cut
+                    and not text_part_started
+                    and not session.stop_requested
+                    and describe_model_error(exc, active_model).code == "MODELO-CORTE"
+                ):
+                    retried_cut = True
+                    refresh_token = False  # el token no tuvo nada que ver
+                    logger.warning(
+                        "Corte del proveedor de IA a mitad de la respuesta; reintento 1 (modelo %s): %s",
+                        active_model,
+                        exc,
+                    )
+                    if assistant_msg_started:
+                        # Sin texto, la fila solo tiene las tool-calls del intento cortado: se borra (sus parts caen
+                        # en cascada) y el reintento usa un id nuevo, asi no quedan parts huerfanas ni dobles. La cola
+                        # de escritura es una sola y en orden: el borrado llega antes que lo que inserte el reintento.
+                        persistence.delete_message(session_id, assistant_msg_id)
+                        assistant_msg_id = str(uuid.uuid4())
+                        assistant_msg_started = False
+                    tool_part_ids = {}
+                    assistant_text = ""
+                    tool_calls_acc = {}
+                    live_narrators = {}
+                    writing_notices = _ToolWritingNotices()
+                    finish_reason = None
+                    _carry, response_type = carry_at_step_start, response_type_at_step_start
+                    continue
+                yield _model_error_event(exc, active_model, session.messages, "Error llamando al proveedor de IA")
                 return
 
         if jump_to_next_model:
@@ -1232,13 +1848,14 @@ async def _run_turn_impl(
             picker.mark_used(active_model)
 
         # REQ-001: registra cuanto tardo REALMENTE el "pensar" de este
-        # primer paso (con o sin tool-calls, terminado o interrumpido) --
-        # se hace ANTES de los returns/continue de abajo para no
-        # duplicarlo, y solo si de verdad se midio (_step==0).
-        if thinking_start is not None:
-            await asyncio.to_thread(
-                record_duration, "thinking", (time.monotonic() - thinking_start) * 1000
-            )
+        # primer paso (con o sin tool-calls) -- se hace ANTES de los
+        # returns/continue de abajo para no duplicarlo, y solo si de verdad
+        # se midio (_step==0).
+        # REQ-006 (spec fix-detener-y-progreso-visible): un "pensar" CORTADO
+        # (Detener o edicion a mitad del stream) no es una duracion real y no
+        # se registra: ensuciaba la estimacion de los proximos turnos.
+        if thinking_start is not None and not stopped_mid_stream:
+            await asyncio.to_thread(record_duration, "thinking", (time.monotonic() - thinking_start) * 1000)
 
         if stopped_mid_stream:
             # Se corto el streaming de texto por un STOP/edicion -- el
@@ -1248,11 +1865,7 @@ async def _run_turn_impl(
             # turno). Se re-chequea `edit_pending_text` para diferenciar
             # STOP real de edicion, igual que en el chequeo de arriba.
             if session.edit_pending_text is not None:
-                new_text = session.edit_pending_text
-                session.stop_requested = False
-                session.edit_pending_text = None
-                session.replace_active_user_message(new_text)
-                yield {"type": "message-edited", "data": {"text": new_text}}
+                yield _apply_message_edit(session)
                 continue
             yield {"type": "stopped", "data": {"reason": "user_requested"}}
             return
@@ -1265,10 +1878,8 @@ async def _run_turn_impl(
         if response_type is None:
             response_type = "planificable" if turn_had_tools else "conversacional"
             yield {"type": "response-type", "data": {"response_type": response_type}}
-            if text_part_started:
-                persistence.update_message_response_type(
-                    session_id, assistant_msg_id, response_type
-                )
+            if assistant_msg_started:  # la fila existe (con texto o solo con tools)
+                persistence.update_message_response_type(session_id, assistant_msg_id, response_type)
 
         if not tool_calls_acc:
             # Bug real 2026-09-21 (sesion "no ejecute la busqueda" con
@@ -1286,16 +1897,10 @@ async def _run_turn_impl(
             # ejecuto nada real todavia" -- no hace falta parsear el texto
             # en busca de frases como "voy a"/"ahora si" (fragil, atado al
             # idioma/estilo del modelo).
-            empty_promise = (
-                response_type == "planificable"
-                and not turn_had_tools
-                and not final_step
-            )
+            empty_promise = response_type == "planificable" and not turn_had_tools and not final_step
             if empty_promise and empty_promise_retries < _MAX_EMPTY_PROMISE_RETRIES:
                 empty_promise_retries += 1
-                session.messages.append(
-                    {"role": "assistant", "content": assistant_text}
-                )
+                session.messages.append({"role": "assistant", "content": assistant_text})
                 if text_part_started:
                     persistence.record_part_end(
                         session_id,
@@ -1307,22 +1912,7 @@ async def _run_turn_impl(
                 # PROXIMA llamada al modelo, en el mismo turno, vea la
                 # correccion y no pueda repetir la misma promesa vacia sin
                 # violar una instruccion explicita.
-                session.messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "[Corrección automática de Vision] Tu respuesta anterior "
-                            "solo tenía texto anunciando una acción (buscar, cargar "
-                            "el plan, ejecutar algo), pero NO llamaste a ninguna "
-                            "herramienta real -- ni siquiera `todowrite`. Esto está "
-                            "PROHIBIDO: nunca anuncies una acción sin ejecutarla en "
-                            "el mismo turno. No pidas disculpas ni repitas la "
-                            "promesa en texto: emití AHORA la tool-call real "
-                            "(`todowrite` primero, si el pedido es planificable), "
-                            "sin más texto de anuncio antes."
-                        ),
-                    }
-                )
+                session.messages.append(_empty_promise_correction())
                 yield {
                     "type": "system-note",
                     "data": {
@@ -1376,27 +1966,14 @@ async def _run_turn_impl(
         live_narrated_ids = {
             tool_calls_acc[i]["id"] for i, n in live_narrators.items() if n.narrated and i in tool_calls_acc
         }
-        assistant_msg: dict[str, Any] = {
-            "role": "assistant",
-            "content": assistant_text or None,
-            "tool_calls": [
-                {
-                    "id": call["id"],
-                    "type": "function",
-                    "function": {"name": call["name"], "arguments": call["arguments"]},
-                }
-                for call in ordered_calls
-            ],
-        }
+        assistant_msg = _assistant_tool_message(assistant_text, ordered_calls)
         session.messages.append(assistant_msg)
 
         if text_part_started and assistant_text:
             # REQ-002: el modelo tambien emitio texto ANTES de pedir las
             # tool-calls (ej. "Dejame revisar eso...") -- se cierra ese
             # part de texto con el contenido final antes de seguir.
-            persistence.record_part_end(
-                session_id, text_part_id, {"text": assistant_text}
-            )
+            persistence.record_part_end(session_id, text_part_id, {"text": assistant_text})
 
         for call in ordered_calls:
             # REQ-002: update del part 'tool' con nombre/argumentos ya
@@ -1428,17 +2005,8 @@ async def _run_turn_impl(
             # la clave especifica 'skill:<nombre>' (mismo criterio que
             # app/tools/skill.py al registrar la duracion real), leyendo
             # el nombre de la skill de los argumentos ya parseados.
-            operation_key = call["name"]
-            if operation_key == "skill":
-                try:
-                    skill_name = json.loads(call["arguments"] or "{}").get("name", "")
-                    if skill_name:
-                        operation_key = f"skill:{skill_name}"
-                except (json.JSONDecodeError, AttributeError):
-                    pass
-            budget_ms, has_history = await asyncio.to_thread(
-                get_budget_ms, operation_key
-            )
+            operation_key = _operation_key(call)
+            budget_ms, has_history = await asyncio.to_thread(get_budget_ms, operation_key)
             yield {
                 "type": "progress-estimate",
                 "data": {
@@ -1521,50 +2089,29 @@ async def _run_turn_impl(
                 and not (session.todos)
                 and response_type not in ("conversacional", "analitica_simple")  # noqa: B023
             ):
-                return (
-                    f"[Regla de planificacion (pedido del usuario)] Aun no hay un "
-                    f"plan de tareas cargado, y queres ejecutar `{name}`. La regla es "
-                    f"inflexible: PRIMERO EL PLAN, DESPUES EJECUTA. Cargá el plan "
-                    f"completo con la tool `todowrite` (los pasos concretos de ESTE "
-                    f"proceso: conectarse a la fuente, analizar/ubicar las tablas, "
-                    f"buscar los datos, resumir la respuesta) y recién después ejecuta "
-                    f"`{name}`. No ejecutes ninguna accion antes de tener el plan."
-                )
-            if (
-                voice_confirm
-                and not voice_confirm_bypass
-                and tool_def is not None
-                and tool_def.dangerous
-            ):
+                return _plan_first_message(name)
+            if voice_confirm and not voice_confirm_bypass and tool_def is not None and tool_def.dangerous:
                 # REQ-009: nunca se ejecuta -- el resultado que "ve" el
                 # modelo es una instruccion, no el resultado real de la
                 # tool. Se audita igual como "confirmacion pedida, no
                 # ejecutada" no es necesario (no hubo ejecucion real, la
                 # auditoria de tools/base.py es solo para ejecuciones
                 # efectivas -- este camino ni siquiera llama a dispatch).
-                return (
-                    "[Confirmación requerida, Modo Cerebro] Esta herramienta es "
-                    "potencialmente peligrosa (modifica archivos o ejecuta comandos) y "
-                    "esta intervención viene de una conversación por voz. Todavía NO se "
-                    "ejecutó. En tu respuesta de texto (que el usuario va a escuchar por "
-                    "voz), preguntale explícitamente si confirma que querés proceder "
-                    "(ej. '¿Estás seguro de que querés que haga esto?') y esperá su "
-                    "respuesta antes de intentar de nuevo esta herramienta."
-                )
+                return _VOICE_CONFIRM_REQUIRED_MESSAGE
             _tool_start = time.monotonic()
+            # REQ-004 (spec fix-detener-y-progreso-visible): la tool sabe el id de SU tool-call (salida en vivo del bash). Cada
+            # llamada corre en su propia tarea (`_gather_tools_stoppable`), asi que el valor no se mezcla entre tools en paralelo.
+            call_id_token = CURRENT_TOOL_CALL_ID.set(call["id"])
             try:
                 return await registry.dispatch(call["name"], call["arguments"], session)
             finally:
+                CURRENT_TOOL_CALL_ID.reset(call_id_token)
                 perf.record_tool_call(name, (time.monotonic() - _tool_start) * 1000)
 
-        results = await asyncio.gather(
-            *[_dispatch_or_intercept(call) for call in ordered_calls]
-        )
+        results = await _gather_tools_stoppable(session, [_dispatch_or_intercept(call) for call in ordered_calls])
 
-        for call, result in zip(ordered_calls, results):
-            session.messages.append(
-                {"role": "tool", "tool_call_id": call["id"], "content": result}
-            )
+        for call, result in zip(ordered_calls, results, strict=True):
+            session.messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
             part_id = tool_part_ids.get(call["id"])
             if part_id:
                 # REQ-002: update FINAL del part 'tool' con el resultado

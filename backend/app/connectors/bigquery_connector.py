@@ -10,6 +10,7 @@ Variables de entorno usadas:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 
@@ -27,9 +28,33 @@ class BigQueryConnector:
         self._settings = settings or get_settings()
         self._client: bigquery.Client | None = None
 
+    def _key_info(self) -> dict | None:
+        """spec gestor-conexiones REQ-008: la key importada desde la pantalla (guardada CIFRADA en vision.db, aplicada como `settings.bq_key_json`). None = no hay:
+        se usa el archivo de siempre. Una key guardada que no es JSON valido es un error claro, nunca un salto silencioso al archivo."""
+        raw = str(getattr(self._settings, "bq_key_json", "") or "").strip()
+        if not raw:
+            return None
+        try:
+            info = json.loads(raw)
+        except ValueError as exc:
+            raise ValueError("La key de BigQuery guardada en Vision no es un archivo de clave valido: volvé a importarla en Conexiones.") from exc
+        if not isinstance(info, dict):
+            raise ValueError("La key de BigQuery guardada en Vision no es un archivo de clave valido: volvé a importarla en Conexiones.")
+        return info
+
     def _get_credentials(self):
+        info = self._key_info()
+        if info is not None:
+            return service_account.Credentials.from_service_account_info(info)  # sin archivo en disco
         cred_path = self._settings.bq_credentials_path
         if not cred_path.exists():
+            from app import config_store  # import diferido: config_store importa config y connections
+
+            if config_store.is_active():  # spec gestor-conexiones: sin .env; la key se importa en el gestor (pedido del usuario 2026-10-09)
+                raise FileNotFoundError(
+                    "Todavía no hay una clave de BigQuery: importá el archivo .json de la cuenta de servicio en "
+                    "Configuración > Conexiones > BigQuery."
+                )
             raise FileNotFoundError(
                 f"No se encontro la key de BigQuery en: {cred_path}. "
                 "Genera una Service Account key y colocala en esa ruta, o cargala "
@@ -43,9 +68,11 @@ class BigQueryConnector:
         if self._client is not None:
             return self._client
         credentials = self._get_credentials()
-        os.environ.setdefault(
-            "GOOGLE_APPLICATION_CREDENTIALS", str(self._settings.bq_credentials_path)
-        )
+        if self._key_info() is None:
+            # solo con el archivo: con la key de la base no hay ruta que anunciar (y una ruta inexistente confundiria a otras librerias de Google)
+            os.environ.setdefault(
+                "GOOGLE_APPLICATION_CREDENTIALS", str(self._settings.bq_credentials_path)
+            )
         self._client = bigquery.Client(
             project=self._settings.bq_project_id,
             credentials=credentials,

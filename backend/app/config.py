@@ -138,6 +138,9 @@ class Settings(BaseSettings):
     # Vision, en la pantalla de inicio y en el prompt. Vacio = sin nombre.
     # -------------------------------------------------------------------
     vision_company_name: str = ""
+    # spec portar-desde-origen: direccion del conector MCP de Microsoft 365 (Outlook y Teams). Vacia = sin configurar: las herramientas
+    # `m365_*` avisan que falta en vez de llamar a un servidor que no existe. Ademas el interruptor viene apagado de fabrica.
+    m365_connector_url: str = ""
 
     # -------------------------------------------------------------------
     # WORKSPACE (raiz por defecto para tools bash/read/write/edit/glob/grep)
@@ -257,6 +260,9 @@ class Settings(BaseSettings):
     bq_table_id: str = ""
     google_application_credentials: str = "./keys/bigquery_key.json"
     bq_location: str = "US"
+    # spec gestor-conexiones REQ-008: el CONTENIDO de la key de la cuenta de servicio, importado desde la pantalla y guardado cifrado en vision.db. Si esta, BigQuery lo
+    # usa directo y el archivo de `google_application_credentials` deja de hacer falta.
+    bq_key_json: str = ""
 
     @property
     def bq_credentials_path(self) -> Path:
@@ -282,8 +288,10 @@ class Settings(BaseSettings):
     sharepoint_default_list_name: str = ""
 
     # -------------------------------------------------------------------
-    # PROXY DE LA EMPRESA (spec vision-generico REQ-004): vale para todo el
-    # proceso (proveedor de IA, dictado y conectores), ver _apply_proxy.
+    # PROXY DE LA EMPRESA (spec vision-generico REQ-004, portado de Vision-personal
+    # junto con la voz): vale para TODO el proceso (proveedor de IA, dictado, voz en
+    # la nube y conectores), ver _apply_proxy. `https_proxy` ya existia: SharePoint/
+    # Graph lo sigue usando via `requests_proxies`.
     # -------------------------------------------------------------------
     http_proxy: str = ""
     https_proxy: str = ""
@@ -308,6 +316,17 @@ class Settings(BaseSettings):
     sap_password: str = ""
     sap_language: str = "EN"
 
+    # -------------------------------------------------------------------
+    # VOZ DE VISION (spec voz-fish-audio REQ-005/006/009): claves de los
+    # motores de voz en la nube. Que motor habla, en que orden y con que
+    # voz se elige en Configuracion > Audio (ver app/voice/settings.py);
+    # los ID de voz de aca son solo el valor inicial de esa pantalla.
+    # -------------------------------------------------------------------
+    fish_api_key: str = ""
+    fish_voice_id: str = ""
+    elevenlabs_api_key: str = ""
+    elevenlabs_voice_id: str = ""
+
     def sap_odata_url(self, service_name: str) -> str:
         return f"{self.sap_base_url.rstrip('/')}/sap/opu/odata/sap/{service_name}/"
 
@@ -316,12 +335,38 @@ class Settings(BaseSettings):
         return f"{self.sap_base_url.rstrip('/')}/sap/bc/ui2/flp"
 
     # -------------------------------------------------------------------
+    # CONFLUENCE (spec conexiones-con-nombre, Fase B): el correo y el token son PERSONALES de cada usuario y viven en SU `.env`
+    # (decision del usuario: cada persona usa el suyo; nunca van en el archivo compartido `connections.json`). La URL, el espacio por
+    # defecto y las secciones SI van en el bloque de la conexion. Los defaults de URL/espacio/timeout solo se usan si el bloque no los trae.
+    # -------------------------------------------------------------------
+    confluence_email: str = ""
+    confluence_api_token: str = ""
+    confluence_base_url: str = "https://empresa.atlassian.net/wiki"
+    confluence_space_key: str = ""
+    confluence_root_page_id: str = ""
+    confluence_root_page_name: str = ""
+    confluence_timeout_seconds: int = 30
+    confluence_https_proxy: str = ""
+
+    # -------------------------------------------------------------------
+    # NOMBRE de cada conexion armada desde este `.env` (lo que se muestra despues del guion: «Oracle - Datamart»). Pedido del usuario 2026-10-06.
+    # Vacio = el nombre por defecto de cada tipo. Solo rige para la conexion que sale del `.env`: un bloque de connections.json lleva su propio nombre.
+    # -------------------------------------------------------------------
+    oracle_conexion_name: str = ""
+    sharepoint_conexion_name: str = ""
+    sap_conexion_name: str = ""
+    confluence_conexion_name: str = ""
+    graph_conexion_name: str = ""
+    bigquery_conexion_name: str = ""
+
+    # -------------------------------------------------------------------
     # FEATURE FLAGS
     # -------------------------------------------------------------------
     enable_oracle: bool = True
     enable_bigquery: bool = True
     enable_sharepoint: bool = True
     enable_sap: bool = True
+    enable_confluence: bool = True
 
     # -------------------------------------------------------------------
     # spec controles-seguridad-optimizacion-lightspeed-bigquery
@@ -353,19 +398,66 @@ class Settings(BaseSettings):
 _LOCAL_HOSTS = "localhost,127.0.0.1,::1"
 
 
+# Variables de entorno que puso el PROPIO Vision (proxy), con el valor que puso. Las demas son del sistema y mandan sobre la configuracion guardada (spec
+# gestor-conexiones, regla 6). Una variable cuenta como de Vision SOLO si todavia tiene ese valor: si alguien la cambio despues, ya no es de Vision y no se toca.
+_VISION_SET_ENV: dict[str, str] = {}
+
+
+def _vision_owns(var: str) -> bool:
+    return var in _VISION_SET_ENV and os.environ.get(var) == _VISION_SET_ENV[var]
+
+
+def vision_set_env() -> frozenset[str]:
+    return frozenset(var for var in _VISION_SET_ENV if _vision_owns(var))
+
+
 def _apply_proxy(settings: Settings) -> None:
     """REQ-004: el proxy del .env vale para todo el proceso -- httpx (proveedor
-    de IA y dictado) y requests (conectores) lo toman de estas variables. Lo que
-    ya venga definido en el entorno de Windows no se pisa."""
+    de IA y dictado) y requests (voz en la nube, conectores) lo toman de estas
+    variables. Lo que ya venga definido en el entorno de Windows no se pisa.
+    Sin proxy configurado no toca nada (comportamiento de siempre).
+    spec gestor-conexiones: lo que puso Vision SI se puede actualizar (el usuario cambia el proxy desde la pantalla, sin reiniciar)."""
     for var, value in (("HTTP_PROXY", settings.http_proxy), ("HTTPS_PROXY", settings.https_proxy)):
-        if value.strip() and not os.environ.get(var):
-            os.environ[var] = value.strip()
-    if (os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")) and not os.environ.get("NO_PROXY"):
-        os.environ["NO_PROXY"] = ",".join(filter(None, [settings.no_proxy.strip(), _LOCAL_HOSTS]))
+        if value.strip() and (not os.environ.get(var) or _vision_owns(var)):
+            os.environ[var] = _VISION_SET_ENV[var] = value.strip()
+    if (os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY")) and (not os.environ.get("NO_PROXY") or _vision_owns("NO_PROXY")):
+        os.environ["NO_PROXY"] = _VISION_SET_ENV["NO_PROXY"] = ",".join(filter(None, [settings.no_proxy.strip(), _LOCAL_HOSTS]))
+
+
+def reapply_proxy(settings: Settings) -> None:
+    """El usuario cambio el proxy en la pantalla: se quita lo que habia puesto Vision (nunca lo del sistema) y se vuelve a aplicar."""
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"):
+        if _vision_owns(var):
+            os.environ.pop(var, None)
+        _VISION_SET_ENV.pop(var, None)
+    _apply_proxy(settings)
+
+
+def _build_settings() -> Settings:
+    """spec gestor-conexiones REQ-002/003: con la base cifrada ACTIVA el `.env` ya no se lee (aunque exista) y la configuracion general sale de la base. Si no, lo de
+    siempre. Las variables de entorno del sistema se leen en los dos casos."""
+    from app import config_store, general_settings  # import diferido: los dos importan este modulo
+
+    if not config_store.is_active():
+        return Settings()
+    settings = Settings(_env_file=None)
+    general_settings.apply_to(settings, config_store.get_general())
+    return settings
 
 
 @lru_cache
 def get_settings() -> Settings:
-    settings = Settings()
+    settings = _build_settings()
     _apply_proxy(settings)
     return settings
+
+
+def reload_settings_in_place() -> Settings:
+    """spec gestor-conexiones A6: despues de importar, el `Settings` vivo tiene que quedar IGUAL a como arrancaria Vision ahora (sin `.env`, con lo de la base),
+    sin reiniciar. Se copia campo por campo sobre la MISMA instancia: todo modulo que ya la tiene ve el cambio."""
+    live = get_settings()
+    fresh = _build_settings()
+    for key in Settings.model_fields:
+        setattr(live, key, getattr(fresh, key))
+    reapply_proxy(live)
+    return live

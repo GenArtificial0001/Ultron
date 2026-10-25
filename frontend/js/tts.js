@@ -12,6 +12,32 @@
 const TTS_ENABLED_KEY = "vision.tts.enabled";
 const TTS_VOICE_KEY = "vision.tts.voiceURI";
 
+// REQ-016 (spec fix-detener-y-progreso-visible): con el navegador lleno o bloqueado `setItem` tira y antes se tragaba en silencio:
+// «Leer en voz alta» quedaba tildado y NO leia (se relee de localStorage en cada respuesta). Ahora el valor que no se pudo guardar
+// vale en memoria hasta recargar, y se avisa con el mismo evento que usa app.js para sus preferencias (un aviso por carga, lo
+// muestra app.js): este modulo sigue sin depender de app.js.
+const PREF_NOT_SAVED_EVENT = "vision:preference-not-saved";
+const _unsavedPrefs = new Map();
+
+function readPref(key) {
+  if (_unsavedPrefs.has(key)) return _unsavedPrefs.get(key);
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null; // localStorage inaccesible: cada preferencia cae a su valor por defecto
+  }
+}
+
+function writePref(key, value) {
+  try {
+    localStorage.setItem(key, value);
+    _unsavedPrefs.delete(key);
+  } catch {
+    _unsavedPrefs.set(key, value);
+    window.dispatchEvent(new CustomEvent(PREF_NOT_SAVED_EVENT, { detail: { key } }));
+  }
+}
+
 // -------------------------------------------------------------------------
 // Preferencias persistidas (localStorage, mismo patron que THEME_KEY en
 // app.js) -- TTS arranca DESACTIVADO por defecto: es una feature nueva que
@@ -20,20 +46,7 @@ const TTS_VOICE_KEY = "vision.tts.voiceURI";
 // que alguien abre Vision despues de este cambio.
 // -------------------------------------------------------------------------
 export function isTtsEnabled() {
-  try {
-    return localStorage.getItem(TTS_ENABLED_KEY) === "true";
-  } catch {
-    return false;
-  }
-}
-
-export function setTtsEnabled(enabled) {
-  try {
-    localStorage.setItem(TTS_ENABLED_KEY, enabled ? "true" : "false");
-  } catch {
-    // noop -- sin localStorage la preferencia no persiste entre recargas, pero sigue aplicada en esta sesion
-  }
-  if (!enabled) cancelSpeech(); // apagar TTS a mitad de una frase la corta al instante, no la deja terminar
+  return readPref(TTS_ENABLED_KEY) === "true";
 }
 
 // spec informe-tecnico-hablado REQ-001: "Hablar informe tecnico", PRENDIDO de
@@ -42,35 +55,38 @@ export function setTtsEnabled(enabled) {
 const TECH_REPORT_KEY = "vision.tts.techReport";
 
 export function isTechReportEnabled() {
-  try {
-    return localStorage.getItem(TECH_REPORT_KEY) !== "false";
-  } catch {
-    return true;
-  }
+  return readPref(TECH_REPORT_KEY) !== "false";
 }
 
 export function setTechReportEnabled(enabled) {
-  try {
-    localStorage.setItem(TECH_REPORT_KEY, enabled ? "true" : "false");
-  } catch {
-    // noop -- sin localStorage la preferencia no persiste entre recargas
-  }
+  writePref(TECH_REPORT_KEY, enabled ? "true" : "false"); // sin localStorage: vale hasta recargar (REQ-016)
+}
+
+// REQ-012 (informe-tecnico-hablado, reapertura 2): nivel del informe. "detailed" de fabrica (decision
+// delegada del usuario, revisable): suma estructura de pagina, estilos y funciones. "summary" es el
+// informe de siempre. Cualquier otro valor guardado cuenta como "detailed" solo si es exactamente ese.
+const TECH_LEVEL_KEY = "vision.tts.techReportLevel";
+
+export function getTechReportLevel() {
+  return readPref(TECH_LEVEL_KEY) === "summary" ? "summary" : "detailed";
+}
+
+export function setTechReportLevel(level) {
+  writePref(TECH_LEVEL_KEY, level === "summary" ? "summary" : "detailed"); // sin localStorage: vale hasta recargar (REQ-016)
+}
+
+export function setTtsEnabled(enabled) {
+  // Sin localStorage la preferencia no persiste entre recargas, pero sigue aplicada en esta sesion (REQ-016).
+  writePref(TTS_ENABLED_KEY, enabled ? "true" : "false");
+  if (!enabled) cancelSpeech(); // apagar TTS a mitad de una frase la corta al instante, no la deja terminar
 }
 
 function getSavedVoiceURI() {
-  try {
-    return localStorage.getItem(TTS_VOICE_KEY) || "";
-  } catch {
-    return "";
-  }
+  return readPref(TTS_VOICE_KEY) || "";
 }
 
 export function setSavedVoiceURI(voiceURI) {
-  try {
-    localStorage.setItem(TTS_VOICE_KEY, voiceURI || "");
-  } catch {
-    // noop
-  }
+  writePref(TTS_VOICE_KEY, voiceURI || ""); // sin localStorage: vale hasta recargar (REQ-016)
 }
 
 // -------------------------------------------------------------------------
@@ -403,6 +419,7 @@ function _base64ToArrayBuffer(b64) {
 function _noticeOnce(notice) {
   if (!notice || !notice.message || _shownNotices.has(notice.code)) return;
   _shownNotices.add(notice.code);
+  // `_voiceBackend` puede ser null (sin motores del backend: solo voz del navegador): sin canal de avisos, no hay a quien avisar.
   try { _voiceBackend?.onNotice?.(notice.message); } catch { /* un aviso que falla no corta la voz */ }
 }
 
@@ -674,7 +691,7 @@ function _notifySpeechEnd() {
 // atrasarse"): si ya hay `limit` frases con esa clave esperando su turno, se
 // descartan las mas viejas. La que esta sonando termina, y nada que no tenga
 // esa clave (la lectura de la respuesta) se toca.
-export function speak(text, { onStart, limitKey, limit = 0 } = {}) {
+export function speak(text, { onStart, limitKey, limit = 0, lead = false } = {}) {
   if (!isTtsEnabled()) return;
   if (!("speechSynthesis" in window) && !_usesAudioEngines()) return;
   const trimmed = (text || "").trim();
@@ -683,11 +700,12 @@ export function speak(text, { onStart, limitKey, limit = 0 } = {}) {
     let waiting = _speechQueue.filter((item) => item.limitKey === limitKey).length;
     _speechQueue = _speechQueue.filter((item) => {
       if (item.limitKey !== limitKey || waiting < limit) return true;
+      if (item.lead) return true; // REQ-015: la presentacion del diseno nunca se descarta
       waiting -= 1; // descarta la mas vieja de las que esperan
       return false;
     });
   }
-  _speechQueue.push({ text: trimmed, onStart, limitKey });
+  _speechQueue.push({ text: trimmed, onStart, limitKey, lead });
   _pump();
 }
 

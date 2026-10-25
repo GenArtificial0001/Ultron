@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -112,6 +113,40 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     finished_at REAL,
     status TEXT NOT NULL DEFAULT 'running',  -- 'running' | 'done' | 'cancelled' | 'error'
     error TEXT NOT NULL DEFAULT ''
+);
+-- spec gestor-conexiones REQ-001 (decision del usuario 2026-10-08: ni .env ni connections.json, TODO cifrado aca): una fila por conexion con nombre. Tipo, nombre,
+-- fechas y estado quedan legibles para listar; los CAMPOS (usuario, contrasena, host, token...) van en `fields_blob`, cifrados con DPAPI del usuario de Windows
+-- (app/secret_store.py). La logica (cifrar, validar, cache) vive en app/config_store.py; aca solo se leen y escriben filas.
+CREATE TABLE IF NOT EXISTS conn_store (
+    id TEXT PRIMARY KEY,
+    type_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    name_key TEXT NOT NULL,      -- nombre en minuscula: los nombres son unicos por tipo sin distinguir mayusculas
+    is_default INTEGER NOT NULL DEFAULT 0,
+    fields_blob BLOB NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    tested_at REAL,
+    test_status TEXT NOT NULL DEFAULT '',  -- '' (sin probar) | 'ok' | 'error'
+    UNIQUE(type_id, name_key)
+);
+-- Configuracion general cifrada (voz, el proveedor de IA, proxy, BigQuery, puerto...): un blob DPAPI por clave (hoy una sola, 'general').
+CREATE TABLE IF NOT EXISTS secure_settings (
+    key TEXT PRIMARY KEY,
+    value_blob BLOB NOT NULL,
+    updated_at REAL NOT NULL
+);
+-- spec indice-resiliente-y-borrado-seguro (0.35.7), SOLO tablas nuevas (aditivo: una version vieja de Vision que lea este archivo
+-- las ignora). `known_folders`: carpetas que alguna vez recibieron una sesion; sobreviven a que se borre la sesion y le dicen al
+-- re-escaneo donde buscar sesiones huerfanas. `deleted_sessions`: lapida de lo que el usuario (o la purga) borro, para que el
+-- re-escaneo NUNCA resucite una sesion borrada a proposito.
+CREATE TABLE IF NOT EXISTS known_folders (
+    project_path TEXT PRIMARY KEY,
+    first_seen_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS deleted_sessions (
+    session_id TEXT PRIMARY KEY,
+    deleted_at REAL NOT NULL
 );
 """
 
@@ -219,6 +254,17 @@ def get_project_path(session_id: str) -> str | None:
         return row[0]
 
 
+# BL-022 (ADR-010, F1/F2): `windows_user_created` puede venir PELADO ("juan_perez", lo que escribe `assign_project_path`) o con sello de
+# tiempo ("juan_perez_20261001231228", formato antiguo). El unico separador valido es `_` + EXACTAMENTE 14 digitos al FINAL; cualquier otro
+# guion bajo es parte del NOMBRE. Antes `get_owner` cortaba tras el ultimo `_` sin mirar que seguia.
+_TIMESTAMP_SUFFIX_RE = re.compile(r"_\d{14}$")
+
+
+def _owner_name(stored: str) -> str:
+    """Nombre de usuario de Windows de un `windows_user_created`, sin el sello de tiempo si lo tiene."""
+    return _TIMESTAMP_SUFFIX_RE.sub("", stored)
+
+
 def get_owner(session_id: str) -> str | None:
     """Devuelve el `windows_user_created` (SIN el sufijo de timestamp) del
     dueño registrado de esta sesion en el indice maestro, o None si la
@@ -234,7 +280,7 @@ def get_owner(session_id: str) -> str | None:
         ).fetchone()
     if row is None or not row[0]:
         return None
-    return row[0].rsplit("_", 1)[0]  # quita el sufijo _yyyymmddhhmmss
+    return _owner_name(row[0])
 
 
 def set_project_path(
@@ -246,6 +292,14 @@ def set_project_path(
     hacia adelante, nunca migra datos entre vision.db distintos)."""
     now = time.time()
     with _connect() as conn:
+        # spec indice-resiliente-y-borrado-seguro REQ-002/003: una alta EXPLICITA manda sobre la lapida, y la carpeta queda
+        # anotada aunque despues se borre la sesion (le sirve al re-escaneo).
+        conn.execute("DELETE FROM deleted_sessions WHERE session_id = ?", (session_id,))
+        if project_path:
+            conn.execute(
+                "INSERT OR IGNORE INTO known_folders (project_path, first_seen_at) VALUES (?, ?)",
+                (project_path, now),
+            )
         existing = conn.execute(
             "SELECT session_id FROM session_index WHERE session_id = ?",
             (session_id,),
@@ -303,9 +357,106 @@ def unset_app_setting(key: str) -> None:
         conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
 
 
+# -- spec gestor-conexiones (REQ-001): filas de `conn_store` y `secure_settings`. Los blobs llegan YA cifrados (app/config_store.py): este modulo nunca ve un valor.
+_CONN_COLUMNS = ("id", "type_id", "name", "is_default", "fields_blob", "created_at", "updated_at", "tested_at", "test_status")
+
+
+def list_conn_store() -> list[dict[str, Any]]:
+    """Todas las conexiones guardadas, en orden de alta (la primera de un tipo es la predeterminada si ninguna esta marcada)."""
+    with _connect() as conn:
+        rows = conn.execute(f"SELECT {', '.join(_CONN_COLUMNS)} FROM conn_store ORDER BY created_at, rowid").fetchall()
+    return [dict(zip(_CONN_COLUMNS, row, strict=True)) for row in rows]
+
+
+def insert_conn_store(row: dict[str, Any]) -> None:
+    """Alta de una conexion. `sqlite3.IntegrityError` si ya existe otra del mismo tipo con el mismo nombre (sin distinguir mayusculas)."""
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO conn_store(id, type_id, name, name_key, is_default, fields_blob, created_at, updated_at, tested_at, test_status) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, NULL, '')",
+            (row["id"], row["type_id"], row["name"], row["name"].lower(), int(bool(row["is_default"])), row["fields_blob"], row["created_at"], row["created_at"]),
+        )
+
+
+def update_conn_store(conn_id: str, **changes: Any) -> bool:
+    """Cambia columnas de UNA conexion (`name`, `is_default`, `fields_blob`, `tested_at`, `test_status`). False si no existe."""
+    allowed = {"name", "is_default", "fields_blob", "tested_at", "test_status"}
+    unknown = set(changes) - allowed
+    if unknown:
+        raise ValueError(f"columnas no permitidas: {sorted(unknown)}")
+    if not changes:
+        return True
+    sets = dict(changes)
+    if "name" in sets:
+        sets["name_key"] = sets["name"].lower()
+    if "is_default" in sets:
+        sets["is_default"] = int(bool(sets["is_default"]))
+    sets["updated_at"] = time.time()
+    # los nombres de columna salen de `allowed` (constantes de este modulo), nunca de la entrada: no hay SQL armado con datos del usuario
+    assignments = ", ".join(f"{col} = ?" for col in sets)
+    with _connect() as conn:
+        cur = conn.execute(f"UPDATE conn_store SET {assignments} WHERE id = ?", (*sets.values(), conn_id))
+        return cur.rowcount > 0
+
+
+def clear_default_conn_store(type_id: str) -> None:
+    """Desmarca la predeterminada de un tipo (antes de marcar otra)."""
+    with _connect() as conn:
+        conn.execute("UPDATE conn_store SET is_default = 0 WHERE type_id = ?", (type_id,))
+
+
+def delete_conn_store(conn_id: str) -> bool:
+    with _connect() as conn:
+        return conn.execute("DELETE FROM conn_store WHERE id = ?", (conn_id,)).rowcount > 0
+
+
+def get_secure_setting(key: str) -> bytes | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT value_blob FROM secure_settings WHERE key = ?", (key,)).fetchone()
+    return bytes(row[0]) if row is not None and row[0] else None
+
+
+def set_secure_setting(key: str, blob: bytes) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO secure_settings(key, value_blob, updated_at) VALUES(?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value_blob = excluded.value_blob, updated_at = excluded.updated_at",
+            (key, blob, time.time()),
+        )
+
+
 def delete_session(session_id: str) -> None:
     with _connect() as conn:
+        # REQ-002/003: antes de borrar la fila, la carpeta queda anotada (por si esta sesion era la ultima de esa carpeta y
+        # el indice la perderia de vista) y se deja la lapida.
+        row = conn.execute("SELECT project_path FROM session_index WHERE session_id = ?", (session_id,)).fetchone()
+        if row is not None and row[0]:
+            conn.execute(
+                "INSERT OR IGNORE INTO known_folders (project_path, first_seen_at) VALUES (?, ?)",
+                (row[0], time.time()),
+            )
         conn.execute("DELETE FROM session_index WHERE session_id = ?", (session_id,))
+        conn.execute(
+            "INSERT OR REPLACE INTO deleted_sessions (session_id, deleted_at) VALUES (?, ?)",
+            (session_id, time.time()),
+        )
+
+
+def is_tombstoned(session_id: str) -> bool:
+    """REQ-002: True si esta sesion fue borrada a proposito (manual o por purga) y no se dio de alta de nuevo."""
+    with _connect() as conn:
+        return conn.execute("SELECT 1 FROM deleted_sessions WHERE session_id = ?", (session_id,)).fetchone() is not None
+
+
+def known_folders() -> list[str]:
+    """REQ-003: carpetas de proyecto que el indice conoce HOY mas las que alguna vez recibieron una sesion (aunque ya no tengan
+    ninguna registrada), sin repetir y en orden estable."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT project_path FROM session_index WHERE project_path != '' "
+            "UNION SELECT project_path FROM known_folders WHERE project_path != '' ORDER BY 1"
+        ).fetchall()
+    return [r[0] for r in rows]
 
 
 def session_index_exists(session_id: str) -> bool:
@@ -341,14 +492,15 @@ def list_all_for_user(windows_user: str) -> list[dict[str, Any]]:
     "fail-open" que `get_owner()` ya aplica para sesiones sin dueño
     registrado (no deberian quedar invisibles para nadie)."""
     with _connect() as conn:
-        rows = conn.execute(
+        # Se trae todo y se filtra en Python: el indice es una fila por sesion (chico) y `LIKE 'user_%'` trataba el `_` como comodin
+        # (F2: "jorge" veia las sesiones de "jorge2"). El mismo `_owner_name` que usa `get_owner` decide a quien pertenece cada fila.
+        # Fail-open intencional: dueño vacio = visible para todos (sesiones sin dueño registrado no deben quedar invisibles).
+        all_rows = conn.execute(
             "SELECT session_id, project_path, title, windows_user_created, "
             "created_at, updated_at FROM session_index "
-            "WHERE windows_user_created = ? OR windows_user_created LIKE ? "
-            "OR windows_user_created = '' "
             "ORDER BY updated_at DESC",
-            (windows_user, f"{windows_user}_%"),
         ).fetchall()
+        rows = [r for r in all_rows if not r[3] or _owner_name(r[3]) == windows_user]
         return [
             {
                 "session_id": r[0],

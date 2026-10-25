@@ -1,10 +1,12 @@
 """Unit de la tool `question` (spec modo-plan-loop REQ-008/009/011): opciones
 malformadas, opcion "(Recomendada)", pausa por "(Riesgo)" y auto-seleccion del
 loop autonomo. Regresion clave: un string en `options` NO se itera por caracter
-(bug real del "teclado gigante")."""
+(bug real del "teclado gigante"). REQ-018 (spec fix-detener-y-progreso-visible):
+que pregunta queda sin contestar para que F5 la vuelva a mostrar."""
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -123,3 +125,49 @@ def test_session_without_loop_attribute_is_tolerated():
 
 def test_tool_metadata():
     assert q.question_tool.thread_safe is False and not q.question_tool.dangerous
+
+
+# ---- REQ-018 (spec fix-detener-y-progreso-visible): F5 vuelve a mostrar la pregunta sin contestar ------------------------------
+def test_pending_question_view_only_for_a_question_that_waits_for_the_user():
+    args = {"question": "¿Sigo?", "options": [{"label": "Sí (Recomendada)"}, "No"]}
+    part = {"name": "question", "arguments": json.dumps(args)}
+    waiting = q._question_execute(args, FakeSession())
+    auto = q._question_execute(args, FakeSession(loop_active=True))
+    assert q.pending_question_view({**part, "result": waiting}) == {
+        "question": "¿Sigo?",
+        "options": [{"label": "Sí (Recomendada)", "description": ""}, {"label": "No", "description": ""}],
+    }
+    assert q.pending_question_view({**part, "result": auto}) is None  # el loop ya eligio solo: no espera a nadie
+    assert q.pending_question_view({**part, "result": q._question_execute({})}) is None  # error: no se mostro nada
+    assert q.pending_question_view({**part}) is None  # sin resultado: la tool no termino
+
+
+def test_pending_question_view_tolerates_broken_arguments():
+    ok = q._question_execute({"question": "x"})
+    assert q.pending_question_view({"arguments": "{roto", "result": ok}) is None
+    assert q.pending_question_view({"arguments": json.dumps(["no", "es", "objeto"]), "result": ok}) is None
+    assert q.pending_question_view({"arguments": json.dumps({"options": []}), "result": ok}) is None  # sin pregunta
+    malformed = json.dumps({"question": "¿Cuál?", "options": '<option label="Uno"> <option label="Dos"/>'})
+    assert [o["label"] for o in q.pending_question_view({"arguments": malformed, "result": ok})["options"]] == ["Uno", "Dos"]
+    odd = json.dumps({"question": "¿Y?", "options": {"a": 1}})
+    assert q.pending_question_view({"arguments": odd, "result": ok})["options"] == []  # nunca se itera otra cosa que una lista
+
+
+def test_the_page_gets_the_pending_question_unless_its_answer_already_waits_in_the_queue(monkeypatch):
+    from app import main
+    from app.persistence import service as svc
+    from app.session.events import UserTurn, get_session_store
+
+    sid = "s-req018-pendiente"
+    args = {"question": "¿Sigo?", "options": ["Sí", "No"]}
+    part = {"name": "question", "call_id": "q1", "arguments": json.dumps(args), "result": q._question_execute(args)}
+    monkeypatch.setattr(svc, "load_pending_question", lambda session_id: part if session_id == sid else None)
+    assert main._pending_question_for_page(sid)["question"] == "¿Sigo?"
+    assert main._pending_question_for_page("otra-sesion") is None
+
+    session = get_session_store().get_or_create(sid)
+    session.enqueue_turn(UserTurn(id="t-resp", text="Sí"))  # el usuario ya toco una opcion y espera en la cola
+    try:
+        assert main._pending_question_for_page(sid) is None, "mostrarla de nuevo invitaria a contestar dos veces"
+    finally:
+        session.remove_queued_turn("t-resp")

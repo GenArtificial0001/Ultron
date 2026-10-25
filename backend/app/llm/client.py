@@ -24,6 +24,11 @@ toma de ahi.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
+from typing import TypeVar
+
+import openai
 from openai import OpenAI
 
 from app.config import get_settings
@@ -31,6 +36,9 @@ from app.config import get_settings
 ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1/"
 ANTHROPIC_VERSION = "2023-06-01"
 PROVIDERS = ("anthropic", "openai_compatible")
+
+logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 
 class ProviderNotConfigured(RuntimeError):
@@ -105,3 +113,24 @@ def get_stt_client() -> tuple[OpenAI, str]:
     if not base_url or not api_key:
         raise ProviderNotConfigured("El dictado por voz no esta configurado (faltan STT_BASE_URL y STT_API_KEY).")
     return OpenAI(api_key=api_key, base_url=base_url), settings.stt_model.strip() or "whisper-1"
+
+
+def call_with_token_retry(
+    fn: Callable[[OpenAI], _T],
+    client_getter: Callable[..., OpenAI] | None = None,
+) -> _T:
+    """Llama `fn(cliente)` y, si el proveedor responde 401, recrea el cliente (`force_refresh=True`) y repite UNA sola
+    vez: nunca mas de 2 intentos, sin bucles.
+
+    Viene de la version de origen (spec transcripcion-reintenta-token): el dictado, la lectura de imagenes de PDF y la
+    compactacion la usan. Con una clave fija, un 401 casi siempre es una clave mal cargada, pero recrear el cliente toma
+    la clave nueva si la persona la acaba de cambiar en el `.env` o en Configuracion.
+
+    `fn` recibe el cliente y debe REARMAR sus argumentos en cada intento. Solo el 401 se reintenta. `client_getter`: de
+    donde sale el cliente (por defecto `get_client`; para un modelo de otro proveedor, pasar uno que use `model=`)."""
+    getter = client_getter or get_client
+    try:
+        return fn(getter())
+    except openai.AuthenticationError as exc:
+        logger.warning("El proveedor de IA devolvio 401, reintentando con el cliente recreado: %s", exc)
+        return fn(getter(force_refresh=True))

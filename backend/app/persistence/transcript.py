@@ -13,11 +13,23 @@ tal cual queda aca. Por ahora se invoca desde: la auto-purga a 30 dias
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from app.persistence import db
+
+
+def _fence_for(content: str) -> str:
+    """Valla de bloque de codigo MAS LARGA que la racha de backticks mas larga de `content` (minimo 3).
+
+    BL-028 (ADR-011): el resultado o el error de una herramienta se pegaba entre dos ``` fijos; si el propio contenido traia ```
+    (salida de un `git diff` de un .md, un bloque de codigo en un archivo leido...), cerraba el bloque antes de tiempo y TODO lo
+    que seguia en el respaldo se leia como codigo. CommonMark lo resuelve con una valla mas larga que cualquier racha interna.
+    Sin backticks en el contenido (el caso normal) devuelve las 3 de siempre: el formato de los respaldos ya exportados no cambia."""
+    longest = max((len(run) for run in re.findall(r"`+", content)), default=0)
+    return "`" * max(3, longest + 1)
 
 
 def _fmt_dt(ts: float) -> str:
@@ -37,6 +49,18 @@ def format_part(part_type: str, data: dict[str, Any]) -> str:
         # default (`options.thinking = False`) de OpenCode.
         return ""
 
+    if part_type == "file":
+        # REQ-010 d (spec adjuntar-archivos-chat): placeholder legible, sin embeber nada.
+        from app.attachment_readers import format_size  # import diferido: modulo liviano
+
+        size = data.get("size")
+        weight = f" ({format_size(size)})" if isinstance(size, int) else ""
+        deleted = " (eliminado)" if data.get("deleted") else ""
+        return (
+            f"*[archivo adjunto: {data.get('path') or data.get('name', '?')}"
+            f"{weight}{deleted}]*\n\n"
+        )
+
     if part_type == "image":
         # spec contexto-multimodal REQ-006 (reglas de negocio): un
         # placeholder de texto en vez de embeber el base64 completo en el
@@ -55,11 +79,17 @@ def format_part(part_type: str, data: dict[str, Any]) -> str:
                 )
             except (json.JSONDecodeError, TypeError):
                 parsed_args = arguments
-            result += f"\n**Input:**\n```json\n{json.dumps(parsed_args, indent=2, ensure_ascii=False)}\n```\n"
+            args_text = json.dumps(parsed_args, indent=2, ensure_ascii=False)
+            fence = _fence_for(args_text)
+            result += f"\n**Input:**\n{fence}json\n{args_text}\n{fence}\n"
         if "result" in data:
-            result += f"\n**Output:**\n```\n{data['result']}\n```\n"
+            output = str(data["result"])
+            fence = _fence_for(output)
+            result += f"\n**Output:**\n{fence}\n{output}\n{fence}\n"
         elif data.get("error"):
-            result += f"\n**Error:**\n```\n{data['error']}\n```\n"
+            error = str(data["error"])
+            fence = _fence_for(error)
+            result += f"\n**Error:**\n{fence}\n{error}\n{fence}\n"
         result += "\n"
         return result
 
@@ -261,6 +291,30 @@ def export_session_to_file(session_id: str) -> Path | None:
         if title_prefix
         else f"session-{timestamp}.md"
     )
-    out_path = sessions_dir / filename
-    out_path.write_text(content, encoding="utf-8")
-    return out_path
+    return _write_new_file(sessions_dir, filename, content)
+
+
+MAX_FILENAME_ATTEMPTS = 1000
+
+
+def _write_new_file(directory: Path, filename: str, content: str) -> Path:
+    """Escribe `content` en un archivo NUEVO de `directory`, sin pisar nunca uno existente.
+
+    BL-009 (ADR-011): el nombre lleva la hora a resolucion de SEGUNDOS y antes se escribia con `write_text` (sobrescribe). La purga
+    exporta y borra en milisegundos: dos sesiones sin titulo propio de la misma carpeta compartian `session-<ts>.md`, el segundo
+    export pisaba al primero y la sesion ya borrada se quedaba SIN respaldo. Ahora se crea con modo exclusivo (`"x"`: falla si ya
+    existe, sin carrera entre "existe?" y "escribir") y, si el nombre esta ocupado, se prueba `<nombre>-2.md`, `-3`... Cumple lo
+    que la docstring de `export_session_to_file` siempre prometio: CADA export crea un archivo NUEVO."""
+    stem, suffix = Path(filename).stem, Path(filename).suffix
+    for attempt in range(1, MAX_FILENAME_ATTEMPTS + 1):
+        name = filename if attempt == 1 else f"{stem}-{attempt}{suffix}"
+        candidate = directory / name
+        try:
+            with candidate.open("x", encoding="utf-8") as fh:
+                fh.write(content)
+        except FileExistsError:
+            continue
+        return candidate
+    raise FileExistsError(
+        f"No se pudo crear un archivo nuevo en '{directory}' tras {MAX_FILENAME_ATTEMPTS} intentos con el nombre '{filename}'."
+    )

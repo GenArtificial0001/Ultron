@@ -44,6 +44,9 @@
   --signal-red-bg: #3A1418;
   --signal-amber-bg: #3A2C0F;
   --signal-green-bg: #123A26;
+  /* spec error-estilo-system-note REQ-003/009: rojo del TEXTO de un mensaje de error (ya sin fondo). Es el mismo rojo del semaforo, que sobre el fondo oscuro da 6,03:1.
+     `--signal-red` (el semaforo) NO cambia entre temas: este es un token aparte, y el tema claro lo oscurece (ver `[data-theme="light"]`). */
+  --error-ink: #FF4D5E;
 
   /* Tokens dependientes de tema que antes eran colores sueltos hardcoded
      (spec tema-claro-azul): permiten que TODO el sistema conmute entre
@@ -125,6 +128,8 @@
    exactamente igual").
    ========================================================================= */
 [data-theme="light"] {
+  /* spec error-estilo-system-note REQ-003: sobre fondo blanco `#FF4D5E` da solo 3,24:1; este rojo mas oscuro da 5,62:1 (minimo accesible 4,5:1). */
+  --error-ink: #C62828;
   --accent: #0000FF;           /* azul (pedido explicito del usuario) */
   --accent-2: #3D3DFF;         /* hover / brillo -- mas claro que el acento base, mismo criterio que accent-2 en oscuro (mas brillante que el acento) */
   --accent-soft: #E3E3FF;      /* fondo de seleccion sobre superficies CLARAS -- azul muy palido, el texto oscuro sigue contrastando encima */
@@ -514,63 +519,6 @@ body {
   letter-spacing: .02em;
 }
 
-/* -------------------- Cache meter (localStorage, sutil) -------------------- */
-.cache-meter {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  padding-top: 4px;
-}
-.cache-meter-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-}
-.cache-meter-label {
-  font-family: var(--font-mono);
-  font-size: 9.5px;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
-}
-.cache-meter-pct {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--ink-soft);
-  font-variant-numeric: tabular-nums;
-}
-.cache-meter-track {
-  height: 3px;
-  border-radius: 2px;
-  background: var(--surface-3);
-  overflow: hidden;
-}
-.cache-meter-fill {
-  height: 100%;
-  width: 0%;
-  background: var(--chrome);
-  transition: width 240ms ease, background 240ms ease;
-}
-.cache-meter.warn .cache-meter-fill  { background: var(--signal-amber); }
-.cache-meter.warn .cache-meter-pct   { color: var(--signal-amber); }
-.cache-meter.critical .cache-meter-fill { background: var(--signal-red); }
-.cache-meter.critical .cache-meter-pct  { color: var(--signal-red); }
-
-.cache-clear-btn {
-  align-self: flex-start;
-  background: transparent;
-  border: none;
-  color: var(--ink-faint);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: .03em;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
-  padding: 2px 0;
-}
-.cache-clear-btn:hover { color: var(--accent); }
-
 /* -------------------------------------------------------------------------
    Footer institucional (spec perfil-usuario-y-footer): atribucion de
    autoria, ubicado como el bloque MAS ABAJO del sidebar (confirmado por
@@ -627,6 +575,7 @@ body {
   flex-direction: column;
   height: 100vh;
   min-width: 0;
+  position: relative; /* ancla el cartel de soltar archivos (adjuntar-archivos-chat) */
 }
 
 /* -------------------- Banner de persistencia (REQ-006) --------------------
@@ -648,6 +597,33 @@ body {
 .persistence-banner-icon { flex-shrink: 0; }
 .persistence-banner a { color: var(--signal-amber); text-decoration: underline; font-weight: 600; }
 .persistence-banner a:hover { color: var(--accent-2); }
+
+/* -------------------- Cartel del Modo Cerebro (spec cerebro-cartel-estado) --------------------
+   Mismo diseno que el banner de persistencia (franja de ancho completo en el flujo, icono + texto, mismo borde) para que se lea igual de claro. Visible SOLO con el modo activo: verde
+   mientras escucha, ambar mientras procesa. Los tokens son los de siempre (`--signal-*`); NUNCA rojo (no es un error). Sin animacion nueva: el boton ya pulsa y una franja que cambia cada
+   250 ms cansaria, asi que no hace falta contraparte de `prefers-reduced-motion`. */
+.brain-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 24px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.brain-banner.hidden { display: none; }
+.brain-banner[data-state="listening"], .brain-banner[data-state="speaking"] { background: var(--signal-green-bg); color: var(--signal-green); }
+.brain-banner[data-state="processing"] { background: var(--signal-amber-bg); color: var(--signal-amber); }
+.brain-banner[data-state="paused"] { background: var(--surface-2); color: var(--ink-soft); }
+.brain-banner-icon { flex-shrink: 0; }
+.brain-banner kbd {
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+}
 
 /* -------------------- Banner de loop pausado (REQ-009) --------------------
    Spec modo-plan-loop. A diferencia del banner de persistencia (informativo,
@@ -807,7 +783,8 @@ body {
   flex-direction: column;
   gap: 4px;
   width: 100%;
-  max-width: 320px;
+  /* spec fix-detener-y-progreso-visible: entra «Escribiendo transcribir.py… 12 KB · lleva 1 min 05 s» y la salida en vivo. */
+  max-width: 460px;
   padding: 8px 12px;
   background: var(--surface-2);
   border: 1px solid var(--line);
@@ -819,8 +796,7 @@ body {
 .progress-head {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
   font-family: var(--font-mono);
   font-size: 11.5px;
 }
@@ -832,12 +808,66 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
+
+/* REQ-001 (spec fix-detener-y-progreso-visible): «· lleva 12 s» / «· sigue trabajando · lleva 1 min 05 s». No se trunca: es la
+   señal de que Vision sigue vivo (el label es lo que cede espacio). */
+.progress-elapsed {
+  color: var(--ink-faint);
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.command-progress[data-state="overrun"] .progress-elapsed { color: var(--signal-amber); }
 
 .progress-pct {
   color: var(--ink);
   font-variant-numeric: tabular-nums; /* el % no "baila" al cambiar de digito */
   flex-shrink: 0;
+  margin-left: auto;
+}
+
+/* REQ-001: latido. Un punto que pulsa mientras la operacion sigue viva; quieto (pero visible) con animaciones reducidas. */
+.progress-beat {
+  flex-shrink: 0;
+  align-self: center;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: progress-beat 1.1s ease-in-out infinite;
+}
+.command-progress[data-state="overrun"] .progress-beat { background: var(--signal-amber); }
+.command-progress[data-state="done"] .progress-beat { background: var(--signal-green); animation: none; }
+
+@keyframes progress-beat {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .35; transform: scale(.7); }
+}
+
+/* REQ-004: «Salida en vivo» del bash (plegable). Texto plano (lo pone app.js con textContent), acotado en alto. */
+.progress-live {
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.progress-live summary {
+  color: var(--ink-soft);
+  cursor: pointer;
+  user-select: none;
+}
+.progress-live pre {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  max-height: 10.5em;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
 }
 
 .progress-track {
@@ -872,11 +902,15 @@ body {
 
 /* REQ-003: se paso del presupuesto estimado. Ambar = "atencion, tarda mas
    de lo previsto", coherente con la semantica de semaforo del sistema
-   (nunca rojo: no es un error, solo esta tardando). */
+   (nunca rojo: no es un error, solo esta tardando).
+   REQ-001 (spec fix-detener-y-progreso-visible): antes el relleno quedaba
+   clavado en el ultimo ancho de la curva (91 %, el estilo en linea le ganaba
+   al 100% de aca) y se leia como «congelado». Ahora app.js quita ese ancho
+   y el relleno BARRE, como el modo sin historial: sigue trabajando. */
 .command-progress[data-state="overrun"] .progress-fill {
-  width: 100%;
+  width: 35%;
   background: linear-gradient(90deg, var(--signal-amber), var(--accent));
-  animation: progress-pulse 1.3s ease-in-out infinite;
+  animation: progress-sweep 1.6s ease-in-out infinite;
 }
 .command-progress[data-state="overrun"] .progress-label { color: var(--signal-amber); }
 
@@ -893,10 +927,14 @@ body {
    barrido/pulso; se deja una senal estatica visible para que el modo
    indeterminado no quede como una barra muerta al 35%. */
 @media (prefers-reduced-motion: reduce) {
-  .command-progress[data-state="indeterminate"] .progress-fill {
+  .command-progress[data-state="indeterminate"] .progress-fill,
+  .command-progress[data-state="overrun"] .progress-fill {
     width: 100%;
     opacity: .55;
+    animation: none;
   }
+  /* REQ-001: el latido queda quieto; el «lleva X» lo mueve el timer de JS y sigue cambiando. */
+  .progress-beat { animation: none; }
 }
 
 .command-meta {
@@ -914,6 +952,18 @@ body {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
 }
+
+/* spec aviso-contexto-largo REQ-008: chip de uso de contexto. Es un dato (no clickeable); el color sigue el nivel que calcula el backend.
+   Los tokens de senal ya existen; las transiciones quedan cubiertas por el prefers-reduced-motion global de arriba. */
+.context-chip { cursor: default; transition: border-color 160ms ease, color 160ms ease; }
+.context-chip .meta-val { font-variant-numeric: tabular-nums; }
+.context-chip[data-state="warn"] { border-color: var(--signal-amber); }
+.context-chip[data-state="warn"] .meta-val { color: var(--signal-amber); }
+.context-chip[data-state="high"] { border-color: var(--signal-amber); background: var(--signal-amber-bg); }
+.context-chip[data-state="high"] .meta-val { color: var(--signal-amber); font-weight: 700; }
+.context-chip[data-state="critical"] { border-color: var(--signal-red); background: var(--signal-red-bg); }
+.context-chip[data-state="critical"] .meta-val { color: var(--error-ink); font-weight: 700; }
+.context-chip[data-state="unknown"] .meta-val { color: var(--ink-faint); }
 
 /* Selector de modelo: el chip MODELO es clickeable y despliega la lista
    de modelos LLM disponibles en el proveedor de IA (roster en vivo via /api/models). */
@@ -1360,7 +1410,10 @@ body {
   width: 13px;
   height: 13px;
   border-radius: 50%;
-  background: var(--surface);
+  /* Pedido del usuario 2026-10-10: la pelotita de TODOS los interruptores es blanca, en todos los temas (antes, la del tema oscuro era oscura).
+     La sombra la recorta sobre el carril claro. Mismo criterio en .sw-toggle-knob. */
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
   transition: transform 0.15s ease;
 }
 .quick-panel-toggle[data-checked="true"] { background: var(--accent); }
@@ -1484,21 +1537,49 @@ body {
 .quick-browser-cntrl-btn-close:hover { color: var(--accent-danger, #e5484d); }
 .quick-browser-iframe { flex: 1; border: none; width: 100%; background: #fff; }
 
+/* REQ-003/004/005/006 (spec navegador-integrado-ventana): mover, redimensionar
+   y aislar. Con geometria guardada el panel se posiciona por left/top (JS pone
+   estilos inline); el header es la zona de arrastre. */
+.quick-browser-header { cursor: grab; user-select: none; touch-action: none; }
+.quick-browser-panel.dragging .quick-browser-header { cursor: grabbing; }
+.quick-browser-header .quick-browser-cntrl-btn { cursor: pointer; }
+/* Sin esto el iframe se "come" el mouse y el arrastre/resize se corta. */
+.quick-browser-panel.dragging .quick-browser-iframe,
+.quick-browser-panel.resizing .quick-browser-iframe { pointer-events: none; }
+.quick-browser-resize-handle {
+  position: absolute; right: 0; bottom: 0; width: 16px; height: 16px;
+  cursor: nwse-resize; touch-action: none;
+  background: linear-gradient(135deg, transparent 50%, var(--ink-faint) 50%, var(--ink-faint) 58%, transparent 58%, transparent 72%, var(--ink-faint) 72%, var(--ink-faint) 80%, transparent 80%);
+  opacity: 0.7;
+}
+.quick-browser-resize-handle:hover { opacity: 1; }
+.quick-browser-panel.maximized .quick-browser-resize-handle,
+.quick-browser-panel.minimized .quick-browser-resize-handle { display: none; }
+.quick-browser-cntrl-btn[aria-pressed="true"] { background: rgba(128,128,128,0.28); color: var(--signal-green); }
+.msg-inline-action {
+  margin-left: 6px; padding: 1px 8px; border: 1px solid var(--line-strong);
+  border-radius: 3px; background: transparent; color: var(--accent); cursor: pointer; font-size: 11px;
+}
+
+
 /* REQ-004 (evolucion 2026-09-12): estados de ventana del panel navegador.
    Maximizado: ocupa casi toda la pantalla (margen chico), por encima de
    todo (z-index 52, mismo nivel que un modal dashboard 50+/config). El
    icono Maximizar se cambia a Restaurar desde JS (data-action). */
 .quick-browser-panel.maximized {
-  width: calc(100vw - 40px);
-  height: calc(100vh - 40px);
-  left: 20px;
-  bottom: 20px;
+  /* !important: gana sobre la geometria inline guardada (REQ-005); la
+     geometria libre se conserva y vuelve al restaurar. */
+  width: calc(100vw - 40px) !important;
+  height: calc(100vh - 40px) !important;
+  left: 20px !important;
+  top: auto !important;
+  bottom: 20px !important;
   z-index: 52;
 }
 .quick-browser-panel.maximized .quick-browser-iframe { height: 100%; }
 /* Minimizado: colapsa a solo la barra de titulo (altura fija del header),
    ocultando el iframe -- sin perder el estado de la sesion. */
-.quick-browser-panel.minimized { height: 30px; }
+.quick-browser-panel.minimized { height: 30px !important; }
 .quick-browser-panel.minimized .quick-browser-iframe { display: none; }
 
 /* Confirmacion de salida (REQ-003 de narracion-agente-efimera, ya no
@@ -2156,14 +2237,17 @@ body {
   box-shadow: none;
 }
 
+/* spec error-estilo-system-note (pedido del usuario 2026-10-22): un mensaje de error se ve IGUAL que `.msg.system-note` (centrado, sin fondo, sin borde, sin sombra,
+   monoespaciado de 11,5 px) pero con las letras en rojo. Antes era una burbuja a la izquierda con fondo rojo oscuro, borde rojo y texto rosado fijo (`#FFC7CC`), que sobre el
+   tema claro daba 1,47:1. El rojo sale de `--error-ink`, que cambia con el tema para llegar a 4,5:1 en los tres. */
 .msg.error {
-  align-self: flex-start;
-  background: var(--signal-red-bg);
-  border: 1px solid var(--signal-red);
-  /* Fijo en ambos temas -- --signal-red-bg (el fondo) tampoco cambia
-     entre temas (los colores de semaforo son intencionalmente fijos, ver
-     comentario en :root), asi que este texto no necesita adaptarse. */
-  color: #FFC7CC;
+  align-self: center;
+  background: transparent;
+  border: 0;
+  color: var(--error-ink);
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  box-shadow: none;
 }
 
 /* Errores entendibles (2026-09-24): el texto principal de la burbuja es para
@@ -2179,11 +2263,23 @@ body {
 .msg-error-technical summary {
   cursor: pointer;
   user-select: none;
+  color: var(--error-ink);
+  font-family: var(--font-mono);
+}
+/* spec error-estilo-system-note REQ-005: el marcador del «Detalle técnico» en rojo y con DOS formas: ▸ cerrado, ▾ abierto. Se fija el `content` en vez de depender del triangulo
+   nativo (que cambia entre navegadores). `::marker` solo admite color, tipografia y `content`: por eso se declaran los tres. */
+.msg-error-technical summary::marker {
+  color: var(--error-ink);
+  content: "▸ ";
+}
+.msg-error-technical[open] > summary::marker {
+  content: "▾ ";
 }
 .msg-error-technical code {
   display: block;
   margin-top: 4px;
   font-family: var(--font-mono);
+  color: var(--error-ink);
   word-break: break-all;
 }
 
@@ -2829,6 +2925,8 @@ body {
 .session-list li.active { background: var(--accent-soft); color: var(--ink); border-left: 2px solid var(--accent); }
 .session-list .session-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-list .session-date { font-family: var(--font-mono); font-size: 9.5px; color: var(--ink-faint); flex-shrink: 0; }
+/* REQ-018 (spec fix-detener-y-progreso-visible, D5): la sesion que espera la respuesta a una pregunta, marcada en la lista. */
+.session-list .session-question-mark { flex-shrink: 0; font-size: 10.5px; font-weight: 600; color: var(--accent); white-space: nowrap; }
 .session-list-empty { color: var(--ink-faint); font-style: italic; font-size: 12px; padding: 4px 8px; }
 
 /* Icono de basura por sesion -- oculto salvo hover, para no ensuciar la
@@ -2999,6 +3097,8 @@ body {
 .connector-dot.online { background: var(--signal-green); box-shadow: 0 0 4px var(--signal-green); }
 .connector-dot.error { background: var(--signal-red); box-shadow: 0 0 4px var(--signal-red); }
 .connector-dot.checking { background: var(--signal-amber); animation: pulse-dot 1.2s ease-in-out infinite; }
+/* spec conexiones-office-m365-visibles: ambar FIJO (esperando al usuario / Excel ocupado), sin pulso: no es una carga en curso, asi que no usa `.checking` */
+.connector-dot.waiting { background: var(--signal-amber); box-shadow: 0 0 4px var(--signal-amber); }
 
 /* -- Footer info (ruta de proyecto / motor) -- */
 .sidebar-footer-info {
@@ -3345,6 +3445,37 @@ body {
 .settings-status.ok { color: var(--signal-green); }
 .settings-status.error { color: var(--signal-red); }
 
+/* spec proxy-autoheal (REQ-007): Configuracion > Red > Proxy. Resumen de lo que se usa, lista de salidas encontradas con su estado, y la botonera de siempre.
+   El estado va tambien con TEXTO («responde» / «no responde»), no solo con color. Tokens de siempre, sin animaciones nuevas. */
+.settings-actions { flex-wrap: wrap; }
+.settings-pane > [data-section] + [data-section] { margin-top: 28px; }
+.proxy-summary { display: grid; gap: 6px; margin: 0 0 12px; }
+.proxy-summary > div { display: flex; gap: 10px; align-items: baseline; }
+.proxy-summary dt { min-width: 110px; margin: 0; font-size: 12px; color: var(--ink-faint); }
+.proxy-summary dd { margin: 0; font-family: var(--font-mono); font-size: 12px; color: var(--ink); overflow-wrap: anywhere; }
+.proxy-list { display: grid; gap: 4px; margin: 0 0 14px; }
+.proxy-list:empty { display: none; }
+.proxy-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.2fr) minmax(130px, 1fr) auto;
+  gap: 10px;
+  align-items: baseline;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 12px;
+}
+.proxy-row[data-state="up"] { border-left-color: var(--signal-green); }
+.proxy-row[data-state="down"] { border-left-color: var(--signal-red); }
+.proxy-row-name { font-family: var(--font-mono); color: var(--ink); overflow-wrap: anywhere; }
+.proxy-row-source { color: var(--ink-faint); }
+.proxy-row-state { font-family: var(--font-mono); white-space: nowrap; }
+.proxy-row[data-state="up"] .proxy-row-state { color: var(--signal-green); }
+.proxy-row[data-state="down"] .proxy-row-state { color: var(--signal-red); }
+@media (max-width: 640px) { .proxy-row { grid-template-columns: 1fr; gap: 2px; } }
+
 /* spec controles-seguridad-optimizacion-lightspeed-bigquery, pestaña
    "Conexiones" (pedido del usuario 2026-09-21): status por color de cada
    conector + arbol simple expandible de datasets/tablas/listas. Reusa el
@@ -3356,6 +3487,14 @@ body {
   color: var(--ink);
   margin: 18px 0 8px;
 }
+/* Grupos de Configuracion > Audio (spec cerebro-hablar-con-espacio-y-audio-agrupado REQ-011). */
+.settings-group-title {
+  font-size: 14px;
+  margin: 26px 0 6px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-strong);
+}
+.settings-group-title:first-child { margin-top: 0; padding-top: 0; border-top: none; }
 .conn-status-list {
   display: flex;
   flex-direction: column;
@@ -3413,6 +3552,46 @@ body {
 .conn-tree-sublist { margin-left: 16px; }
 .conn-tree-error { color: var(--signal-red); }
 
+/* spec interruptores-conexiones-skills: interruptor ON/OFF (role=switch) y la fila que lo lleva, en Conexiones, en el panel rapido y en Skills. */
+.sw-toggle { position: relative; flex: 0 0 auto; width: 34px; height: 18px; padding: 0; border-radius: 999px; border: 1px solid var(--line-strong, #3a3a40); background: var(--line-strong); cursor: pointer; transition: background .15s ease, border-color .15s ease; }
+.sw-toggle[data-state="on"] { background: var(--accent); border-color: var(--accent); }
+.sw-toggle:disabled { opacity: .45; cursor: not-allowed; }
+.sw-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* pedido del usuario 2026-10-10: pelotita blanca como la del panel rapido (antes var(--ink): casi negra en el tema claro); carril apagado igual que .quick-panel-toggle */
+.sw-toggle-knob { position: absolute; top: 1px; left: 1px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3); transition: transform .15s ease; }
+.sw-toggle[data-state="on"] .sw-toggle-knob { transform: translateX(16px); }
+.sw-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; }
+.sw-row[data-state="off"] .sw-row-name, .sw-row[data-state="off"] .quick-panel-skill-item { opacity: .55; text-decoration: line-through; }
+.sw-row-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--ink); }
+.sw-row-note { flex: 0 0 auto; font-size: 11px; color: var(--ink-faint); }
+.sw-row-skill .quick-panel-skill-item { flex: 1 1 auto; min-width: 0; text-align: left; }
+.conn-status-row[data-enabled="false"] { opacity: .6; }
+/* decisión del usuario 2026-10-08: el interruptor cambió pero el estado se vuelve a probar recién con «Actualizar estado»: la fila avisa, sin moverse */
+.conn-status-row[data-pending="true"] { opacity: 1; }
+.conn-status-row[data-pending="true"] .conn-status-detail { color: var(--signal-amber); }
+.connector-dot.off { background: var(--ink-faint, #666); }
+.quick-panel-hint { margin: 4px 8px 8px; font-size: 11.5px; line-height: 1.4; color: var(--ink-faint); }
+.quick-panel-item-count { font-size: 11px; color: var(--ink-faint); margin-right: 4px; }
+@media (prefers-reduced-motion: reduce) { .sw-toggle, .sw-toggle-knob { transition: none; } }
+
+/* spec conexiones-con-nombre Fase B: arbol de Confluence dentro del chat (evento confluence-tree). */
+/* Ancho ESTANDAR: `.messages` es un contenedor flex y `.msg.assistant` lleva `align-self: flex-start`, que lo ajusta al contenido (un arbol con titulos cortos
+   quedaba angosto y uno con titulos largos, ancho). `align-self: stretch` + `width: 100%` lo fija al ancho util del chat, igual para todos los arboles. */
+.cf-chat-block { padding: 10px 12px; align-self: stretch; width: 100%; box-sizing: border-box; }
+.cf-chat-head { font-weight: 600; font-size: 13px; color: var(--ink); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.cf-chat-list, .cf-chat-children { list-style: none; margin: 0; padding: 0; }
+/* `.hidden` no es una clase global en este CSS: cada componente declara la suya. Sin esta regla una rama contraida seguia visible. */
+.cf-chat-children.hidden { display: none; }
+.cf-chat-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 12.5px; }
+.cf-chat-toggle { width: 18px; height: 18px; line-height: 16px; text-align: center; padding: 0; border: 1px solid var(--line, #3a3a40); border-radius: 4px; background: transparent; color: var(--ink-soft); cursor: pointer; font-size: 12px; }
+.cf-chat-toggle:disabled { opacity: .35; cursor: default; }
+.cf-chat-title { background: transparent; border: none; padding: 2px 4px; color: var(--ink); text-align: left; cursor: pointer; border-radius: 4px; font-size: 12.5px; }
+.cf-chat-title:hover { background: var(--surface-3); }
+.cf-chat-sub { color: var(--ink-faint); font-size: 11px; }
+.cf-chat-open { margin-left: auto; font-size: 11px; color: var(--accent, #6aa9ff); text-decoration: none; white-space: nowrap; }
+.cf-chat-open:hover { text-decoration: underline; }
+@media (prefers-reduced-motion: reduce) { .cf-chat-toggle, .cf-chat-title { transition: none; } }
+
 /* REQ-009/010 (spec narracion-agente-efimera): pestaña Configuracion >
    Audio -- checkbox de activar TTS y medidor de nivel de microfono. */
 .settings-checkbox-label {
@@ -3430,11 +3609,22 @@ body {
   cursor: pointer;
 }
 .settings-mic-meter {
+  position: relative; /* para la marca del umbral (spec cerebro-hablar-con-espacio-y-audio-agrupado REQ-010) */
   height: 8px;
   border-radius: 4px;
   background: var(--surface-2);
   border: 1px solid var(--line-strong);
   overflow: hidden;
+}
+/* Marca fina donde cae el umbral de sensibilidad elegido: si la barra verde la pasa, el Modo Cerebro oye voz. Su posicion (left, en %) la pone app.js. */
+.settings-mic-meter-mark {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  left: 0;
+  width: 2px;
+  background: var(--signal-amber);
+  pointer-events: none;
 }
 .settings-mic-meter-fill {
   height: 100%;
@@ -3442,6 +3632,91 @@ body {
   background: var(--signal-green);
   /* Transicion corta: reacciona rapido a la voz sin verse "a los saltos". */
   transition: width 60ms linear;
+}
+
+/* spec control-microfono-windows: microfono de Windows (activar + volumen) en Configuracion > Audio y en el modal de aviso */
+.settings-winmic-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+.settings-winmic-state {
+  flex: 1;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+.settings-winmic-state[data-state="muted"] { color: var(--accent); font-weight: 600; }
+.settings-winmic-state[data-state="on"] { color: var(--signal-green); font-weight: 600; }
+.settings-winmic-vol-label { margin: 0; min-width: 56px; }
+.settings-winmic-slider { flex: 1; accent-color: var(--accent); cursor: pointer; }
+.settings-winmic-slider:disabled { cursor: not-allowed; opacity: 0.5; }
+.settings-winmic-value { min-width: 48px; text-align: right; font-variant-numeric: tabular-nums; }
+#cfg-winmic-block[data-state="empty"] .settings-winmic-row,
+#cfg-winmic-block[data-state="error"] .settings-winmic-row,
+#cfg-winmic-block[data-state="empty"] #cfg-winmic-select,
+#cfg-winmic-block[data-state="error"] #cfg-winmic-select { display: none; }
+/* spec audio-sistema-modo-reunion: ventana de fuente del Modo reunión + indicador en el ojo + bloque en Configuración */
+.meeting-source-modal { max-width: 520px; }
+/* spec importar-historial-de-carpeta (REQ-010): la lista de conversaciones anteriores de la carpeta elegida. */
+.folder-history-modal { width: min(560px, 100%); }
+.folder-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.folder-history-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.folder-history-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.folder-history-title { font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-history-meta { font-size: 11.5px; color: var(--ink-soft); }
+.folder-history-actions { display: flex; gap: 6px; flex-shrink: 0; }
+/* spec sesion-publica-privada: interruptor del modal de sesion y etiqueta «pública» de la lista de conversaciones anteriores. Sin animaciones nuevas. */
+.session-edit-public-field .settings-hint { margin-top: 6px; }
+.session-edit-public-field .settings-hint.hidden { display: none; }
+.folder-history-badge { display: inline-block; margin-left: 6px; padding: 1px 7px; border: 1px solid var(--signal-amber); border-radius: 999px; font-size: 10.5px; font-weight: 700; color: var(--signal-amber); text-transform: uppercase; letter-spacing: 0.04em; }
+.folder-history-actions .acc-action-btn { white-space: nowrap; }
+.meeting-source-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  cursor: pointer;
+}
+.meeting-source-option:has(input:checked) { border-color: var(--accent); }
+.meeting-source-option[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+.meeting-source-option input { margin-top: 3px; accent-color: var(--accent); }
+.meeting-source-option span { display: flex; flex-direction: column; gap: 2px; color: var(--ink); }
+.meeting-source-option small { color: var(--ink-soft); font-size: 11.5px; line-height: 1.4; }
+.voice-eye-source {
+  font-size: 10px;
+  color: var(--ink-soft);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
+.mic-warn-modal { max-width: 520px; }
+@media (prefers-reduced-motion: reduce) {
+  .settings-mic-meter-fill { transition: none; }
 }
 
 /* -- Explorador de carpetas (local o SharePoint) -- */
@@ -3673,6 +3948,23 @@ body {
   .pomodoro-display { transition: none; }
 }
 
+/* REQ-016 (spec fix-detener-y-progreso-visible): aviso de «no se pudo guardar tu preferencia». Fijo abajo y por encima de
+   Configuración (z-index 40-60), que es donde se cambian las preferencias; sin animación (nada que reducir). */
+.pref-save-notice {
+  position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 12px; padding: 12px 16px; z-index: 3000;
+  width: max-content; max-width: calc(100vw - 32px); box-sizing: border-box;
+  background: var(--surface-2); border: 1px solid var(--signal-amber); color: var(--ink);
+  border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.35); font-size: 13.5px; line-height: 1.4;
+}
+.pref-save-notice.hidden { display: none; }
+.pref-save-notice-text { flex: 1; min-width: 0; }
+.pref-save-notice-close {
+  flex-shrink: 0; background: transparent; border: 1px solid var(--line-strong); color: var(--ink);
+  border-radius: 6px; padding: 5px 10px; font: inherit; font-size: 12.5px; cursor: pointer;
+}
+.pref-save-notice-close:hover { border-color: var(--accent); color: var(--accent); }
+
 /* spec programador-alarmas 0.12.0: fila "archivo a ejecutar" + btn explorar,
    en horizontal (el input de la ruta necesita estirarse, no como el max-width
    de los pomodoro-work/rest). */
@@ -3805,3 +4097,200 @@ body {
 }
 .msg-response-type svg { opacity: 0.9; }
 
+/* =========================================================================
+   Adjuntar ARCHIVOS (spec adjuntar-archivos-chat REQ-001/004/008/009):
+   chips de archivo, cartel de soltar y modal de limpieza.
+   ========================================================================= */
+.pending-files-row {
+  display: flex; gap: 8px; flex-wrap: wrap; margin: 0 14% -4px 14%; padding: 8px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
+}
+.pending-files-row.hidden { display: none; }
+@media (max-width: 1100px) { .pending-files-row { margin: 0 5% -4px 5%; } }
+
+.msg-files-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+
+.file-chip {
+  position: relative; display: flex; align-items: center; gap: 8px; min-width: 180px; max-width: 320px;
+  padding: 6px 28px 6px 8px; background: var(--surface-1, var(--surface-2)); color: var(--ink);
+  border: 1px solid var(--line-strong); border-radius: 6px; font-size: 12px;
+}
+.file-chip-icon { font-size: 20px; line-height: 1; flex: none; }
+.file-chip-body { display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 2px; }
+.file-chip-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-chip-meta { color: var(--ink-faint); font-size: 11px; }
+.file-chip[data-state="error"] { border-color: var(--signal-red); }
+.file-chip[data-state="error"] .file-chip-meta { color: var(--signal-red); }
+.file-chip[data-state="deleted"], .file-chip[data-state="missing"] { opacity: 0.6; border-style: dashed; }
+.file-chip-warn { border-color: var(--signal-amber); }
+.file-chip-warn .file-chip-meta { color: var(--signal-amber); }
+.file-chip-secret { color: var(--signal-amber); font-size: 10.5px; }
+.file-chip-openable { cursor: pointer; }
+.file-chip-openable:hover, .file-chip-openable:focus-visible { border-color: var(--accent); outline: none; }
+.file-chip-remove {
+  position: absolute; top: 4px; right: 4px; width: 18px; height: 18px; padding: 0; line-height: 16px;
+  background: transparent; color: var(--ink-faint); border: none; border-radius: 50%; font-size: 11px; cursor: pointer;
+}
+.file-chip-remove:hover { background: var(--signal-red); color: #fff; }
+.file-chip-bar { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; margin-top: 2px; }
+.file-chip-bar-fill { height: 100%; background: var(--signal-green); transition: width 0.15s linear; }
+.file-chip-bar.indeterminate .file-chip-bar-fill { width: 40% !important; animation: file-chip-slide 1.1s ease-in-out infinite; }
+@keyframes file-chip-slide { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
+
+.attach-drop-overlay {
+  position: absolute; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.45); border: 2px dashed var(--accent); pointer-events: none;
+}
+.attach-drop-overlay.hidden { display: none; }
+.attach-drop-overlay-card {
+  padding: 18px 26px; background: var(--surface-2); color: var(--ink); border-radius: var(--radius-sm);
+  font-size: 15px; font-weight: 600; border: 1px solid var(--line-strong);
+}
+
+.cleanup-summary { margin: 0 0 10px; color: var(--ink); }
+.cleanup-list { display: flex; flex-direction: column; gap: 6px; max-height: 46vh; overflow: auto; margin-bottom: 12px; }
+.cleanup-row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--surface-2); font-size: 12.5px;
+}
+.cleanup-row[data-locked="true"] { opacity: 0.65; }
+.cleanup-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cleanup-row-size { color: var(--ink-faint); flex: none; }
+.cleanup-row-note { color: var(--signal-amber); font-size: 11px; flex: none; }
+.cleanup-row label { display: flex; align-items: center; gap: 4px; flex: none; cursor: pointer; }
+
+@media (prefers-reduced-motion: reduce) {
+  .file-chip-bar.indeterminate .file-chip-bar-fill { animation: none; margin-left: 0; }
+  .file-chip-bar-fill { transition: none; }
+}
+
+/* PQ-003 / BL-012: aviso de "el modelo esta tardando" (ver armSlowModelNotice en app.js). Discreto, como el tip de arriba: informa, no alarma. */
+.msg-slow-model-notice {
+  font-size: 12px;
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+/* ---------------------------------------------------------------------------------------------------------------------------------------------------------
+   spec gestor-conexiones Fase B: gestor de conexiones (Configuración > Conexiones) al estilo de las capturas de FlowCraft que pasó el usuario: menú «Conectores»,
+   ventana «Credenciales de <tipo>» con una tarjeta por conexión, insignia de estado y formulario en el lugar. Tokens del sistema Rojo (sirven en los 3 temas).
+   La clase .hidden no es global en este archivo: cada componente declara la suya (trampa ya conocida).
+   --------------------------------------------------------------------------------------------------------------------------------------------------------- */
+.vault-root { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
+/* Contraste (reporte del usuario 2026-10-09, tema claro: «fondo marron feo y letras oscuras, casi ni se ve»): los --signal-*-bg
+   son oscuros en TODOS los temas (el claro no los redefine) y --ink es oscuro en el claro: 1,4:1. En esta pantalla el fondo es
+   un tinte del color de la señal sobre la superficie del tema, y el texto de color se mezcla con --ink: >= 4,5:1 en los tres
+   temas (lo mide tests/test_e2e_vault.py). La primera declaracion es el respaldo para un navegador sin color-mix(). */
+.vault-banner {
+  display: flex; flex-direction: column; gap: 8px; padding: 12px 14px;
+  border: 1px solid var(--signal-amber); border-left-width: 4px; border-radius: 10px; color: var(--ink);
+  background: var(--surface-2);
+  background: color-mix(in srgb, var(--signal-amber) 14%, var(--surface));
+}
+.vault-banner p { margin: 0; font-size: 12.5px; line-height: 1.5; }
+.vault-banner-done {
+  border-color: var(--signal-green);
+  background: var(--surface-2);
+  background: color-mix(in srgb, var(--signal-green) 14%, var(--surface));
+}
+.vault-report-list { margin: 0; padding-left: 18px; font-size: 12px; color: var(--ink-soft); }
+.vault-report-list .error { color: var(--signal-red); color: color-mix(in srgb, var(--signal-red) 62%, var(--ink)); }
+
+.vault-menu-wrap { position: relative; align-self: flex-start; }
+.vault-menu {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; min-width: 230px; padding: 6px;
+  display: flex; flex-direction: column; gap: 2px;
+  background: var(--surface-2); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: 0 10px 30px rgba(0, 0, 0, .35);
+}
+.vault-menu.hidden { display: none; }
+.vault-menu-item {
+  text-align: left; padding: 8px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--ink); font-size: 13px; cursor: pointer;
+}
+.vault-menu-item:hover, .vault-menu-item:focus-visible { background: var(--surface-3); outline: none; }
+
+.vault-summary { display: flex; flex-direction: column; gap: 6px; }
+.vault-summary-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px;
+  border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--ink); font-size: 13px; cursor: pointer; text-align: left;
+}
+.vault-summary-row:hover { border-color: var(--accent); }
+
+.vault-badge {
+  flex: none; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; letter-spacing: .02em;
+  background: var(--surface-3); color: var(--ink-soft);
+}
+.vault-badge[data-state="ok"] { background: var(--signal-green-bg); color: var(--signal-green); }
+.vault-badge[data-state="error"] { background: var(--signal-red-bg); color: var(--signal-red); }
+.vault-badge[data-state="warn"] { background: var(--signal-amber-bg); color: var(--signal-amber); }
+.vault-badge[data-state="ok"] { background: color-mix(in srgb, var(--signal-green) 16%, var(--surface)); color: color-mix(in srgb, var(--signal-green) 45%, var(--ink)); }
+.vault-badge[data-state="error"] { background: color-mix(in srgb, var(--signal-red) 16%, var(--surface)); color: color-mix(in srgb, var(--signal-red) 62%, var(--ink)); }
+.vault-badge[data-state="warn"] { background: color-mix(in srgb, var(--signal-amber) 16%, var(--surface)); color: color-mix(in srgb, var(--signal-amber) 45%, var(--ink)); }
+
+/* z-index 50: por encima de Configuración (40) y DEBAJO del modal de confirmación de Vision (60), que se abre encima al tocar «Eliminar» */
+.vault-modal-overlay {
+  position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: 20px;
+  background: rgba(0, 0, 0, .55);
+}
+.vault-modal {
+  width: min(720px, 100%); max-height: calc(100vh - 40px); overflow-y: auto; padding: 20px 22px;
+  display: flex; flex-direction: column; gap: 12px;
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: 0 20px 60px rgba(0, 0, 0, .45);
+  animation: vault-modal-in .16s ease-out;
+}
+@keyframes vault-modal-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.vault-modal-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.vault-modal-header h3 { margin: 0; font-size: 17px; color: var(--ink); }
+.vault-modal-close { border: 0; background: transparent; color: var(--ink-soft); font-size: 22px; line-height: 1; cursor: pointer; padding: 2px 6px; border-radius: 6px; }
+.vault-modal-close:hover { color: var(--ink); background: var(--surface-3); }
+.vault-modal-body { display: flex; flex-direction: column; gap: 12px; }
+
+.vault-cards { display: flex; flex-direction: column; gap: 10px; }
+.vault-card { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.vault-card-top { display: flex; align-items: center; gap: 10px; }
+.vault-card-name { font-weight: 700; font-size: 14.5px; color: var(--ink); }
+.vault-card-lines { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; color: var(--ink-soft); }
+.vault-card-line.warn { color: var(--signal-amber); color: color-mix(in srgb, var(--signal-amber) 45%, var(--ink)); }
+.vault-card-meta { font-size: 11.5px; color: var(--ink-faint); margin-top: 2px; }
+.vault-card-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.vault-card-result { font-size: 12px; color: var(--ink-soft); }
+.vault-card-result[data-state="ok"] { color: var(--signal-green); color: color-mix(in srgb, var(--signal-green) 45%, var(--ink)); }
+.vault-card-result[data-state="error"] { color: var(--signal-red); color: color-mix(in srgb, var(--signal-red) 62%, var(--ink)); }
+.vault-add-btn { align-self: flex-start; }
+.vault-add-btn.hidden { display: none; }
+
+.vault-form { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface-2); }
+.vault-form h4, .vault-bq-key h4 { margin: 0; font-size: 13.5px; color: var(--ink); }
+.vault-name-hint:empty { display: none; }
+.vault-secret { display: flex; gap: 6px; align-items: stretch; }
+.vault-secret input { flex: 1; min-width: 0; }
+.vault-eye {
+  flex: none; width: 38px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); color: var(--ink-soft); cursor: pointer;
+}
+.vault-eye[aria-pressed="true"] { border-color: var(--accent); color: var(--ink); }
+.vault-notice { font-size: 12px; color: var(--ink-soft); min-height: 1em; }
+.vault-notice[data-state="error"] { color: var(--signal-red); color: color-mix(in srgb, var(--signal-red) 62%, var(--ink)); }
+.vault-notice[data-state="ok"] { color: var(--signal-green); color: color-mix(in srgb, var(--signal-green) 45%, var(--ink)); }
+/* spec conexiones-office-m365-visibles: aviso del campo «Nombre» de Outlook y Teams / Office. Mismo aspecto que `.vault-notice`, con clase propia para no tapar el aviso de la ventana. */
+.vault-name-notice { font-size: 12px; color: var(--ink-soft); min-height: 1em; }
+.vault-name-notice[data-state="error"] { color: var(--signal-red); color: color-mix(in srgb, var(--signal-red) 62%, var(--ink)); }
+.vault-name-field { margin-top: 12px; }
+
+.vault-bq-key { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px dashed var(--line-strong); border-radius: 12px; }
+.vault-bq-key textarea { width: 100%; box-sizing: border-box; font-family: ui-monospace, Consolas, monospace; font-size: 12px; background: var(--surface); color: var(--ink); border: 1px solid var(--line-strong); border-radius: 8px; padding: 8px; }
+.vault-bq-key input.hidden { display: none; }
+/* Pedido del usuario 2026-10-10: el recuadro de la key se pinta segun como salio la importacion (mismo criterio de contraste que los avisos). */
+.vault-bq-key[data-state="ok"] { border-style: solid; border-color: var(--signal-green); background: color-mix(in srgb, var(--signal-green) 12%, var(--surface)); }
+.vault-bq-key[data-state="error"] { border-style: solid; border-color: var(--signal-red); background: color-mix(in srgb, var(--signal-red) 10%, var(--surface)); }
+.vault-bq-result { margin: 0; font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.vault-bq-result:empty { display: none; }
+.vault-bq-key[data-state="ok"] .vault-bq-result { color: var(--signal-green); color: color-mix(in srgb, var(--signal-green) 45%, var(--ink)); }
+.vault-bq-key[data-state="error"] .vault-bq-result { color: var(--signal-red); color: color-mix(in srgb, var(--signal-red) 62%, var(--ink)); }
+.vault-dropzone {
+  padding: 18px; text-align: center; font-size: 12.5px; color: var(--ink-soft);
+  border: 2px dashed var(--line-strong); border-radius: 10px; background: var(--surface);
+}
+.vault-dropzone[data-state="over"] { border-color: var(--accent); color: var(--ink); }
+
+@media (prefers-reduced-motion: reduce) {
+  .vault-modal { animation: none; }
+}

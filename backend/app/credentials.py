@@ -90,6 +90,10 @@ LOCAL_KEY_PATH = BASE_DIR / "keys" / "credentials.key"
 #               de Settings en config.py) -- nunca se persiste solo, es
 #               una ayuda visual.
 # ---------------------------------------------------------------------------
+# spec conexiones-con-nombre (2026-10-05, decision del usuario): Oracle, SharePoint y SAP SALEN de este esquema -- ya no se cargan aca ni se leen de
+# `.env.enc`; viven en `connections.json` (ver app/connections.py), con varias conexiones por tipo y secretos dentro del bloque. La pestaña Credenciales
+# se conserva SOLO para BigQuery y la voz de Vision, que siguen guardando cifrado. Un campo viejo de esos tipos que quede dentro de un `.env.enc` existente
+# se ignora (no esta en `CREDENTIAL_FIELDS`): el usuario lo migra a mano a connections.json.
 CONNECTOR_SCHEMA: dict[str, dict[str, Any]] = {
     # spec vision-generico REQ-001/003/005: el proveedor de IA y el dictado
     # tambien se pueden cargar desde la app (las claves quedan cifradas).
@@ -124,38 +128,6 @@ CONNECTOR_SCHEMA: dict[str, dict[str, Any]] = {
         "fields": [
             {"key": "fish_api_key", "label": "Fish Audio: clave", "type": "password", "secret": True},
             {"key": "elevenlabs_api_key", "label": "ElevenLabs: clave", "type": "password", "secret": True},
-        ],
-    },
-    "oracle": {
-        "label": "Oracle",
-        "fields": [
-            {"key": "oracle_user", "label": "Usuario", "type": "text", "secret": False},
-            {
-                "key": "oracle_password",
-                "label": "Contraseña",
-                "type": "password",
-                "secret": True,
-            },
-            {"key": "oracle_host", "label": "Host", "type": "text", "secret": False},
-            {
-                "key": "oracle_port",
-                "label": "Puerto",
-                "type": "number",
-                "secret": False,
-                "default": "1521",
-            },
-            {
-                "key": "oracle_service_name",
-                "label": "Service name",
-                "type": "text",
-                "secret": False,
-            },
-            {
-                "key": "oracle_schema",
-                "label": "Schema",
-                "type": "text",
-                "secret": False,
-            },
         ],
     },
     "bigquery": {
@@ -194,79 +166,6 @@ CONNECTOR_SCHEMA: dict[str, dict[str, Any]] = {
             },
         ],
     },
-    "sharepoint": {
-        "label": "SharePoint / Azure AD (Microsoft Graph)",
-        "fields": [
-            {
-                "key": "sharepoint_site_url",
-                "label": "Site URL",
-                "type": "text",
-                "secret": False,
-            },
-            {
-                "key": "azure_client_id",
-                "label": "Client ID",
-                "type": "text",
-                "secret": False,
-            },
-            {
-                "key": "azure_client_secret",
-                "label": "Client secret",
-                "type": "password",
-                "secret": True,
-            },
-            {
-                "key": "azure_tenant_id",
-                "label": "Tenant ID",
-                "type": "text",
-                "secret": False,
-            },
-            {
-                "key": "sharepoint_default_list_name",
-                "label": "Lista por defecto",
-                "type": "text",
-                "secret": False,
-            },
-            {
-                "key": "https_proxy",
-                "label": "HTTPS proxy",
-                "type": "text",
-                "secret": False,
-            },
-        ],
-    },
-    "sap": {
-        "label": "SAP (Fiori/OData v2)",
-        "fields": [
-            {
-                "key": "sap_base_url",
-                "label": "Base URL",
-                "type": "text",
-                "secret": False,
-            },
-            {
-                "key": "sap_client",
-                "label": "Client",
-                "type": "text",
-                "secret": False,
-                "default": "100",
-            },
-            {"key": "sap_user", "label": "Usuario", "type": "text", "secret": False},
-            {
-                "key": "sap_password",
-                "label": "Contraseña",
-                "type": "password",
-                "secret": True,
-            },
-            {
-                "key": "sap_language",
-                "label": "Idioma",
-                "type": "text",
-                "secret": False,
-                "default": "EN",
-            },
-        ],
-    },
 }
 
 
@@ -292,6 +191,36 @@ class CredentialsError(Exception):
     """Errores de negocio de este modulo (deploy key faltante, archivo
     cifrado corrupto, etc.) -- el endpoint FastAPI los traduce a
     HTTPException con el mensaje tal cual, ya pensado para el usuario."""
+
+
+def where_to_load(section: str) -> str:
+    """Donde carga el usuario una clave HOY, para los avisos (pedido del usuario 2026-10-09): con la configuracion ya en Vision, la
+    tarjeta del gestor (la pestaña Credenciales se oculta); antes de importar, la pestaña Credenciales de siempre."""
+    return f"Configuración > Conexiones > {section}" if _vault_active() else "Configuración > Credenciales"
+
+
+class CredentialsMovedError(CredentialsError):
+    """spec gestor-conexiones: la configuracion ya vive cifrada en Vision; esta pestaña no guarda nada (el endpoint responde 409)."""
+
+
+VAULT_ACTIVE_MESSAGE = (
+    "Tus credenciales ahora se guardan cifradas dentro de Vision: cargalas en Configuración > Conexiones. "
+    "Esta pestaña ya no guarda nada."
+)
+VAULT_CLEAR_MESSAGE = (
+    "Tus credenciales ahora están cifradas dentro de Vision: se cambian o se quitan en Configuración > Conexiones. "
+    "El archivo viejo se borra desde ahí, con «Borrar archivos viejos»."
+)
+
+
+def _vault_active() -> bool:
+    """spec gestor-conexiones (decision confirmada, spec.md:136, y REQ-011): con la configuracion ya en Vision, el `.env.enc` se
+    importo y "despues no se lee mas", y Vision "nunca vuelve a crearlo". Antes, el arranque lo seguia aplicando ENCIMA de lo
+    guardado en Vision (una clave vieja le ganaba a la nueva en cada reinicio) y volvia a escribir la key de BigQuery en texto plano
+    en `keys/`; y esta pestaña lo volvia a crear. Con la base inactiva (antes de importar) todo sigue como siempre."""
+    from app import config_store  # import diferido: config_store importa config y connections
+
+    return config_store.is_active()
 
 
 def _derive_fernet_key() -> bytes:
@@ -373,6 +302,9 @@ def _save_encrypted(values: dict[str, str]) -> None:
 def get_credentials_status() -> dict[str, bool]:
     """Para la UI: {campo: True/False} segun si HAY un valor guardado --
     NUNCA devuelve el valor real (ni siquiera cifrado) al frontend."""
+    if _vault_active():
+        # spec gestor-conexiones (spec.md:136): ya importado, no se lee mas (revision 2026-10-09: tampoco para pintar el estado)
+        return {field: False for field in CREDENTIAL_FIELDS}
     stored = _load_encrypted()
     return {field: bool(stored.get(field)) for field in CREDENTIAL_FIELDS}
 
@@ -393,6 +325,8 @@ def save_credentials(values: dict[str, str]) -> None:
     ya guardado (para eso esta `clear_credentials`), simplemente no se
     toca (permite guardar solo el campo que se esta editando sin tener
     que re-mandar todos los demas)."""
+    if _vault_active():
+        raise CredentialsMovedError(VAULT_ACTIVE_MESSAGE)  # spec gestor-conexiones REQ-011: nunca se vuelve a crear el .env.enc
     current = _load_encrypted()
     for field, value in values.items():
         if field not in CREDENTIAL_FIELDS:
@@ -407,6 +341,10 @@ def clear_credentials() -> None:
     """Borra TODAS las credenciales guardadas -- vuelve a depender
     exclusivamente de lo que haya en `backend/.env` (texto plano, para
     quien prefiera seguir editandolo a mano)."""
+    if _vault_active():
+        # Revision 2026-10-09: con la base activa, borrar el .env.enc no quita las claves que usa Vision (viven en la base):
+        # responder «Credenciales quitadas» seria falso. El archivo viejo se borra con «Borrar archivos viejos» (REQ-011).
+        raise CredentialsMovedError(VAULT_CLEAR_MESSAGE)
     if ENC_FILE.exists():
         ENC_FILE.unlink()
     apply_credentials_to_settings()
@@ -422,7 +360,7 @@ def clear_credentials() -> None:
 # "oracle_port" (necesita cast a int antes de asignar, ver el loop de
 # apply_credentials_to_settings mas abajo) y "bq_key_json" (no es un
 # atributo de Settings, se maneja aparte via archivo en disco).
-_NON_DIRECT_ATTR_FIELDS = {"oracle_port", "bq_key_json"}
+_NON_DIRECT_ATTR_FIELDS = {"bq_key_json"}  # oracle_port salio con Oracle (spec conexiones-con-nombre); bq_key_json va a un archivo
 _FIELD_TO_SETTINGS_ATTR = {
     field["key"]: field["key"]
     for field in _all_schema_fields()
@@ -436,27 +374,14 @@ def apply_credentials_to_settings() -> None:
     puntuales) -- se llama al arrancar el proceso (ver app/main.py
     startup) y cada vez que se guardan/borran credenciales, para que el
     cambio tenga efecto inmediato sin reiniciar el backend."""
+    if _vault_active():
+        return  # spec gestor-conexiones: ya importado; lo de Vision manda y la key no se reescribe en keys/
     stored = _load_encrypted()
     settings = get_settings()
     for field, attr in _FIELD_TO_SETTINGS_ATTR.items():
         value = stored.get(field)
         if value:
             setattr(settings, attr, value)
-
-    # REQ-103: "oracle_port" es el unico campo numerico del schema --
-    # Settings.oracle_port es `int` (usado directo en oracle_dsn), asi que
-    # el string guardado en el .env.enc se castea antes de asignar. Si el
-    # usuario escribio algo no numerico, se ignora (mejor esfuerzo, mismo
-    # criterio del resto del modulo) en vez de romper el arranque.
-    oracle_port_raw = stored.get("oracle_port")
-    if oracle_port_raw:
-        try:
-            settings.oracle_port = int(oracle_port_raw)
-        except ValueError:
-            logger.warning(
-                "oracle_port guardado ('%s') no es un numero valido -- se ignora.",
-                oracle_port_raw,
-            )
 
     bq_key_json = stored.get("bq_key_json")
     if bq_key_json:

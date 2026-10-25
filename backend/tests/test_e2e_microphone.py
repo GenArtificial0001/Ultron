@@ -26,6 +26,7 @@ Se saltea solo si Playwright o su Chromium no están instalados.
 from __future__ import annotations
 
 import json
+import re
 import time
 from types import SimpleNamespace
 
@@ -388,6 +389,8 @@ def test_double_click_on_mic_button_does_not_leave_a_recording_running(app):
     app.page.click("#voice-mic-btn")  # el usuario corta la grabación
     app.page.wait_for_function(f"{LIVE_STREAMS_JS} === 0")
     assert len(app.gum()) == 1  # un solo micrófono abierto por una sola grabación
+    # fix-conflicto-modos-voz-simultaneos: el 2do click es del MISMO modo, no un conflicto -> sin aviso de "otro modo escuchando"
+    assert not any("está grabando" in n or "está escuchando" in n for n in app.notes())
 
 
 # ---------------------------------------------------------------------------
@@ -426,15 +429,17 @@ def test_space_shortcut_does_not_reopen_the_microphone_stream(app):
 
 
 def test_space_shortcut_only_acts_while_brain_mode_is_active(app):
-    """REQ-002: fuera de Modo Cerebro, espacio no debe disparar ningun
-    comportamiento especial (ni pedir microfono, ni tocar el compositor)."""
+    """REQ-002 (enmendado por la spec cerebro-espacio-turnos, 2026-10-19: con el modo apagado Espacio ahora lo ENCIENDE): mientras se escribe en
+    un campo de texto, Espacio sigue siendo un espacio: no pide el microfono ni toca nada."""
     app.open()
     gum_count_before = len(app.gum())
+    app.page.focus("#chat-input")
     app.page.keyboard.press("Space")
     app.page.wait_for_timeout(200)
     assert (
         len(app.gum()) == gum_count_before
-    )  # nada paso -- Modo Cerebro no estaba activo
+    )  # nada paso -- el foco estaba en un campo de texto
+    assert app.page.input_value("#chat-input") == " ", "el espacio se escribio como siempre"
 
 
 def test_space_shortcut_respects_the_configurable_toggle(app):
@@ -456,4 +461,228 @@ def test_space_shortcut_respects_the_configurable_toggle(app):
     # Sin el atajo activo, nada cambia -- ni siquiera el stream se toca (ya
     # cubierto por el test de arriba, pero se re-verifica con el toggle OFF).
     assert app.page.evaluate("window.__streams.at(-1).id") == stream_id_before
+    assert len(app.gum()) == gum_count_before, "con el atajo OFF, espacio no debe pedir el microfono de nuevo"
+    app.page.keyboard.press("Escape")
+
+
+# ---------------------------------------------------------------------------
+# Un modo de voz a la vez (spec fix-conflicto-modos-voz-simultaneos, opcion A).
+# Bug real: con Modo Cerebro activo, tocar "Hablar" abria un SEGUNDO microfono
+# y Cerebro quedaba sordo hasta recargar. Con microfonos falsos el silencio no
+# se reproduce (depende del audio real del SO): lo que se verifica es la causa,
+# que nunca se abra un segundo microfono y que el modo activo siga intacto.
+# ---------------------------------------------------------------------------
+JARGON = ("getusermedia", "stream", "aec", "eco", "mediarecorder")
+
+
+def assert_plain_note(app, fragment):
+    """REQ-004: el aviso dice qué modo escucha y qué hacer, sin jerga."""
+    app.wait_note(fragment)
+    note = next(n for n in app.notes() if fragment in n)
+    words = set(re.findall(r"\w+", note.lower()))  # palabras enteras: "Record" no es "eco"
+    assert not words & set(JARGON), note
+    return note
+
+
+def test_mic_button_is_blocked_while_brain_mode_listens(app, whisper):
+    """REQ-001: con Cerebro activo, "Hablar" no graba ni pide otro micrófono."""
+    whisper.text = ""  # Cerebro no manda nada al modelo mientras dura el test
+    app.open()
+    app.start_listening("#brain-btn")
+    stream_id = app.page.evaluate("window.__streams.at(-1).id")
+
+    app.page.click("#voice-mic-btn")
+    note = assert_plain_note(app, "Modo Cerebro está escuchando")
+    app.page.wait_for_timeout(300)  # tiempo de sobra para que un segundo pedido se viera
+
+    assert "Escape" in note and "micrófono del chat" in note
+    assert len(app.gum()) == 1, "no se abre un segundo micrófono"
+    assert app.page.get_attribute("#voice-mic-btn", "data-listening") != "true"
+    # el modo activo sigue igual: mismo micrófono, vivo, y Cerebro encendido
+    assert app.page.evaluate("window.__streams.at(-1).id") == stream_id
+    assert app.page.evaluate("window.__streams.at(-1).getAudioTracks()[0].readyState") == "live"
+    assert app.page.get_attribute("#brain-btn", "data-state") != "idle"
+    app.page.keyboard.press("Escape")
+
+
+def test_brain_and_meeting_are_blocked_while_the_mic_button_records(app, whisper):
+    """REQ-002: con "Hablar" grabando, ni Cerebro ni Reunión arrancan."""
+    whisper.text = ""
+    app.open()
+    app.start_listening("#voice-mic-btn")
+
+    app.page.click("#brain-btn")
+    assert_plain_note(app, "El micrófono del chat está grabando")
+    app.page.click("#voice-record-btn")
+    app.page.wait_for_function(
+        "[...document.querySelectorAll('.msg.system-note')].filter(e => e.textContent.includes('micrófono del chat está grabando')).length === 2"
+    )
+    app.page.wait_for_timeout(300)
+
+    assert len(app.gum()) == 1, "no se abre un segundo micrófono"
+    assert app.page.get_attribute("#brain-btn", "data-state") == "idle"
+    assert app.page.get_attribute("#voice-record-btn", "data-recording") != "true"
+    assert app.page.is_hidden("#voice-eye-widget")
+    assert app.page.get_attribute("#voice-mic-btn", "data-listening") == "true"  # "Hablar" sigue grabando
+    app.page.click("#voice-mic-btn")
+    app.page.wait_for_function(f"{LIVE_STREAMS_JS} === 0")
+
+
+def test_brain_mode_click_while_the_mic_button_is_still_opening_is_blocked(app, whisper):
+    """Caso borde: el click a Cerebro llega mientras "Hablar" todavía espera el
+    micrófono (aún no marcó `listening`): igual se bloquea. El aviso NO dice "grabando, tocalo para
+    terminar" (revision 2026-10-09: todavia no graba y ese toque se ignoraria): dice que se esta encendiendo."""
+    whisper.text = ""
+    app.open()
+    app.page.evaluate(
+        "document.getElementById('voice-mic-btn').click(); document.getElementById('brain-btn').click();"
+    )
+    note = assert_plain_note(app, "El micrófono del chat se está encendiendo")
+    assert "está grabando" not in note
+    app.page.wait_for_function(
+        "document.getElementById('voice-mic-btn').dataset.listening === 'true' && window.__gum.every(c => c.done)"
+    )
+    app.page.wait_for_timeout(300)
+    assert len(app.gum()) == 1
+    assert app.page.get_attribute("#brain-btn", "data-state") == "idle"
+    app.page.click("#brain-btn")  # ya graba de verdad: ahora si el aviso de "grabando"
+    assert_plain_note(app, "El micrófono del chat está grabando")
+    app.page.click("#voice-mic-btn")
+    app.page.wait_for_function(f"{LIVE_STREAMS_JS} === 0")
+
+
+def test_brain_and_meeting_modes_exclude_each_other_both_ways(app, whisper):
+    """REQ-003: Cerebro y Reunión se bloquean en las dos direcciones."""
+    whisper.text = ""
+    app.open()
+    app.start_listening("#voice-record-btn")
+    app.page.click("#brain-btn")
+    note = assert_plain_note(app, "Modo reunión está escuchando")
+    assert "Modo Cerebro" in note
+    app.page.wait_for_timeout(300)
+    assert len(app.gum()) == 1
+    assert app.page.get_attribute("#brain-btn", "data-state") == "idle"
+    assert app.page.get_attribute("#voice-record-btn", "data-recording") == "true"  # la reunión sigue
+
+    app.page.click("#voice-record-btn")  # salir de la reunión: pide confirmación
+    app.page.click("#voice-eye-exit-discard")
+    app.page.wait_for_function(f"{LIVE_STREAMS_JS} === 0")
+
+    app.start_listening("#brain-btn")
+    app.page.click("#voice-record-btn")
+    note = assert_plain_note(app, "Modo Cerebro está escuchando")
+    assert "Modo reunión" in note
+    app.page.wait_for_timeout(300)
+    assert len(app.gum()) == 2  # el de la reunión ya cerrada + el de Cerebro, ninguno más
+    assert app.page.get_attribute("#voice-record-btn", "data-recording") != "true"
+    assert app.page.is_hidden("#voice-eye-widget")
+    assert app.page.get_attribute("#brain-btn", "data-state") != "idle"
+    app.page.keyboard.press("Escape")
+
+
+def test_a_blocked_attempt_leaves_nothing_stuck(app, whisper):
+    """REQ-005: apagado el modo que bloqueaba, el otro arranca normal."""
+    whisper.text = "despues del bloqueo"
+    app.open()
+    app.start_listening("#brain-btn")
+    app.page.click("#voice-mic-btn")
+    app.wait_note("Modo Cerebro está escuchando")
+    app.page.keyboard.press("Escape")
+    app.page.wait_for_function("document.getElementById('brain-btn').dataset.state === 'idle'")
+
+    app.start_listening("#voice-mic-btn")
+    app.page.wait_for_function("document.getElementById('voice-mic-btn').dataset.listening === 'true'")
+    app.page.wait_for_timeout(1500)  # "habla" 1,5 s de tono
+    app.page.click("#voice-mic-btn")
+    app.page.wait_for_function("document.getElementById('chat-input').value.length > 0")
+    assert app.page.input_value("#chat-input") == "despues del bloqueo"
+    # y Cerebro vuelve a arrancar después de "Hablar"
+    whisper.text = ""
+    app.start_listening("#brain-btn")
+    assert app.page.get_attribute("#brain-btn", "data-state") != "idle"
+    app.page.keyboard.press("Escape")
+
+
+# ---------------------------------------------------------------------------
+# spec fix-cerebro-escucha-y-microfono REQ-004/005/007 (reporte del usuario 2026-10-10, auricular Dell WL5024 con
+# microfono de palanca): el microfono puede volver SIN un `devicechange` y nada reintentaba; el espacio tampoco lo curaba.
+# ---------------------------------------------------------------------------
+GUM_OPENED_JS = "window.__gum.filter(c => c.deviceId).length"
+
+
+def dead_brain_mic(app):
+    """El Cerebro pierde el microfono y el reintento falla (el dispositivo existe pero no se puede abrir un rato)."""
+    app.open()
+    app.start_listening("#brain-btn")
+    app.page.evaluate("window.__gumFail = 'NotReadableError'")
+    app.unplug_current_mic()
+    app.wait_note("no hay otro conectado")
+    return app.page.evaluate(GUM_OPENED_JS)
+
+
+def test_brain_mode_comes_back_by_itself_when_the_mic_returns_without_a_device_change(app):
+    opened = dead_brain_mic(app)
+
+    app.page.evaluate("window.__gumFail = null")  # vuelve el microfono: SIN devicechange ni foco
+    app.page.wait_for_function(f"{GUM_OPENED_JS} > {opened}", timeout=8_000)
+    app.wait_note("Modo Cerebro: escuchando por")
+    assert app.page.get_attribute("#brain-btn", "data-state") != "idle"
+    app.page.keyboard.press("Escape")
+
+
+def test_space_reopens_a_brain_mic_that_could_not_be_reopened(app):
+    opened = dead_brain_mic(app)
+    app.page.evaluate("window.__gumFail = null")
+
+    app.page.keyboard.press("Space")
+
+    app.page.wait_for_function(f"{GUM_OPENED_JS} > {opened}", timeout=2_500)
+    app.page.keyboard.press("Escape")
+
+
+def test_a_brain_mic_track_that_stops_without_any_event_is_reopened(app):
+    app.open()
+    app.start_listening("#brain-btn")
+    app.page.evaluate("window.__streams.at(-1).getAudioTracks()[0].stop()")  # 'ended' sin evento
+
+    app.page.wait_for_function(f"{GUM_OPENED_JS} >= 2", timeout=8_000)
+    app.page.wait_for_function("window.__streams.at(-1).getAudioTracks()[0].readyState === 'live'")
+    app.page.keyboard.press("Escape")
+
+
+def test_with_a_healthy_mic_the_check_never_reopens_it(app):
+    app.open()
+    app.start_listening("#brain-btn")
+    stream_id = app.page.evaluate("window.__streams.at(-1).id")
+
+    app.page.wait_for_timeout(7_000)  # dos verificaciones de 3 s y algo mas
+
+    assert len(app.gum()) == 1 and app.page.evaluate("window.__streams.at(-1).id") == stream_id
+    app.page.keyboard.press("Escape")
+
+
+def test_without_any_mic_the_missing_note_appears_only_once(app):
+    app.open()
+    app.start_listening("#brain-btn")
+    app.page.evaluate("window.__gumFail = 'NotFoundError'")
+    app.unplug_current_mic()
+    app.wait_note("no hay otro conectado")
+
+    app.page.wait_for_timeout(7_000)  # varios reintentos silenciosos
+
+    assert sum("no hay otro conectado" in n for n in app.notes()) == 1
+    app.page.keyboard.press("Escape")
+
+
+def test_with_the_permission_denied_it_does_not_keep_retrying_on_its_own(app):
+    app.open()
+    app.start_listening("#brain-btn")
+    app.page.evaluate("window.__gumFail = 'NotAllowedError'")
+    app.unplug_current_mic()
+    app.page.wait_for_function("window.__gum.length >= 2")
+    tries = len(app.gum())
+
+    app.page.wait_for_timeout(7_000)
+
+    assert len(app.gum()) == tries, "no repite el pedido de permiso del navegador cada 3 s"
     app.page.keyboard.press("Escape")

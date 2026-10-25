@@ -37,9 +37,13 @@ _SAFE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,40}$")
 
 
 def _safe_id(call_id: str) -> str:
+    """Id aceptable para todos los proveedores. Si el original ya cumple, se devuelve igual; si no, se reemplaza por `call_<24 hex>`.
+
+    El hash solo ACORTA y hace estable el reemplazo (la llamada y su respuesta tienen que seguir apuntandose entre si); no protege nada ni se compara
+    contra un atacante, por eso `usedforsecurity=False` (bandit S324: SHA-1 no se usa aca como control de seguridad)."""
     if _SAFE_ID_RE.match(call_id):
         return call_id
-    return "call_" + hashlib.sha1(call_id.encode("utf-8")).hexdigest()[:24]
+    return "call_" + hashlib.sha1(call_id.encode("utf-8"), usedforsecurity=False).hexdigest()[:24]
 
 
 def _unique(candidate: str, seen: set[str]) -> str:
@@ -71,7 +75,7 @@ def history_for_model(messages: list[dict[str, Any]], model: str) -> list[dict[s
                 new = _unique(_safe_id(old), seen)
                 mapping[old] = new
                 calls.append(call if new == old else {**call, "id": new})
-            if any(new is not old for new, old in zip(calls, message["tool_calls"])):
+            if any(new is not old for new, old in zip(calls, message["tool_calls"], strict=True)):
                 message = {**message, "tool_calls": calls}
                 changed = True
             if message.get("content") is None:

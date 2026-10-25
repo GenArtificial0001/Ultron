@@ -54,6 +54,7 @@ import json
 import os
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -68,8 +69,52 @@ from pathlib import Path
 DATA_FOLDER_NAME = "Vision-personal"
 
 LOCAL_HOST = "127.0.0.1"
-LOCAL_PORT = 8030
+LOCAL_PORT = 8030  # el de siempre de Vision-personal (convive con otro Vision en 8020); con la configuracion en Vision, el puerto elegido en Configuracion > Conexiones > General (ver `_configured_port`)
 LOCAL_URL = f"http://{LOCAL_HOST}:{LOCAL_PORT}/"
+
+# spec gestor-conexiones C2 (REQ-002/011): sin `.env`, el lanzador lee lo que necesita ANTES de arrancar el servidor desde la base global de Vision
+# (`vision.db` de la carpeta de datos, tabla `app_settings`; nunca `~/.vision`, que es de otro Vision instalado). Solo dos claves NO secretas (la app las deja en claro a proposito; el resto esta cifrado y el lanzador no lo toca):
+# si la configuracion esta en Vision y el puerto elegido. El lanzador no puede importar `app`: replica la ruta y el nombre de las claves.
+_CONFIG_SOURCE_KEY = "config_source"
+_CONFIG_SOURCE_VISION_DB = "vision_db"
+_LAUNCHER_PORT_KEY = "launcher_app_port"
+
+
+def _vision_db(base: Path | None = None) -> Path:
+    """Misma ubicacion que `app/persistence/master_index.py:master_db_path` (la carpeta de datos), nunca `~/.vision`."""
+    return (base or _data_dir(Path(__file__).resolve().parent / "backend")) / "vision.db"
+
+
+def _read_app_setting(key: str, home: Path | None = None) -> str | None:
+    """Lee UNA clave de `app_settings` en modo solo lectura (nunca crea ni modifica la base). None si no hay base, tabla o clave."""
+    path = _vision_db(home)
+    if not path.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=2)
+        try:
+            row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return row[0] if row and row[0] else None
+
+
+def _vault_active(home: Path | None = None) -> bool:
+    """True si la configuracion ya vive cifrada en Vision (el `.env` no se usa mas)."""
+    return _read_app_setting(_CONFIG_SOURCE_KEY, home) == _CONFIG_SOURCE_VISION_DB
+
+
+def _configured_port(home: Path | None = None) -> int:
+    """Puerto elegido en Vision; cualquier valor raro (o ninguno) es el de siempre, 8030: el lanzador nunca deja de arrancar por esto."""
+    raw = _read_app_setting(_LAUNCHER_PORT_KEY, home)
+    try:
+        port = int(raw) if raw else LOCAL_PORT
+    except ValueError:
+        return LOCAL_PORT
+    return port if 1 <= port <= 65_535 else LOCAL_PORT
+
 
 # Variables de backend/.env.example cuyo nombre sugiere una credencial real
 # necesaria para que el conector correspondiente funcione -- si estan
@@ -77,12 +122,14 @@ LOCAL_URL = f"http://{LOCAL_HOST}:{LOCAL_PORT}/"
 # pero avisa ANTES de abrir el navegador, en vez de que el usuario lo
 # descubra recien al ver fallar una consulta de Oracle/BigQuery/SharePoint
 # en el chat. No bloqueante: solo un aviso impreso en consola.
+#
+# spec conexiones-con-nombre (2026-10-05): Oracle, SharePoint/Graph y SAP ya NO se configuran en `.env` ni en `.env.enc`: viven en
+# `~/.vision/connections.json` (un bloque por conexion). Por eso este aviso solo vigila lo que SIGUE viniendo de `.env`/`.env.enc` (BigQuery)
+# y mira aparte si hay un `connections.json` con conexiones (`_connections_file_summary`). Avisar "ORACLE_PASSWORD vacio" seria un aviso FALSO.
 _CREDENTIAL_HINTS = {
+    # spec vision-generico: sin clave del proveedor principal el chat no responde (salvo otro proveedor o una IA local).
     "LLM_API_KEY": "el chat con inteligencia artificial no va a funcionar",
-    "ORACLE_PASSWORD": "Oracle no va a poder conectarse",
     "BQ_PROJECT_ID": "BigQuery no va a poder conectarse",
-    "AZURE_CLIENT_SECRET": "SharePoint/Graph no va a poder conectarse",
-    "SAP_PASSWORD": "SAP no va a poder conectarse",
 }
 # Conector de cada credencial: con su ENABLE_* en false no se avisa.
 _CREDENTIAL_SWITCH = {
@@ -125,7 +172,7 @@ def _ensure_port_free(host: str, port: int) -> None:
         f"instancia de Vision corriendo (quiza quedo abierta de una "
         f"ejecucion anterior sin cerrarse bien). Cerrala primero: "
         f"revisa el Administrador de tareas por un proceso 'python.exe' "
-        f"o 'Vision.exe', o simplemente abri {LOCAL_URL} en el navegador "
+        f"o 'Vision.exe', o simplemente abri http://{host}:{port}/ en el navegador "
         f"-- si responde, Vision YA esta corriendo y no hace falta "
         f"abrir otra instancia."
     )
@@ -160,6 +207,24 @@ def _stored_credential_names(data_dir: Path) -> set[str]:
     return {str(name).lower() for name in raw} if isinstance(raw, dict) else set()
 
 
+def _connections_file(home: Path | None = None) -> Path:
+    """Misma ubicacion que `app/connections.py` (el lanzador no puede importar `app`): `connections.json` en la carpeta de datos, o
+    `VISION_CONNECTIONS_FILE`. `home`: otra carpeta de datos (tests)."""
+    override = os.environ.get("VISION_CONNECTIONS_FILE", "").strip()
+    return Path(override) if override else (home or _data_dir(Path(__file__).resolve().parent / "backend")) / "connections.json"
+
+
+def _connections_file_summary(path: Path | None = None) -> tuple[int, str | None]:
+    """(cantidad de conexiones en el archivo, problema o None). Solo cuenta bloques: NUNCA lee ni muestra campos, y no valida (eso lo hace la app)."""
+    path = path or _connections_file()
+    if not path.exists():
+        return 0, None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        return 0, f"{path} no se pudo leer ({type(exc).__name__}); Vision arranca sin esas conexiones hasta que lo arregles."
+    items = data.get("connections") if isinstance(data, dict) else data
+    return (len(items) if isinstance(items, list) else 0), None
 def _env_values(data_dir: Path) -> dict[str, str]:
     """`CLAVE -> valor` del `.env` de la carpeta de datos (vacio si no existe).
     Los valores nunca se imprimen: solo se mira si estan completos."""
@@ -199,15 +264,30 @@ def _check_credentials(backend_dir: Path, data_dir: Path) -> None:
     configurado, asi que esto es solo informativo."""
     env_path = data_dir / ".env"
     stored = _stored_credential_names(data_dir)
-    if not env_path.exists() and not stored:
+    values: dict[str, str] = {}
+    if env_path.exists():
+        try:
+            env_text = env_path.read_text(encoding="utf-8")
+        except OSError:
+            return
+        for line in env_text.splitlines():
+            line = line.split("#", 1)[0].strip()
+            if not line or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip()
+    elif not stored:
+        count, problem = _connections_file_summary()
+        if problem:
+            print()
+            print(f"AVISO: {problem}")
+        if count:
+            return  # hay conexiones con nombre: lo unico que falta es BigQuery/voz, que es opcional
         print()
         print(
-            f"AVISO: Vision todavia no esta configurado: no existe {env_path} ni se "
-            "guardaron claves desde Configuracion > Credenciales. Vision va a arrancar, "
-            "pero el chat con inteligencia artificial no va a responder hasta que cargues "
-            "la clave del proveedor (LLM_API_KEY) desde esa pestaña, o copiando "
-            f"{backend_dir / '.env.example'} a {env_path} (ver README.md, seccion "
-            "'Configurar Vision')."
+            f"AVISO: todavia no hay conexiones configuradas: no existe {env_path} ni {_connections_file()}. "
+            "Vision va a arrancar; cargalas desde Vision, en Configuracion > Conexiones (quedan cifradas, "
+            "sin ningun archivo .env)."
         )
         return
     values = _env_values(data_dir)
@@ -223,7 +303,7 @@ def _check_credentials(backend_dir: Path, data_dir: Path) -> None:
     if warnings:
         print()
         print(
-            "AVISO: faltan credenciales (Vision arranca igual). Cargalas en "
+            "AVISO: faltan credenciales de BigQuery (Vision arranca igual). Cargalas en "
             f"Configuracion > Credenciales o en {env_path}:"
         )
         for line in warnings:
@@ -251,6 +331,201 @@ def _resolve_backend_frontend_dirs() -> tuple[Path, Path]:
     return _extract_embedded_code()
 
 
+# spec lanzador-extraccion-segura: la extraccion del codigo ya no puede dejar la instalacion a medias (caso real 2026-10-21: 77 archivos menos y `llm/loop.py` en 0 bytes).
+# Antes: se borraba `app/` y se copiaba de nuevo SIN red de seguridad, el marcador de version no se invalidaba, «al dia» solo miraba que la carpeta existiera y el puerto se
+# chequeaba DESPUES de extraer. Ahora: se copia a una carpeta hermana, se verifica, se reemplaza y recien al final se escribe el marcador; un candado evita dos extracciones.
+_EXTRACT_LOCK_NAME = ".vision-extract.lock"
+_EXTRACT_LOCK_STALE_SECONDS = 600  # un candado de mas de 10 minutos es huerfano: nunca impide arrancar
+_STAGING_NAME = "app.nuevo"
+_LOCK_BUSY_MESSAGE = (
+    "Vision no puede actualizar su codigo ahora porque hay otra copia de Vision haciendolo. "
+    "Espera unos segundos y volve a abrir Vision (si no se abrio ninguna otra, cerra todas las ventanas de Vision y proba de nuevo)."
+)
+
+
+def _is_safe_relative(rel: Path) -> bool:
+    """REQ (seguridad): una ruta del codigo embebido solo vale si es relativa y no sale de su carpeta (`..`, unidad, ruta absoluta)."""
+    if rel.is_absolute() or rel.drive or rel.anchor:
+        return False
+    return ".." not in rel.parts
+
+
+def _embedded_code_files(embed_src: Path) -> list[Path]:
+    """REQ-002: rutas (relativas a `embed/`) de TODO el codigo de Vision que viaja en el `.exe`: `backend/app`, `backend/scripts`, `frontend` y `backend/requirements.txt`.
+    Sin `__pycache__` ni `.pyc` (no son codigo fuente y cambian solos)."""
+    files: list[Path] = []
+    for root in (embed_src / "backend" / "app", embed_src / "backend" / "scripts", embed_src / "frontend"):
+        if not root.exists():
+            continue
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or "__pycache__" in path.parts or path.suffix == ".pyc":
+                continue
+            rel = path.relative_to(embed_src)
+            if _is_safe_relative(rel):
+                files.append(rel)
+    requirements = embed_src / "backend" / "requirements.txt"
+    if requirements.is_file():
+        files.append(requirements.relative_to(embed_src))
+    return files
+
+
+def _missing_or_empty(base: Path, embed_src: Path) -> list[Path]:
+    """REQ-002: que archivos del codigo embebido FALTAN en `base`, o estan en 0 bytes cuando el original tiene contenido. Un `__init__.py` que ya es vacio en el `.exe` NO cuenta
+    (es normal). Solo existencia y tamano: lo que fallo en el caso real; no se compara el contenido byte a byte en cada arranque."""
+    bad: list[Path] = []
+    for rel in _embedded_code_files(embed_src):
+        try:
+            size = (base / rel).stat().st_size
+        except OSError:
+            bad.append(rel)
+            continue
+        if size == 0 and (embed_src / rel).stat().st_size > 0:
+            bad.append(rel)
+    return bad
+
+
+def _pid_alive(pid: int) -> bool:
+    """Si el proceso `pid` sigue vivo (solo para decidir si un candado es huerfano). Ante la duda («acceso denegado») se lo da por vivo."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # 5 = acceso denegado: existe pero no es mio
+        try:
+            code = wintypes.DWORD()
+            kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _lock_is_stale(lock: Path) -> bool:
+    """REQ-008: un candado es huerfano si es viejo, si no se entiende o si el proceso que lo puso ya no existe. Un candado huerfano NUNCA impide arrancar."""
+    try:
+        age = time.time() - lock.stat().st_mtime
+    except OSError:
+        return True
+    if age > _EXTRACT_LOCK_STALE_SECONDS:
+        return True
+    try:
+        pid = int(lock.read_text(encoding="utf-8").split()[0])
+    except (OSError, ValueError, IndexError):
+        return True
+    return not _pid_alive(pid)
+
+
+def _acquire_extract_lock(vision_dir: Path) -> Path:
+    """REQ-008: crea `.vision-extract.lock` de forma atomica (`O_EXCL`). Si otro lanzador VIVO ya lo tiene, corta con un mensaje; si es huerfano, lo reemplaza."""
+    vision_dir.mkdir(parents=True, exist_ok=True)
+    lock = vision_dir / _EXTRACT_LOCK_NAME
+    for _attempt in range(2):
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if _lock_is_stale(lock):
+                try:
+                    lock.unlink()
+                except OSError:
+                    pass
+                continue
+            raise RuntimeError(_LOCK_BUSY_MESSAGE) from None
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"{os.getpid()} {time.time()}")
+        return lock
+    raise RuntimeError(_LOCK_BUSY_MESSAGE)
+
+
+def _release_extract_lock(lock: Path) -> None:
+    """REQ-009: se libera SIEMPRE (tambien si la extraccion fallo): un candado colgado bloquearia el siguiente arranque."""
+    try:
+        lock.unlink()
+    except OSError:
+        pass
+
+
+def _stage_new_code(embed_src: Path, staging_dir: Path) -> None:
+    """REQ-005: copia el codigo a una carpeta HERMANA (`app.nuevo`), sin tocar la instalacion que anda."""
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir, ignore_errors=True)  # resto de una extraccion anterior que se corto
+    embed_backend = embed_src / "backend"
+    for name in ("app", "scripts"):
+        src = embed_backend / name
+        if src.exists():
+            shutil.copytree(src, staging_dir / "backend" / name)
+    requirements = embed_backend / "requirements.txt"
+    if requirements.exists():
+        (staging_dir / "backend").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(requirements, staging_dir / "backend" / "requirements.txt")
+    if (embed_src / "frontend").exists():
+        shutil.copytree(embed_src / "frontend", staging_dir / "frontend")
+    # spec gestor-conexiones C3 (REQ-011): ya no se copia `.env.example`: la configuracion se carga en Vision > Configuracion > Conexiones.
+
+
+_REPLACE_ATTEMPTS = 6  # reintentos totales de un renombre: acotado, nunca infinito
+_REPLACE_WAIT_SECONDS = 0.25  # espera entre intentos; crece (0,25, 0,5, 0,75 ...): en total ~3,75 s
+
+
+def _replace_with_retry(src: Path, dst: Path) -> None:
+    """spec lanzador-extraccion-segura REQ-012 (0.35.6): `os.replace` que reintenta unas pocas veces SOLO si Windows responde «acceso denegado» (`PermissionError`).
+    Caso real (suite del 2026-10-22, `WinError 5` al renombrar `app.nuevo\frontend`): un antivirus o el indexador de Windows tienen abierto, por instantes, un archivo recien copiado
+    y el renombre falla aunque nada este roto. Un fallo pasajero no puede impedir que Vision abra. Cualquier otro error (disco lleno, ruta invalida) falla de inmediato, como antes;
+    y si el bloqueo no se va despues de los intentos, se vuelve a lanzar el error original (el llamador restaura lo que andaba)."""
+    for attempt in range(1, _REPLACE_ATTEMPTS + 1):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS:
+                raise
+            time.sleep(_REPLACE_WAIT_SECONDS * attempt)
+
+
+def _swap_in_new_code(install_dir: Path, staging_dir: Path) -> None:
+    """REQ-004/005: reemplaza el codigo instalado por el ya verificado en `staging_dir`, carpeta por carpeta y con RENOMBRE (no borra primero). Si un renombre falla, esa carpeta
+    vuelve a su lugar. Solo toca `backend/app`, `backend/scripts`, `frontend` y `backend/requirements.txt`: `.venv`, keys, data, logs, workspace y browser nunca (REQ-006)."""
+    backend_dir = install_dir / "backend"
+    backend_dir.mkdir(parents=True, exist_ok=True)
+    pairs = (
+        (staging_dir / "backend" / "app", backend_dir / "app"),
+        (staging_dir / "backend" / "scripts", backend_dir / "scripts"),
+        (staging_dir / "frontend", install_dir / "frontend"),
+    )
+    for src, dst in pairs:
+        if not src.exists():
+            continue
+        old = dst.with_name(dst.name + ".viejo")
+        if old.exists():
+            shutil.rmtree(old, ignore_errors=True)  # resto de un reemplazo anterior
+        if dst.exists():
+            _replace_with_retry(dst, old)
+        try:
+            _replace_with_retry(src, dst)
+        except OSError:
+            if old.exists() and not dst.exists():
+                _replace_with_retry(old, dst)  # no se pudo poner la nueva: vuelve la que andaba
+            raise
+        if old.exists():
+            shutil.rmtree(old, ignore_errors=True)
+    staged_requirements = staging_dir / "backend" / "requirements.txt"
+    if staged_requirements.exists():
+        _replace_with_retry(staged_requirements, backend_dir / "requirements.txt")
+
+
 def _extract_embedded_code() -> tuple[Path, Path]:
     meipass = Path(getattr(sys, "_MEIPASS"))
     embed_src = meipass / "embed"
@@ -266,66 +541,52 @@ def _extract_embedded_code() -> tuple[Path, Path]:
     install_dir.mkdir(parents=True, exist_ok=True)
 
     embed_hash_file = embed_src / ".embed-hash"
-    embed_hash = (
-        embed_hash_file.read_text(encoding="utf-8").strip()
-        if embed_hash_file.exists()
-        else ""
-    )
+    embed_hash = embed_hash_file.read_text(encoding="utf-8").strip() if embed_hash_file.exists() else ""
     marker = install_dir / ".vision-embed-hash"
-    installed_hash = (
-        marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
-    )
-
     backend_dir = install_dir / "backend"
     frontend_dir = install_dir / "frontend"
 
-    if (
-        embed_hash
-        and embed_hash == installed_hash
-        and backend_dir.exists()
-        and frontend_dir.exists()
-    ):
-        print(
-            "Codigo de Vision al dia en %LOCALAPPDATA%\\Vision-personal\\app -- sin reextraer."
-        )
+    def marker_matches() -> bool:
+        installed_hash = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
+        return bool(embed_hash and embed_hash == installed_hash and backend_dir.exists() and frontend_dir.exists())
+
+    # REQ-001/002: «al dia» ya no es solo «el marcador coincide y la carpeta existe»: ademas no puede faltar ni estar vacio ningun archivo del codigo.
+    broken = _missing_or_empty(install_dir, embed_src) if marker_matches() else []
+    if marker_matches() and not broken:
+        print("Codigo de Vision al dia en %LOCALAPPDATA%\\Vision\\app -- sin reextraer.")
         return backend_dir, frontend_dir
 
-    print("Actualizando el codigo de Vision en %LOCALAPPDATA%\\Vision-personal\\app ...")
+    if marker_matches():
+        print(f"La instalacion de Vision estaba incompleta ({len(broken)} archivos faltantes o vacios): la reparo ahora.")
+    else:
+        print("Actualizando el codigo de Vision en %LOCALAPPDATA%\\Vision\\app ...")
 
-    # Solo se reemplazan el CODIGO (app/, scripts/, requirements.txt,
-    # frontend/) -- nunca .venv/keys/data/logs/workspace/browser/.env, que
-    # son datos del usuario y viven aparte, sin tocarse entre versiones.
-    embed_backend = embed_src / "backend"
-    for name in ("app", "scripts"):
-        src = embed_backend / name
-        if not src.exists():
-            continue
-        dst = backend_dir / name
-        if dst.exists():
-            shutil.rmtree(dst)
-        shutil.copytree(src, dst)
+    lock = _acquire_extract_lock(install_dir.parent)
+    try:
+        # Otro lanzador pudo terminar justo antes de que tomara el candado: se vuelve a mirar.
+        if marker_matches() and not _missing_or_empty(install_dir, embed_src):
+            print("Codigo de Vision al dia en %LOCALAPPDATA%\\Vision\\app -- sin reextraer.")
+            return backend_dir, frontend_dir
 
-    for filename in ("requirements.txt",):
-        src = embed_backend / filename
-        if src.exists():
-            backend_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, backend_dir / filename)
+        # REQ-004: el marcador se borra ANTES de tocar nada y se escribe SOLO al final. Una copia interrumpida deja la carpeta sin marcador y la proxima apertura la repara sola.
+        marker.unlink(missing_ok=True)
+        staging_dir = install_dir.parent / _STAGING_NAME
+        try:
+            _stage_new_code(embed_src, staging_dir)
+            incomplete = _missing_or_empty(staging_dir, embed_src)
+            if incomplete:
+                raise RuntimeError(
+                    f"La copia del codigo de Vision quedo incompleta ({len(incomplete)} archivos). No se cambio nada de lo instalado; "
+                    "proba abrir Vision de nuevo (si se repite, revisa el espacio libre en disco)."
+                )
+            _swap_in_new_code(install_dir, staging_dir)
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)  # REQ-005: no deja basura, salga bien o mal
 
-    # .env.example es solo referencia -- no pisar uno que el usuario ya
-    # tenga (aunque no deberia haber tocado esta copia nunca).
-    env_example_src = embed_backend / ".env.example"
-    env_example_dst = backend_dir / ".env.example"
-    if env_example_src.exists() and not env_example_dst.exists():
-        shutil.copy2(env_example_src, env_example_dst)
-
-    embed_frontend = embed_src / "frontend"
-    if embed_frontend.exists():
-        if frontend_dir.exists():
-            shutil.rmtree(frontend_dir)
-        shutil.copytree(embed_frontend, frontend_dir)
-
-    if embed_hash:
-        marker.write_text(embed_hash, encoding="utf-8")
+        if embed_hash:
+            marker.write_text(embed_hash, encoding="utf-8")
+    finally:
+        _release_extract_lock(lock)
 
     print("Codigo actualizado.")
     return backend_dir, frontend_dir
@@ -388,17 +649,86 @@ def _missing_requirements(backend_dir: Path, venv_python: Path) -> list[str]:
     return [n for n in names if n.lower() not in installed]
 
 
-def _ensure_requirements(backend_dir: Path, venv_python: Path, data_dir: Path) -> None:
-    """Instala `requirements.txt` en el `.venv` (con el proxy de la empresa del
-    `.env`, si hay). Fallback real: si el indice de pip de la empresa no tiene
-    algun paquete (ej. `win11toast`), `pip install -r` falla ENTERO -- todo o
-    nada -- y deja el `.venv` sin fastapi/uvicorn. Entonces se detectan los
-    paquetes que realmente faltan (`pip show`) y se instalan UNO POR UNO contra
-    el PyPI publico, sin reintentar el archivo completo contra dos indices a la
-    vez (pip evalua ambos para CADA paquete y se vuelve lentisimo)."""
+# spec lanzador-dependencias-verificadas: lo que Vision necesita para ARRANCAR y para las herramientas de datos. Se verifica IMPORTANDOLO (no con
+# `pip show`, que da «instalado» si existe la carpeta aunque falte una DLL). Lista corta y fija a proposito: probar todo `requirements.txt` tardaria
+# y daria falsas alarmas con paquetes opcionales. modulo importable -> nombre de la distribucion en `requirements.txt` (un test vigila que este declarada).
+ESSENTIAL_DISTRIBUTIONS = {
+    "pandas": "pandas",
+    "numpy": "numpy",
+    "openpyxl": "openpyxl",
+    "duckdb": "duckdb",
+    "fastapi": "fastapi",
+    "uvicorn": "uvicorn",
+    "openai": "openai",
+    "pydantic_settings": "pydantic-settings",
+}
+ESSENTIAL_IMPORTS = tuple(ESSENTIAL_DISTRIBUTIONS)
+
+
+def _missing_importable(venv_python: Path, backend_dir: Path) -> list[str]:
+    """spec lanzador-dependencias-verificadas REQ-001/007: los esenciales que NO se pueden importar con el python del `.venv` (lista vacia si todos
+    importan). Corre en un SUBPROCESO del venv (jamas importa dentro del lanzador). Nunca lanza: si el subproceso no se puede ejecutar, devuelve
+    `[]` (no se pudo verificar; no se inventa una falta ni se bloquea el arranque)."""
+    probe = (
+        "import importlib\n"
+        f"for name in {list(ESSENTIAL_IMPORTS)!r}:\n"
+        "    try:\n"
+        "        importlib.import_module(name)\n"
+        "    except Exception:\n"
+        "        print(name)\n"
+    )
+    try:
+        result = subprocess.run(
+            [str(venv_python), "-c", probe],
+            cwd=backend_dir,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip() in ESSENTIAL_IMPORTS]
+
+
+def _warn_missing_dependencies(missing: list[str]) -> None:
+    """spec lanzador-dependencias-verificadas REQ-003/005: aviso VISIBLE (no una linea perdida entre la salida de pip) que nombra lo que falta."""
+    print()
+    print("=" * 62)
+    print(" ATENCION: a este Vision le faltan componentes esenciales:")
+    print("   " + ", ".join(missing))
+    print(" Probablemente se corto la descarga (VPN o proxy de la empresa).")
+    print(" Conectate a la VPN de tu empresa y volve a abrir Vision: va a")
+    print(" reintentar la instalacion solo.")
+    print("=" * 62)
+    print()
+
+
+def _ensure_requirements(backend_dir: Path, venv_python: Path) -> None:
+    """Instala `requirements.txt` en el `.venv`, con un fallback real ante
+    un problema encontrado en produccion (2026-09-17): `win11toast` (toast
+    nativo de Windows para alarmas) NO esta en el proxy privado de
+    Artifactory de la empresa (indice `pip` global de la maquina) -- y como
+    `pip install -r requirements.txt` es TODO O NADA, ese UN paquete
+    faltante hacia fallar la instalacion COMPLETA (fastapi, uvicorn,
+    pandas, todo) dejando el `.venv` vacio y a Vision sin poder arrancar.
+    Si el intento normal falla, se detectan los paquetes que realmente
+    faltan (`pip show`) y se instalan UNO POR UNO contra
+    `--index-url https://pypi.org/simple` con el proxy corporativo de la empresa
+    (`HTTP_PROXY`/`HTTPS_PROXY`, ver skill skill-interna) -- nunca se
+    reintenta el `requirements.txt` completo con `--extra-index-url`,
+    porque eso hace que pip evalue AMBOS indices para CADA paquete y el
+    proxy necesario para pypi.org rompe la conexion directa al indice
+    interno de la empresa (503/timeout en todo, no solo en lo que falta)."""
     requirements = backend_dir / "requirements.txt"
     if not requirements.exists():
         raise RuntimeError(f"No se encontro '{requirements}'.")
+
+    # spec lanzador-dependencias-verificadas: todo lo de aca instala con el python del `.venv`. Si no existe NO se instala nada (jamas con el del sistema) y se
+    # dice por que; `_ensure_venv` ya intento crearlo antes, asi que llegar aca sin el es una falla real que la persona tiene que ver.
+    if not venv_python.exists():
+        print("ADVERTENCIA: no se encontro el entorno virtual de Vision (.venv); no se instala nada fuera de el.")
+        print("Cerra Vision y volve a abrirlo: lo va a crear de nuevo.")
+        return
 
     marker = venv_python.parent.parent / ".vision-deps-ok"
 
@@ -406,14 +736,20 @@ def _ensure_requirements(backend_dir: Path, venv_python: Path, data_dir: Path) -
     old_hash = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
 
     if req_hash == old_hash:
-        print("Dependencias al dia -- salteando pip install.")
-        return
-
-    print("requirements.txt cambio -- instalando/actualizando dependencias...")
+        # spec lanzador-dependencias-verificadas REQ-004: el marcador dice «al dia», pero una instalacion puede haberse roto DESPUES (el
+        # antivirus borra una DLL, se corta una descarga). Se verifica importando; si algo no importa se invalida el marcador y se reinstala.
+        broken = _missing_importable(venv_python, backend_dir)
+        if not broken:
+            print("Dependencias al dia -- salteando pip install.")
+            return
+        print(f"Dependencias incompletas ({', '.join(broken)}) -- reinstalando...")
+        marker.unlink(missing_ok=True)
+    else:
+        print("requirements.txt cambio -- instalando/actualizando dependencias...")
     print(
         "(la primera vez puede tardar varios minutos; las siguientes son casi instantaneas)"
     )
-    env = _proxy_env(data_dir)
+    env = _proxy_env(_data_dir(backend_dir))  # REQ-004 (spec vision-generico): el proxy del `.env` para pip
     result = _run(
         [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"],
         cwd=backend_dir,
@@ -426,6 +762,14 @@ def _ensure_requirements(backend_dir: Path, venv_python: Path, data_dir: Path) -
             "el indice de pip de tu empresa, ej. win11toast) -- reintentando SOLO "
             "los paquetes que falten, contra PyPI publico, uno por uno..."
         )
+        # NO se reintenta "-r requirements.txt" completo con
+        # --extra-index-url: pip evalua AMBOS indices para CADA paquete, y
+        # el proxy corporativo que hace falta para llegar a pypi.org rompe
+        # la conexion directa al indice interno de la empresa (timeouts/503 en
+        # CADA paquete, no solo en el que realmente falta). En cambio, se
+        # detecta que falta instalado (`pip show`) y se instala ESE
+        # paquete puntual contra el indice publico -- mucho mas rapido y
+        # no interfiere con lo que el indice de la empresa ya resolvio bien.
         missing = _missing_requirements(backend_dir, venv_python)
         for pkg in missing:
             print(f"  instalando '{pkg}' desde PyPI publico...")
@@ -456,7 +800,25 @@ def _ensure_requirements(backend_dir: Path, venv_python: Path, data_dir: Path) -
             "HTTP_PROXY/HTTPS_PROXY en el .env). Vision va a arrancar igual con lo "
             "que ya este instalado, pero puede fallar si falta algo esencial."
         )
+        # REQ-005: ademas de la linea de arriba, se NOMBRA lo que falta de verdad (antes el primer `import pandas` explotaba mas tarde, lejos de la causa).
+        still_missing = _missing_importable(venv_python, backend_dir)
+        if still_missing:
+            _warn_missing_dependencies(still_missing)
         return
+
+    # REQ-002/003: pip termino bien, pero que termine NO prueba que se pueda importar (un paquete cortado a la mitad). Se verifica; si algo falta se
+    # reintenta UNA vez, y el marcador solo se escribe si despues todo importa (asi el proximo arranque reintenta en vez de creerse «al dia»).
+    not_importable = _missing_importable(venv_python, backend_dir)
+    if not_importable:
+        print(f"pip termino bien pero no se pueden importar: {', '.join(not_importable)} -- reintentando la instalacion una vez...")
+        _run(
+            [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"],
+            cwd=backend_dir,
+        )
+        not_importable = _missing_importable(venv_python, backend_dir)
+        if not_importable:
+            _warn_missing_dependencies(not_importable)
+            return
 
     marker.write_text(req_hash, encoding="utf-8")
 
@@ -529,6 +891,12 @@ def _main() -> None:
     print(" VISION - lanzador")
     print("=" * 60)
 
+    # spec lanzador-extraccion-segura REQ-007: PRIMERO se mira si Vision ya esta corriendo y RECIEN DESPUES se extrae el codigo. Antes era al reves: un segundo Vision abierto con el
+    # primero en marcha borraba y reescribia la carpeta en uso (caso real 2026-10-21) y recien despues se daba cuenta de que el puerto estaba ocupado.
+    port = _configured_port()  # spec gestor-conexiones C2: el elegido en Vision, o 8020
+    url = f"http://{LOCAL_HOST}:{port}/"
+    _ensure_port_free(LOCAL_HOST, port)
+
     backend_dir, frontend_dir = _resolve_backend_frontend_dirs()
 
     if not backend_dir.exists() or not frontend_dir.exists():
@@ -542,19 +910,20 @@ def _main() -> None:
 
     venv_python = backend_dir / ".venv" / "Scripts" / "python.exe"
 
-    _ensure_port_free(LOCAL_HOST, LOCAL_PORT)
     _ensure_venv(backend_dir, venv_python)
-    data_dir = _data_dir(backend_dir)
-    _ensure_requirements(backend_dir, venv_python, data_dir)
-    _check_credentials(backend_dir, data_dir)
+    _ensure_requirements(backend_dir, venv_python)
+    if _vault_active():
+        print("Configuracion: guardada cifrada en Vision (Configuracion > Conexiones). No hace falta ningun .env.")
+    else:
+        _check_credentials(backend_dir, _data_dir(backend_dir))
 
     print()
-    print(f"Levantando Vision en {LOCAL_URL} ...")
+    print(f"Levantando Vision en {url} ...")
     print("Cerrar esta ventana apaga el servidor.")
     print()
 
     threading.Thread(
-        target=_open_browser_when_ready, args=(LOCAL_URL,), daemon=True
+        target=_open_browser_when_ready, args=(url,), daemon=True
     ).start()
 
     process = subprocess.Popen(
@@ -566,7 +935,7 @@ def _main() -> None:
             "--host",
             LOCAL_HOST,
             "--port",
-            str(LOCAL_PORT),
+            str(port),
         ],
         cwd=backend_dir,
     )

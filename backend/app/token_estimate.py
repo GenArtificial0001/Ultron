@@ -3,9 +3,9 @@ Estimacion APROXIMADA de tokens usados por una sesion, para el medidor de
 "Contexto: X tokens / Y% usado" del sidebar (inspirado en el panel de
 contexto de OpenCode). No usa un tokenizador exacto por proveedor (Claude/
 Gemini/GPT-5.x cada uno tiene el suyo, y no todos exponen una libreria
-publica equivalente a tiktoken) -- se usa la heuristica estandar de ~4
-caracteres por token en ingles/codigo, documentada ampliamente como
-aproximacion razonable para UIs de este tipo. Se etiqueta explicitamente
+publica equivalente a tiktoken) -- se usa una heuristica de ~3
+caracteres por token (medida contra el proveedor de IA, ver abajo): una aproximacion
+razonable para UIs de este tipo. Se etiqueta explicitamente
 como estimado en la UI para no generar falsa precision.
 """
 
@@ -13,7 +13,10 @@ from __future__ import annotations
 
 from typing import Any
 
-CHARS_PER_TOKEN_ESTIMATE = 4
+# spec aviso-contexto-largo REQ-001: MEDIDO el 2026-10-23 con una sesion real (2.971.848 caracteres = 1.015.295 tokens segun el proveedor de IA,
+# 2,93 caracteres por token). Con 4 se estimaba 74 % cuando ya se habia pasado del limite, y la compactacion automatica al 85 % nunca
+# se disparaba. 3 prefiere avisar de mas a avisar tarde; sigue siendo una ESTIMACION (la UI la etiqueta asi).
+CHARS_PER_TOKEN_ESTIMATE = 3
 
 
 def estimate_tokens(messages: list[dict[str, Any]]) -> int:

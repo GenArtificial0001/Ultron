@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from types import SimpleNamespace
 
+import httpx2
 import openai
 import pytest
 
@@ -59,6 +60,17 @@ USER_SPEND_429 = (
     "Error code: 429 - {'error': {'code': 'rate_limit_exceeded', 'message': \"Too many requests: you've reached the $3 per 600 seconds spend limit. This short-term guardrail resets automatically within a few minutes. On-prem models are free and not spend-limited — consider switching to one to keep working.\", 'param': '', 'type': 'rate_limit_error'}}"
 )
 SENTINEL = "SENTINEL-TEXTO-CRUDO-XYZ"
+# spec modelo-sin-herramientas-aviso: rechazo REAL del proveedor de IA para un modelo que no admite herramientas (log del 2026-10-22 20:27).
+TOOLS_UNSUPPORTED = "Error code: 400 - {'detail': 'This model does not support tools argument'}"
+# REQ-001 (spec fix-corte-proveedor): texto REAL del log de DEV (2026-10-14 11:07:15). El proveedor de IA empezo a responder (200 OK, en streaming)
+# y 2 min 30 s despues el otro lado cerro la conexion sin terminar; el SDK no lo envuelve: llega la excepcion cruda del transporte.
+PEER_CLOSED = "peer closed connection without sending complete message body (incomplete chunked read)"
+# Texto EXACTO aprobado en la spec (pedido del usuario: «aclara esto al usuario: el corte vino del otro lado (El proveedor de IA) a mitad de
+# respuesta, no de Vision»).
+CORTE_TEXT = (
+    "El proveedor de IA (el servicio de inteligencia artificial de la empresa) cortó la conexión en medio de la respuesta. "
+    "No fue un error de Vision. Volvé a enviar tu mensaje; si pasa seguido, elegí otro modelo en el selector de arriba."
+)
 
 
 def status_error(cls: type[openai.APIStatusError], status: int, text: str) -> openai.APIStatusError:
@@ -100,6 +112,8 @@ MODEL_CASES = [
         "MODELO-IMAGEN",
     ),
     ("rechazo-generico", status_error(openai.BadRequestError, 400, "Unsupported parameter: top_k"), "MODELO-RECHAZO"),
+    # spec modelo-sin-herramientas-aviso REQ-001: texto EXACTO del log del usuario (2026-10-22 20:27, modelo glm-ocr).
+    ("sin-herramientas-real", status_error(openai.BadRequestError, 400, TOOLS_UNSUPPORTED), "MODELO-SIN-HERRAMIENTAS"),
     (
         # Bug real 2026-09-27: la cuenta de Anthropic sin credito no es un "rechazo del pedido".
         "anthropic-sin-credito",
@@ -122,6 +136,12 @@ MODEL_CASES = [
     ("timeout-python", TimeoutError(), "MODELO-DEMORA"),
     ("sin-conexion-sdk", openai.APIConnectionError(request=_REQUEST), "MODELO-SIN-CONEXION"),
     ("sin-conexion-python", ConnectionRefusedError("[WinError 10061]"), "MODELO-SIN-CONEXION"),
+    # REQ-001 (spec fix-corte-proveedor): el corte a MITAD de la respuesta tiene su propio aviso (antes caia en MODELO-DESCONOCIDO).
+    ("corte-a-mitad-real", httpx2.RemoteProtocolError(PEER_CLOSED), "MODELO-CORTE"),
+    ("corte-al-leer", httpx2.ReadError("[WinError 10054] el host remoto forzo el cierre de la conexion"), "MODELO-CORTE"),
+    # ...pero una demora sigue siendo demora (el timeout se mira primero) y no poder conectar sigue siendo «sin conexion».
+    ("demora-al-leer", httpx2.ReadTimeout("The read operation timed out"), "MODELO-DEMORA"),
+    ("sin-conexion-transporte", httpx2.ConnectError("[WinError 10061]"), "MODELO-SIN-CONEXION"),
     (
         "login-proveedor",
         RuntimeError("Error retrieving the token - Failed to refresh access token (401)"),
@@ -136,6 +156,16 @@ MODEL_CASES = [
 @pytest.mark.parametrize(("exc", "code"), [c[1:] for c in MODEL_CASES], ids=[c[0] for c in MODEL_CASES])
 def test_model_errors_are_classified_by_real_cause(exc: BaseException, code: str) -> None:
     assert describe_model_error(exc, "gemini-3.1-pro").code == code
+
+
+def test_a_cut_mid_answer_says_it_came_from_proveedor_and_not_from_vision() -> None:
+    """REQ-001 (spec fix-corte-proveedor): el mensaje es el aprobado, palabra por palabra, y el detalle tecnico trae el codigo nuevo."""
+    friendly = describe_model_error(httpx2.RemoteProtocolError(PEER_CLOSED), "claude-sonnet-5-5")
+
+    assert friendly.code == "MODELO-CORTE"
+    assert friendly.message == CORTE_TEXT
+    assert "El proveedor de IA" in friendly.message and "No fue un error de Vision." in friendly.message
+    assert friendly.technical(model="claude-sonnet-5-5", when="11:07:15") == "MODELO-CORTE · claude-sonnet-5-5 · 11:07:15"
 
 
 def test_spend_limit_says_which_model_and_how_long_to_wait() -> None:
@@ -160,6 +190,28 @@ def test_gemini_history_rejection_tells_how_to_unblock_the_conversation() -> Non
 def test_long_conversation_points_to_compact_command() -> None:
     exc = status_error(openai.BadRequestError, 400, "prompt is too long: 250000 tokens > 200000 maximum")
     assert "/compact" in describe_model_error(exc, "claude-sonnet-4-6").message
+
+
+def test_a_generic_rejection_names_the_model_and_keeps_the_http_status() -> None:
+    """Un 400 sin ninguna senal conocida cae en MODELO-RECHAZO: tiene que decir QUE modelo no lo acepto y llevar el HTTP al detalle tecnico."""
+    exc = status_error(openai.BadRequestError, 400, "Error code: 400 - algo que no reconocemos")
+    friendly = describe_model_error(exc, "gpt-5")
+    assert friendly.code == "MODELO-RECHAZO" and friendly.status == 400
+    assert friendly.message.startswith("El modelo gpt-5 no aceptó este pedido tal como está.")
+
+
+def test_a_422_is_a_rejection_like_a_400() -> None:
+    """422 (entidad no procesable) es el mismo caso que 400: el modelo no acepto el pedido. No es «desconocido»."""
+    friendly = describe_model_error(status_error(openai.UnprocessableEntityError, 422, "Error code: 422 - invalido"), "gpt-5")
+    assert friendly.code == "MODELO-RECHAZO" and friendly.status == 422
+
+
+def test_both_spend_limits_carry_the_http_status_to_the_technical_detail() -> None:
+    per_user = status_error(openai.RateLimitError, 429, "Too many requests: you've reached the $3 per 600 seconds spend limit")
+    per_model = status_error(openai.RateLimitError, 429, "model gpt-5 is limited to $3 per 600 seconds: too much spend")
+    assert describe_model_error(per_user, "gpt-5").status == 429
+    assert describe_model_error(per_model, "gpt-5").status == 429
+    assert describe_model_error(per_model, "gpt-5").code == "MODELO-LIMITE"
 
 
 def test_without_model_name_the_message_is_still_a_sentence() -> None:
@@ -252,6 +304,7 @@ def _all_messages() -> list[tuple[str, str]]:
         status_error(openai.BadRequestError, 400, f"{raw} function call"),
         status_error(openai.RateLimitError, 429, f"Too much spend {raw} per 60 seconds"),
         RuntimeError(raw),
+        RuntimeError(f"{raw} ProxyError('Unable to connect to proxy')"),
     ]
     out: list[tuple[str, str]] = []
     for exc in model_excs:
@@ -291,6 +344,8 @@ def _all_messages() -> list[tuple[str, str]]:
         describe_task_needs_new_message("gemini-3.1-pro"),
     ):
         out.append((friendly.code, friendly.message))
+    friendly = describe_model_error(status_error(openai.BadRequestError, 400, TOOLS_UNSUPPORTED), "glm-ocr")
+    out.append((friendly.code, friendly.message))
     return out
 
 
@@ -336,5 +391,119 @@ def test_fallback_notices_have_no_jargon(notice: str) -> None:
 
 def test_real_user_level_spend_limit_explains_the_wait_and_the_way_out() -> None:
     msg = describe_model_error(status_error(openai.RateLimitError, 429, USER_SPEND_429), "claude-sonnet-5").message
-    assert "tope de consumo" in msg and "10 minutos" in msg
-    assert "otro modelo" in msg
+    assert "todos los modelos pagos" in msg
+    assert "DeepSeek" in msg and "10 minutos" in msg
+
+
+# Pedido del usuario 2026-10-09: el proxy que no deja pasar a un servidor interno tiene su propio aviso (antes: «revisá la VPN»).
+PROXY_TEXT = (
+    "HTTPSConnectionPool(host='wms.empresa.com', port=443): Max retries exceeded (Caused by ProxyError('Unable to connect to "
+    "proxy', OSError('Tunnel connection failed: 503 Service Unavailable')))"
+)
+
+
+@pytest.mark.parametrize("exc", [RuntimeError(PROXY_TEXT), OSError("Tunnel connection failed: 503 Service Unavailable")])
+def test_a_proxy_that_blocks_an_internal_server_says_what_to_add(exc) -> None:
+    friendly = describe_connector_error(exc, "SAP")
+
+    assert friendly.code == "CONECTOR-PROXY"
+    assert ".empresa.com" in friendly.message and "Sin proxy para" in friendly.message
+    # spec proxy-autoheal (decision del usuario 2026-10-18): «Sin proxy para» SIGUE en Conexiones > Red y proxy (proxy de las conexiones de datos); Configuracion > Red > Proxy
+    # es otra cosa (la salida directa a internet). La frase tiene que mandar a donde esta el campo.
+    assert "Configuración > Conexiones > Red y proxy" in friendly.message and "Configuración > Red >" not in friendly.message
+
+
+# spec proxy-autoheal REQ-006: un proxy que no responde al llamar al modelo (el caso real del 2026-10-18: el Vision instalado no cargaba los modelos) tiene su propio aviso,
+# con la salida concreta (Configuracion > Red > Proxy > Reconectar), en vez del generico «revisa la VPN».
+DEAD_PROXY_TEXT = (
+    "HTTPSConnectionPool(host='login.microsoftonline.com', port=443): Max retries exceeded with url: /x (Caused by "
+    "ProxyError('Unable to connect to proxy', ConnectTimeoutError(<urllib3.connection.HTTPSConnection object>, "
+    "'Connection to 19.12.64.237 timed out. (connect timeout=None)')))"
+)
+
+
+@pytest.mark.parametrize("exc", [RuntimeError(DEAD_PROXY_TEXT), ConnectionError(DEAD_PROXY_TEXT)])
+def test_a_dead_proxy_when_calling_the_model_points_to_the_proxy_screen(exc) -> None:
+    friendly = describe_model_error(exc, "gemini-3.1-pro")
+
+    assert friendly.code == "MODELO-PROXY"
+    assert "Configuración > Red" in friendly.message and "Reconectar" in friendly.message
+    assert "19.12.64.237" not in friendly.message and "login.microsoftonline" not in friendly.message
+
+
+def test_a_plain_connection_failure_to_the_model_is_still_the_generic_vpn_message() -> None:
+    friendly = describe_model_error(ConnectionError("Connection refused"), "gemini-3.1-pro")
+
+    assert friendly.code == "MODELO-SIN-CONEXION"
+
+
+def test_the_dead_proxy_model_message_passes_the_jargon_guard() -> None:
+    friendly = describe_model_error(RuntimeError(f"{SENTINEL} {DEAD_PROXY_TEXT}"), "gemini-3.1-pro")
+
+    test_message_has_no_jargon_no_raw_text_and_an_action(friendly.code, friendly.message)
+
+
+def test_the_proxy_message_passes_the_jargon_guard() -> None:
+    friendly = describe_connector_error(RuntimeError(f"{SENTINEL} {PROXY_TEXT}"), "SAP")
+
+    test_message_has_no_jargon_no_raw_text_and_an_action(friendly.code, friendly.message)
+
+
+# -- spec modelo-sin-herramientas-aviso ----------------------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "text",
+    [
+        TOOLS_UNSUPPORTED,
+        "This model does not support tools argument",
+        "THIS MODEL DOES NOT SUPPORT TOOLS",
+        "Error code: 400 - model xyz does not support function calling",
+        "tools is not supported for this model",
+        "Tools are not supported by this deployment",
+        "This model does not support function-calling",
+        "Tool use is not supported by this model",
+        "Unsupported value: tool_choice is not supported with this model",
+    ],
+)
+def test_a_model_that_does_not_admit_tools_gets_its_own_code(text: str) -> None:
+    """REQ-001/002: el texto real y sus equivalentes."""
+    friendly = describe_model_error(status_error(openai.BadRequestError, 400, text), "glm-ocr")
+    assert friendly.code == "MODELO-SIN-HERRAMIENTAS" and friendly.status == 400
+
+
+def test_the_no_tools_message_names_the_model_and_says_resending_does_not_help() -> None:
+    """REQ-003: dice QUE modelo, POR QUE y que hacer; no copia el error crudo."""
+    message = describe_model_error(status_error(openai.BadRequestError, 400, TOOLS_UNSUPPORTED), "glm-ocr").message
+    assert "glm-ocr" in message and "herramientas" in message
+    assert "no lo arregla" in message and "selector" in message
+    assert "does not support" not in message and "tools argument" not in message
+
+
+def test_a_422_with_the_same_text_is_classified_the_same() -> None:
+    friendly = describe_model_error(status_error(openai.UnprocessableEntityError, 422, TOOLS_UNSUPPORTED), "glm-ocr")
+    assert friendly.code == "MODELO-SIN-HERRAMIENTAS" and friendly.status == 422
+
+
+@pytest.mark.parametrize(
+    ("text", "code"),
+    [
+        ("messages.3.content.0.tool_use.id: String should match pattern", "MODELO-HISTORIAL"),
+        ("Please ensure that function response turn comes immediately after a function call turn", "MODELO-HISTORIAL"),
+        ("Invalid image_url: could not decode", "MODELO-IMAGEN"),
+        ("Unsupported parameter: top_k", "MODELO-RECHAZO"),
+    ],
+)
+def test_the_other_rejections_keep_their_code(text: str, code: str) -> None:
+    """REQ-004: nada de lo que ya se clasificaba cambia."""
+    assert describe_model_error(status_error(openai.BadRequestError, 400, text), "m").code == code
+
+
+@pytest.mark.parametrize(
+    ("text", "code"),
+    [
+        ("maximum context length is 200000 tokens. This model does not support tools argument", "MODELO-CONVERSACION-LARGA"),
+        ("content_filter triggered; this model does not support tools", "MODELO-FILTRO"),
+    ],
+)
+def test_a_longer_or_filtered_conversation_keeps_its_older_classification(text: str, code: str) -> None:
+    """REQ-005: lo mas especifico de antes sigue ganando."""
+    assert describe_model_error(status_error(openai.BadRequestError, 400, text), "m").code == code

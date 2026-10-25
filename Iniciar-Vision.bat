@@ -65,8 +65,34 @@ REM Abre el navegador cuando el servidor responde (script standalone, solo
 REM stdlib), sin bloquear el arranque de uvicorn de abajo.
 start /B "" ".venv\Scripts\python.exe" scripts\wait_and_open_browser.py
 
-REM Solo esta PC (127.0.0.1): exponer el puerto a la red exige una regla de
-REM firewall con permisos de administrador.
-".venv\Scripts\python.exe" -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8030
+REM REQ-109 REVERTIDO (spec configuracion-limpieza-credenciales-servidor,
+REM 2026-09-20): se probo cambiar a --host 0.0.0.0 para permitir conectarse
+REM desde el celular en la misma LAN, pero requeria ademas crear una regla
+REM de firewall de Windows para el puerto entrante (Windows Firewall
+REM bloquea por defecto conexiones entrantes nuevas sin regla explicita en
+REM el perfil "Domain" de una notebook corporativa) -- eso exige privilegios
+REM de administrador/elevacion UAC. El usuario decidio explicitamente NO
+REM automatizar la apertura de un puerto de entrada en una notebook
+REM corporativa de la empresa por riesgo real de chocar con politicas de Cyber
+REM Security (mismo criterio ya aplicado antes con la idea de usar un
+REM proveedor de IA personal). Se revierte a 127.0.0.1 (loopback, solo esta
+REM misma maquina) -- ver tambien la eliminacion de la seccion de deteccion
+REM de IPs en la pestaña Servidor (REQ-107/108 removidos del todo).
+REM
+REM REQ-008 (spec fix-detener-y-progreso-visible): --reload-dir app hace que
+REM uvicorn vigile SOLO el codigo de Vision (backend\app), no todo backend\.
+REM Bug real (2026-10-11): el agente de Vision corrio "pip install" con la
+REM tool bash, pip escribio .py dentro de backend\.venv y el --reload
+REM reinicio Vision a mitad del turno (el filtro ".*" de uvicorn mira solo
+REM el nombre del archivo, no la carpeta .venv): el proceso viejo siguio con
+REM el turno sin atender conexiones y Detener quedo colgado. Con esto, ni
+REM backend\.venv ni backend\workspace (scripts del agente) reinician nada;
+REM tocar un .py de backend\app sigue recargando como siempre. Es relativo a
+REM backend\ (el cd /d de arriba); lo verifica tests\test_dev_launcher_reload.py.
+REM Hallazgo del 2026-10-17 (spec office-outlook-teams-mcp): con un chat abierto (la conexion de streaming /api/chat/stream/{id} nunca termina sola) el
+REM reinicio automatico de --reload se CUELGA: uvicorn espera para siempre a que esa conexion cierre y el servidor viejo sigue sirviendo el codigo viejo. Medido con una
+REM app minima: sin limite no se reinicia; con 3 s se reinicia en ~4 s. Por eso --timeout-graceful-shutdown 5 (el chat se reengancha solo al volver). Lo vigila
+REM tests	est_dev_launcher_reload.py.
+".venv\Scripts\python.exe" -m uvicorn app.main:app --reload --reload-dir app --timeout-graceful-shutdown 5 --host 127.0.0.1 --port 8030
 
 pause

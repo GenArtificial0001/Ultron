@@ -89,7 +89,7 @@ def _append_with_lock(path: Path, entry: str) -> None:
                 if time.monotonic() >= deadline:
                     raise TimeoutError(
                         f"No se pudo obtener el lock de '{path}' tras {LOCK_TIMEOUT_S}s."
-                    )
+                    ) from None
                 time.sleep(LOCK_POLL_INTERVAL_S)
         try:
             f.seek(

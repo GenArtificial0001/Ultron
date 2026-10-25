@@ -64,6 +64,10 @@ INIT_SCRIPT = """
   window.__gumFail = null;
   window.__failExact = null;
   window.__deviceChangeListeners = 0;
+  // spec audio-sistema-modo-reunion: Record ahora PREGUNTA de donde escucha (ventana de fuente). Los e2e anteriores a esa spec prueban el microfono tocando Record y esperan
+  // que se abra directo: arrancan con «no volver a preguntar» (= el comportamiento de siempre). Solo si NADIE lo fijo antes, asi los tests de la ventana pueden activarlo
+  // con localStorage y sobrevive a una recarga. Con 'mic' como fuente el camino es el mismo de siempre.
+  try { if (localStorage.getItem('vision.meeting.ask') === null) localStorage.setItem('vision.meeting.ask', '0'); } catch (e) { /* sin localStorage */ }
   const origGum = md.getUserMedia.bind(md);
   const origEnum = md.enumerateDevices.bind(md);
   md.getUserMedia = async (constraints) => {
@@ -105,6 +109,49 @@ INIT_SCRIPT = """
 """
 
 
+class FakeWindowsAudio:
+    """Core Audio de mentira para los e2e: los mismos nombres que los microfonos falsos de Chromium, todos ACTIVOS por defecto. Registra cada escritura."""
+
+    NAMES = ("Fake Default Audio Input", "Fake Audio Input 1", "Fake Audio Input 2")
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        from app.audio_control import Microphone
+
+        self.mics = {f"win-{i}": Microphone(f"win-{i}", name, i == 0, False, 70) for i, name in enumerate(self.NAMES)}
+        self.writes: list[tuple] = []
+
+    def mute_all(self, *, only_default: bool = True) -> None:
+        """Deja silenciado el microfono predeterminado (el caso real del usuario) o todos."""
+        from app.audio_control import Microphone
+
+        for mic_id, m in list(self.mics.items()):
+            if m.is_default or not only_default:
+                self.mics[mic_id] = Microphone(m.id, m.name, m.is_default, True, m.volume)
+
+    def list_microphones(self):
+        return list(self.mics.values())
+
+    def set_mute(self, mic_id: str, muted: bool) -> None:
+        from app.audio_control import Microphone
+
+        self.writes.append(("mute", mic_id, muted))
+        m = self.mics[mic_id]
+        self.mics[mic_id] = Microphone(m.id, m.name, m.is_default, muted, m.volume)
+
+    def set_volume(self, mic_id: str, scalar: float) -> None:
+        from app.audio_control import Microphone
+
+        self.writes.append(("volume", mic_id, round(scalar, 2)))
+        m = self.mics[mic_id]
+        self.mics[mic_id] = Microphone(m.id, m.name, m.is_default, m.muted, round(scalar * 100))
+
+
+WINDOWS_AUDIO = FakeWindowsAudio()  # lo reinicia y instala `serve_backend` en cada arranque
+
+
 class FakeWhisper:
     """`audio.transcriptions` falso: devuelve `text`, o lanza `exc` si esta seteado."""
 
@@ -128,6 +175,10 @@ def serve_backend(client: Any) -> Iterator[str]:
 
     from app import main
 
+    from app import audio_control
+
+    WINDOWS_AUDIO.reset()
+    audio_control.set_backend(WINDOWS_AUDIO)  # spec control-microfono-windows: nunca el audio real de quien corre la suite
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(main, "get_client", lambda *a, **k: client)
         # El dictado usa su propio proveedor (spec vision-generico REQ-003): el
@@ -163,6 +214,7 @@ def serve_backend(client: Any) -> Iterator[str]:
         finally:
             server.should_exit = True
             thread.join(timeout=10)
+            audio_control.set_backend(None)
 
 
 @contextmanager

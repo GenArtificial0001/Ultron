@@ -125,6 +125,22 @@ while True:
 """
 
 
+def _read_beat(beat) -> tuple[int, int] | None:
+    """(pid, contador) del latido, o None si la lectura no fue completa.
+
+    QA-035 (carrera del propio test, 2026-09-28): el nieto reescribe el archivo
+    cada 0,1 s con `write_text` (trunca y escribe), y una lectura puede caer en
+    el medio y verlo vacio o a medias (medido: 13 de 406 lecturas con latido
+    rapido). Antes, `split()[1]` lanzaba IndexError en el hilo que aprieta
+    Detener: el hilo moria en silencio, Detener nunca se apretaba y el test se
+    colgaba hasta el timeout de pytest dejando el arbol de procesos vivo."""
+    try:
+        pid, count = beat.read_text().split()
+        return int(pid), int(count)
+    except (OSError, ValueError):
+        return None
+
+
 @pytest.fixture
 def heartbeat(tmp_path):
     if " " in sys.executable or " " in str(tmp_path):
@@ -133,16 +149,24 @@ def heartbeat(tmp_path):
     script.write_text(HEARTBEAT, encoding="utf-8")
     beat = tmp_path / "beat.txt"
     yield f"{sys.executable} {script} {beat}", beat
-    # Higiene: si un test fallo y el nieto quedo vivo, se cierra igual.
-    if beat.exists():
-        pid = beat.read_text().split()[0]
-        os.system(f"taskkill /F /PID {pid} >nul 2>&1" if os.name == "nt" else f"kill -9 {pid} 2>/dev/null")
+    # Higiene: si un test fallo y el nieto quedo vivo, se cierra igual (con
+    # reintentos: la lectura puede caer en medio de una escritura, ver QA-035).
+    for _ in range(20):
+        read = _read_beat(beat) if beat.exists() else None
+        if read is not None:
+            pid = read[0]
+            os.system(f"taskkill /F /PID {pid} >nul 2>&1" if os.name == "nt" else f"kill -9 {pid} 2>/dev/null")
+            break
+        if not beat.exists():
+            break
+        time.sleep(0.05)
 
 
 def wait_for_beats(beat, count: int = 3, limit: float = 20.0) -> None:
     deadline = time.monotonic() + limit
     while time.monotonic() < deadline:
-        if beat.exists() and int(beat.read_text().split()[1]) >= count:
+        read = _read_beat(beat) if beat.exists() else None
+        if read is not None and read[1] >= count:
             return
         time.sleep(0.05)
     pytest.fail("el proceso de prueba no arranco")
@@ -157,16 +181,25 @@ def still_beating(beat) -> bool:
 def test_stop_cuts_a_running_command_and_its_children_at_once(tmp_path, heartbeat):
     command, beat = heartbeat
     session = SimpleNamespace(session_id="", stop_requested=False, edit_pending_text=None)
+    presser_errors: list[BaseException] = []
 
     def press_stop():
-        wait_for_beats(beat)
-        session.stop_requested = True
+        try:
+            wait_for_beats(beat)
+        except BaseException as exc:  # noqa: BLE001 -- se re-lanza en el hilo del test
+            presser_errors.append(exc)
+        finally:
+            # QA-035: Detener se aprieta SIEMPRE. Si la espera falla, el test
+            # tiene que fallar (abajo), no colgarse hasta el timeout de pytest.
+            session.stop_requested = True
 
     presser = threading.Thread(target=press_stop)
     presser.start()
     started = time.monotonic()
     out = run({"command": command, "workdir": str(tmp_path), "timeout": 120}, session)
     presser.join()
+    if presser_errors:
+        raise presser_errors[0]
 
     assert out.startswith("[detenido por el usuario]")
     assert time.monotonic() - started < 25  # antes: hasta el timeout (120 s)

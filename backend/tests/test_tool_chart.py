@@ -69,7 +69,7 @@ def test_groups_by_category_summing_values_and_emits_event(stored):
     out = run(base_args(), s)
     kind, payload = s.events[0]
     assert kind == "chart-ready"
-    grouped = dict(zip(payload["labels"], payload["values"]))
+    grouped = dict(zip(payload["labels"], payload["values"], strict=True))
     # 5 filas; B: 2 + (no numerico -> cuenta 1); categoria vacia -> "(vacío)"
     assert grouped == {"A": 4.0, "B": 3.0, "(vacío)": 5.0}
     assert payload["title"] == "qty por tipo" and payload["chart_type"] == "donut"

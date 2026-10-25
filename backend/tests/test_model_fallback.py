@@ -13,6 +13,7 @@ import json
 import uuid
 from types import SimpleNamespace
 
+import httpx2
 import openai
 import pytest
 from fastapi.testclient import TestClient
@@ -477,6 +478,24 @@ def test_failure_after_the_answer_started_does_not_switch_mid_answer(fallback_en
     events = run_turn()
     assert client.models == [OPUS]
     assert events[-1]["type"] == "error" and events[-1]["data"]["code"] == "MODELO-CAIDO"
+
+
+@pytest.mark.integration
+def test_a_proveedor_cut_mid_answer_retries_the_same_model_without_jumping(fallback_env, clock):
+    """spec fix-corte-proveedor REQ-002: un corte de la conexion a mitad de la respuesta (caso real 2026-10-14) no es un limite ni una
+    caida del modelo: el paso se repite con el MISMO modelo, sin pausarlo ni avisar un salto."""
+
+    def cut_mid_answer():
+        yield _Chunk(content="[[TIPO: conversacional]]")
+        raise httpx2.RemoteProtocolError("peer closed connection without sending complete message body (incomplete chunked read)")
+
+    client = fallback_env(script={OPUS: [cut_mid_answer(), text_reply("ahora sí")]})
+    events = run_turn()
+
+    assert client.models == [OPUS, OPUS]
+    assert text_of(events) == "ahora sí" and events[-1]["type"] == "done"
+    assert [s["text"] for s in switches(events)] == [None], "solo el aviso de arranque: no hubo salto"
+    assert mf.PAUSES.paused_until(OPUS) is None, "el modelo no queda en pausa por un corte"
 
 
 @pytest.mark.integration

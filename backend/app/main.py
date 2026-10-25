@@ -2,7 +2,7 @@
 Vision - backend FastAPI del asistente superinteligente.
 
 Levantar con:
-    python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8030
+    python -m uvicorn app.main:app --reload --reload-dir app --host 127.0.0.1 --port 8030
 or:
     python -m app.main
 
@@ -39,6 +39,13 @@ Expone:
                                          corriendo en background ahora mismo
     GET  /api/context/{session_id}   -> estimacion de tokens/contexto usado
                                          por una sesion (medidor sidebar)
+    GET  /api/connections            -> conexiones con nombre (tipo, nombre, estado de configuracion; NUNCA valores)
+    POST /api/connections/{tipo}/test?name=... -> prueba UNA conexion por nombre
+    /api/vault/*                     -> gestor de conexiones (spec gestor-conexiones): todo cifrado en vision.db, SOLO desde esta PC y la propia pagina:
+                                         GET status | POST import | DELETE legacy-files | GET/POST connections | PUT/DELETE connections/{id} | POST connections/{id}/test |
+                                         GET connections/{id}/secret/{campo} (desbloqueado) | GET/PUT general | GET general/secret/{clave} (desbloqueado) |
+                                         POST bigquery-key | GET/POST/DELETE unlock (Windows Hello)
+    GET  /api/confluence/tree|children|page   -> arbol (carga perezosa) y texto de paginas de Confluence (solo lectura)
     GET  /api/connectors/status      -> estado online/error de cada
                                          conector de datos (panel lateral)
     GET  /api/config/project         -> configuracion de proyecto activa
@@ -57,6 +64,15 @@ Expone:
     GET  /api/fs/children            -> subcarpetas de una ruta local
     GET  /api/sharepoint/drives      -> bibliotecas del sitio SharePoint
     GET  /api/sharepoint/children    -> contenido de una carpeta SharePoint
+    POST /api/voice/speak            -> audio de UNA frase con el primer motor
+                                         de voz de la cadena que responda (spec
+                                         voz-fish-audio; ver app/voice/)
+    GET/POST /api/voice/config       -> cadena de voces, voces, consentimiento
+                                         y efecto (Configuracion > Audio)
+    GET  /api/voice/voices/{engine}  -> voces de la cuenta de un motor
+    POST /api/voice/local/install    -> instala la clonacion local (con
+                                         simulacion previa); GET .../status
+    POST/DELETE /api/voice/local/sample -> muestra de voz para clonar
     GET  /api/skills                 -> lista de skills descubiertas (para
                                          el menu "/" del chat)
     POST /api/voice/speak            -> audio de UNA frase con el primer motor
@@ -105,25 +121,34 @@ if platform.system() == "Windows":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictBool, StrictStr
 
 from app import browser_workspace, credentials, lsp
 from app import commands as commands_module
 from app import project_context as pc
-from app.auth import AccessTokenMiddleware
+from app.auth import AccessTokenMiddleware, OpaqueOriginMiddleware
 from app.config import RESOURCE_ROOT, get_settings
 from app.connectors.sharepoint_connector import (
     SharePointConnectionError,
     SharePointConnector,
 )
-from app.connectors_status import CONNECTOR_NAMES, check_all_connectors
+from app import connections, switches
+from app.connectors.confluence_connector import ConfluenceConnector
+from app.connectors_status import (
+    CONNECTOR_NAMES,
+    check_all_connectors,
+    test_bigquery_draft,
+    test_draft_connection,
+    test_one_connection,
+)
 from app.friendly_errors import (
     describe_connector_error,
     describe_internal_error,
+    describe_model_error,
     describe_os_error,
     describe_transcription_error,
     describe_voice_engine_error,
@@ -131,9 +156,11 @@ from app.friendly_errors import (
 )
 from app.llm import model_fallback
 from app.llm import providers as llm_providers
-from app.llm.client import get_client, get_stt_client
+from app.llm.client import call_with_token_retry, get_stt_client
+from app.llm.client import get_client  # noqa: F401 -- punto de reemplazo de los tests (e2e_support, roster)
 from app.llm.loop import run_turn
 from app.meeting_gate import MeetingGateState, check_invocation
+from app import attachment_service
 from app.persistence import purge as persistence_purge
 from app.persistence import service as persistence_service
 from app.scheduler import agents as agents_scheduler
@@ -141,7 +168,9 @@ from app.scheduler import alarms as alarms_scheduler
 from app.session.compaction import compact_session
 from app.session.events import get_session_store
 from app.token_estimate import estimate_tokens
-from app.tools.skill import discover_local_skills, discover_skills
+from app.tools.skill import discover_skills
+from app.tech_report import normalize_level
+from app.vault_guard import VaultGuardMiddleware
 from app.version import __version__
 from app.voice import local_clone
 from app.voice import service as voice_service
@@ -150,9 +179,7 @@ from app.voice.settings import VoiceConfigError
 from app.voice.settings import load_config as voice_load_config
 from app.voice.settings import update_config as voice_update_config
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 # Ademas de la consola (unico destino hasta ahora): persiste el mismo log en
 # backend/logs/app.log. Sin esto, un traceback real (ej. el error crudo de
 # el proveedor de IA detras de un mensaje "amigable" en el chat, ver
@@ -166,9 +193,7 @@ _file_handler = logging.handlers.RotatingFileHandler(
     backupCount=3,
     encoding="utf-8",
 )
-_file_handler.setFormatter(
-    logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-)
+_file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
 logging.getLogger().addHandler(_file_handler)
 logger = logging.getLogger(__name__)
 
@@ -190,6 +215,22 @@ app.add_middleware(
 # 0.0.0.0 (alcanzable desde celulares en la misma LAN) en vez del
 # 127.0.0.1 de siempre.
 app.add_middleware(AccessTokenMiddleware)
+# REQ-006 (navegador-integrado-ventana): 403 a /api/* con Origin: null (iframe aislado).
+app.add_middleware(OpaqueOriginMiddleware)
+# spec gestor-conexiones REQ-007b: /api/vault/* solo desde esta PC y la propia pagina de Vision, ANTES de validar el cuerpo o resolver la ruta (app/vault_guard.py).
+app.add_middleware(VaultGuardMiddleware)
+
+
+def _install_unlock_verifier() -> None:
+    """spec gestor-conexiones B3: el desbloqueo de las contrasenas guardadas se confirma con Windows Hello (app/windows_hello.py). Los tests lo reemplazan
+    (tests/conftest.py) para que ninguna prueba abra la ventana de Windows."""
+    from app import secret_access, windows_hello  # import diferido: solo se usan aca
+
+    if windows_hello.supported():
+        secret_access.set_verifier(windows_hello.verify)
+
+
+_install_unlock_verifier()
 
 
 @app.on_event("startup")
@@ -250,6 +291,18 @@ async def _start_lsp_client() -> None:
     asyncio.create_task(lsp.start_lsp_client())
 
 
+@app.on_event("startup")
+def _start_proxy_watch() -> None:
+    """spec proxy-autoheal REQ-001/005/011: al arrancar, verifica la salida a internet en un hilo aparte (NUNCA bloquea el arranque) y, si no hay ninguna, la sigue
+    buscando unos minutos (la VPN puede conectar despues de abrir Vision). Si algo falla aca, Vision arranca igual."""
+    from app import proxy_health  # import diferido: modulo chico, solo lo usa el arranque y las rutas /api/proxy
+
+    try:
+        proxy_health.start_watch()
+    except Exception:  # noqa: BLE001 -- el chequeo de la salida a internet nunca puede impedir que Vision arranque
+        logger.warning("No se pudo iniciar el chequeo de la salida a internet", exc_info=True)
+
+
 @app.on_event("shutdown")
 async def _stop_lsp_client() -> None:
     await lsp.stop_lsp_client()
@@ -273,6 +326,16 @@ def _assert_session_owner(session_id: str) -> None:
             status_code=403,
             detail="No autorizado para acceder a esta sesión.",
         )
+
+
+class AttachmentRef(BaseModel):
+    """REQ-003 (spec adjuntar-archivos-chat): un archivo adjunto al mensaje."""
+
+    path: str
+    name: str = ""
+    size: int | None = None
+    mime: str = ""
+    inplace: bool = False
 
 
 class ChatRequest(BaseModel):
@@ -301,6 +364,10 @@ class ChatRequest(BaseModel):
     # por el frontend (REQ-003) -- lista vacia/None = turno sin imagenes,
     # comportamiento identico al de antes de esta spec.
     images: list[str] | None = None
+    # REQ-003 (spec adjuntar-archivos-chat): archivos ya subidos a `attachment/`
+    # (o registrados para leer en su lugar). Opcional: un cliente que solo manda
+    # `images` funciona igual que antes. El backend valida cada ruta.
+    attachments: list[AttachmentRef] | None = None
     # REQ-006/009 (spec asistente-contextual-voz, Modo Cerebro): True si
     # este turno se origino en una intervencion del modo Cerebro (voz
     # continua) -- activa la confirmacion hablada antes de ejecutar tools
@@ -310,6 +377,8 @@ class ChatRequest(BaseModel):
     # spec informe-tecnico-hablado: el frontend avisa si el informe tecnico
     # hablado esta prendido (ver UserTurn.narrate).
     narrate: bool = False
+    # REQ-012 (informe-tecnico-hablado): 'summary' | 'detailed'; cualquier otro valor cuenta como 'summary'.
+    narrate_level: str = "summary"
 
 
 class TranscribeRequest(BaseModel):
@@ -355,12 +424,18 @@ def transcribe_audio(req: TranscribeRequest) -> dict:
             detail="No pude leer la grabación (llegó dañada o incompleta). Probá grabar de nuevo.",
         ) from None
 
-    audio_file = io.BytesIO(audio_bytes)
-    audio_file.name = "audio.webm"  # la API de audio infiere el formato del nombre de archivo
+    stt = {"model": "?"}
 
-    stt_model = "?"
-    try:
-        client, stt_model = get_stt_client()
+    def _stt_client(force_refresh: bool = False):
+        # El dictado tiene su propio proveedor (STT_*): se lee la configuracion vigente en cada intento.
+        client, stt["model"] = get_stt_client()
+        return client
+
+    def _transcribe(client):
+        # REQ-002 (transcripcion-reintenta-token): el archivo se ARMA en cada intento -- el SDK lo consume al leerlo,
+        # asi que reusar el del primer intento mandaria el audio vacio en el reintento.
+        audio_file = io.BytesIO(audio_bytes)
+        audio_file.name = "audio.webm"  # la API de audio infiere el formato del nombre de archivo
         # `language` solo se fuerza si el usuario eligio uno explicito en
         # Configuracion > Audio -- el SDK espera "str | Omit" (no admite
         # None), asi que se arman 2 ramas en vez de un **kwargs generico
@@ -369,33 +444,32 @@ def transcribe_audio(req: TranscribeRequest) -> dict:
         # completo es lo que le dice a Whisper que haga auto-deteccion
         # (comportamiento default pedido).
         if req.language:
-            response = client.audio.transcriptions.create(
-                model=stt_model,
+            return client.audio.transcriptions.create(
+                model=stt["model"],
                 file=audio_file,
                 response_format="text",
                 language=req.language,
             )
-        else:
-            response = client.audio.transcriptions.create(
-                model=stt_model,
-                file=audio_file,
-                response_format="text",
-            )
+        return client.audio.transcriptions.create(
+            model=stt["model"],
+            file=audio_file,
+            response_format="text",
+        )
+
+    try:
+        # REQ-001: un 401 (token invalidado) pide un token nuevo y reintenta una vez; el resto de errores no se reintenta.
+        response = call_with_token_retry(_transcribe, _stt_client)
     except Exception as exc:
         # El texto crudo del proveedor va solo al log; el usuario ve que paso
         # y que hacer (ver app/friendly_errors.py).
         friendly = describe_transcription_error(exc)
-        logger.exception("Error transcribiendo audio con %s [%s]", stt_model, friendly.code)
+        logger.exception("Error transcribiendo audio con %s [%s]", stt["model"], friendly.code)
         raise HTTPException(502, detail=friendly.message) from None
 
     # response_format="text" del SDK de OpenAI devuelve el string directo
     # (no un objeto con .text) -- pero por las dudas de que el proveedor lo
     # envuelva distinto, se soportan ambas formas.
-    text = (
-        response
-        if isinstance(response, str)
-        else getattr(response, "text", str(response))
-    )
+    text = response if isinstance(response, str) else getattr(response, "text", str(response))
     return {"text": text.strip()}
 
 
@@ -431,9 +505,7 @@ def voice_speak(req: VoiceSpeakRequest) -> dict:
             raise HTTPException(400, detail="Ese motor de voz no existe.")
         # REQ-002: ni siquiera la prueba sale a la nube sin consentimiento.
         if engine.cloud and not voice_load_config().consent.get(req.engine):
-            raise HTTPException(
-                400, detail=f"Primero confirmá que el texto que Vision lee se envía a {engine.label}."
-            )
+            raise HTTPException(400, detail=f"Primero confirmá que el texto que Vision lee se envía a {engine.label}.")
         only = {"engine": req.engine, "model": req.model or engine.models[0]}
     try:
         result = voice_service.speak(text, only=only)
@@ -533,6 +605,382 @@ def delete_voice_sample() -> dict:
     return local_clone.sample_info()
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# spec control-microfono-windows: ver, activar y ajustar el volumen del microfono de Windows (`app/audio_control.py`).
+# El navegador abre un microfono SILENCIADO por el sistema sin ningun error (solo trae silencio): el estado vive en Windows y solo el backend, que corre en esta
+# misma PC, puede leerlo y cambiarlo. Estas rutas CAMBIAN hardware del usuario, asi que TODAS pasan por `_audio_guard` (REQ-008 + seguridad): solo esta PC y la propia
+# pagina de Vision, sin interruptor que lo apague. Nada de aca se llama solo: leer es inocuo y escribir lo dispara una accion explicita de la persona.
+# ---------------------------------------------------------------------------------------------------------------------
+def _audio_guard(request: Request) -> None:
+    from app import secret_access  # import diferido: modulo chico, mismo guard que el gestor de conexiones
+
+    problem = secret_access.local_page_problem(
+        request.client.host if request.client else None,
+        request.url.hostname,
+        request.headers.get("origin"),
+        request.headers.get("sec-fetch-site"),
+        f"{request.url.scheme}://{request.url.netloc}",
+    )
+    if problem:
+        raise HTTPException(
+            status_code=403,
+            detail="El audio de esta PC solo se puede cambiar desde la página de Vision en esta misma PC.",
+        )
+
+
+def _audio_http_error(exc: Exception) -> HTTPException:
+    from app import audio_control  # import diferido: ver _audio_guard
+
+    if isinstance(exc, audio_control.AudioUnsupported):
+        return HTTPException(status_code=501, detail=str(exc))
+    return HTTPException(status_code=422, detail=str(exc))
+
+
+class AudioVolumeRequest(BaseModel):
+    volume: int  # 0..100; 0 silencia y conserva el nivel anterior (REQ-004)
+
+
+class AudioMuteRequest(BaseModel):
+    muted: bool  # False = activar (REQ-002)
+
+
+@app.get("/api/audio/mics")
+def list_audio_mics(request: Request) -> dict:
+    """REQ-001: microfonos CONECTADOS de Windows, el predeterminado primero, con si estan silenciados y su volumen (0-100; null = el driver no lo dice)."""
+    _audio_guard(request)
+    from app import audio_control  # import diferido: ver _audio_guard
+
+    try:
+        return {"mics": [m.as_dict() for m in audio_control.list_microphones()]}
+    except audio_control.AudioControlError as exc:
+        raise _audio_http_error(exc) from exc
+
+
+@app.post("/api/audio/mics/mute")
+def set_audio_mic_mute(request: Request, req: AudioMuteRequest, mic_id: str) -> dict:
+    """REQ-002: activa (`muted=false`) o silencia un microfono SIN tocar su volumen ni cual es el predeterminado. Devuelve el estado releido de Windows.
+    El id viaja por query (`?mic_id=`): los ids de Windows llevan llaves y puntos que no son comodos en una ruta."""
+    _audio_guard(request)
+    from app import audio_control  # import diferido: ver _audio_guard
+
+    try:
+        return {"mic": audio_control.set_mute(mic_id, req.muted).as_dict()}
+    except audio_control.AudioControlError as exc:
+        raise _audio_http_error(exc) from exc
+
+
+@app.post("/api/audio/mics/volume")
+def set_audio_mic_volume(request: Request, req: AudioVolumeRequest, mic_id: str) -> dict:
+    """REQ-003/004: volumen de 0 a 100. De 1 a 100 fija el nivel y quita el silencio; 0 silencia y conserva el nivel. Devuelve el estado releido."""
+    _audio_guard(request)
+    from app import audio_control  # import diferido: ver _audio_guard
+
+    try:
+        return {"mic": audio_control.set_volume(mic_id, req.volume).as_dict()}
+    except audio_control.AudioControlError as exc:
+        raise _audio_http_error(exc) from exc
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# spec proxy-autoheal (REQ-007, REQ-008): Configuracion > Red > Proxy. Cambiar el proxy cambia POR DONDE SALE todo Vision, asi que TODAS las rutas pasan por `_proxy_guard`
+# (solo esta PC y la propia pagina de Vision, igual que las contraseñas guardadas y Outlook/Teams). Ninguna respuesta lleva una contraseña (las direcciones salen sin usuario).
+# ---------------------------------------------------------------------------------------------------------------------
+_PROXY_INVALID = "Esa dirección de proxy no es válida. Escribila como «equipo:puerto», por ejemplo 19.12.80.237:83."
+_PROXY_FAILED = "No se pudo revisar la salida a internet. Probá de nuevo; si sigue igual, avisá a soporte."
+
+
+def _proxy_guard(request: Request) -> None:
+    from app import secret_access  # import diferido: modulo chico, mismo guard que las contraseñas y Outlook/Teams
+
+    problem = secret_access.local_page_problem(
+        request.client.host if request.client else None,
+        request.url.hostname,
+        request.headers.get("origin"),
+        request.headers.get("sec-fetch-site"),
+        f"{request.url.scheme}://{request.url.netloc}",
+    )
+    if problem:
+        raise HTTPException(
+            status_code=403,
+            detail="La salida a internet solo se puede cambiar desde la página de Vision en esta misma PC.",
+        )
+
+
+class ProxyAddressRequest(BaseModel):
+    address: str = Field("", max_length=300)  # vacio = la conexion directa (sin proxy)
+    # Booleano ESTRICTO: un «no» o un 0 mal escrito no puede convertirse en «forzar» una direccion que no responde.
+    force: StrictBool = False
+
+
+@app.get("/api/proxy/status")
+def proxy_status(request: Request, response: Response) -> dict:
+    """REQ-008: lo ultimo que se chequeo (en uso, guardado, candidatos con su estado, aviso). NO sale a la red."""
+    _proxy_guard(request)
+    from app import proxy_health  # import diferido: ver _proxy_guard
+
+    response.headers["Cache-Control"] = "no-store"
+    return proxy_health.snapshot()
+
+
+@app.post("/api/proxy/reconnect")
+def proxy_reconnect(request: Request, response: Response) -> dict:
+    """REQ-007/008, boton «Reconectar»: corre el chequeo completo con cura, igual que al arrancar. Tarda hasta unos segundos si algo no responde."""
+    _proxy_guard(request)
+    from app import proxy_health  # import diferido: ver _proxy_guard
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        proxy_health.check()
+    except Exception as exc:  # noqa: BLE001 -- el crudo va al log, la persona ve una frase
+        logger.warning("Reconectar la salida a internet fallo: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=_PROXY_FAILED) from exc
+    return proxy_health.snapshot()
+
+
+@app.post("/api/proxy/test")
+def proxy_test(request: Request, req: ProxyAddressRequest, response: Response) -> dict:
+    """REQ-007/008, boton «Probar»: prueba UNA direccion y no cambia nada."""
+    _proxy_guard(request)
+    from app import proxy_health  # import diferido: ver _proxy_guard
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return proxy_health.probe_one(req.address)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=_PROXY_INVALID) from exc
+
+
+@app.post("/api/proxy/apply")
+def proxy_apply(request: Request, req: ProxyAddressRequest, response: Response) -> dict:
+    """REQ-007/008, boton «Guardar y reconectar»: guarda (cifrado) y aplica YA la direccion elegida. Una que no responde no se aplica salvo `force`."""
+    _proxy_guard(request)
+    from app import proxy_health  # import diferido: ver _proxy_guard
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        outcome = proxy_health.apply_choice(req.address, force=req.force)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=_PROXY_INVALID) from exc
+    except Exception as exc:  # noqa: BLE001 -- el crudo va al log, la persona ve una frase
+        logger.warning("Guardar la salida a internet fallo: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=_PROXY_FAILED) from exc
+    return {**proxy_health.snapshot(), **outcome}
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# spec office-com-automatizacion (REQ-009, REQ-015): estado de Excel y Word y el interruptor «Office» de Configuracion > Conexiones. Apagar Office cambia lo que el modelo puede hacer
+# sobre los archivos de la persona, asi que las dos rutas pasan por `_office_guard` (solo esta PC y la propia pagina de Vision, igual que Outlook y Teams). Consultar NO lanza ni abre nada.
+# ---------------------------------------------------------------------------------------------------------------------
+_OFFICE_FAILED = "No se pudo revisar el estado de Office. Probá de nuevo; si sigue igual, avisá a soporte."
+
+
+def _office_guard(request: Request) -> None:
+    from app import secret_access  # import diferido: modulo chico, mismo guard que Outlook y Teams
+
+    problem = secret_access.local_page_problem(
+        request.client.host if request.client else None,
+        request.url.hostname,
+        request.headers.get("origin"),
+        request.headers.get("sec-fetch-site"),
+        f"{request.url.scheme}://{request.url.netloc}",
+    )
+    if problem:
+        raise HTTPException(
+            status_code=403, detail="Office solo se puede ver y cambiar desde la página de Vision en esta misma PC."
+        )
+
+
+@app.get("/api/office/status")
+def office_status_route(request: Request, response: Response) -> dict:
+    """REQ-015: `{enabled, excel: {state, message}, word: {state, message}}`. No abre ni lanza Excel ni Word; con Office apagado ni siquiera consulta COM."""
+    _office_guard(request)
+    from app.office import status as office_status  # import diferido: ver _office_guard
+
+    from app import capability_names  # import diferido: ver _office_guard
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        # spec conexiones-office-m365-visibles REQ-008: el nombre que la PERSONA le puso («Principal» si no puso ninguno)
+        return {
+            **office_status.snapshot(),
+            "name": capability_names.get("office"),
+            "display": capability_names.display("office"),
+        }
+    except Exception as exc:  # noqa: BLE001 -- el crudo va al log, la persona ve una frase
+        logger.warning("Consultar el estado de Office fallo: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=_OFFICE_FAILED) from exc
+
+
+class CapabilityNameRequest(BaseModel):
+    # `str` ESTRICTO: un numero, una lista o `null` no se convierten en texto. La regla del nombre (la de las demas conexiones) la aplica `capability_names.set_name`.
+    name: StrictStr
+
+
+def _save_capability_name(capability: str, req: CapabilityNameRequest) -> dict:
+    """Guarda el nombre de «Outlook y Teams» u «Office» (spec conexiones-office-m365-visibles REQ-008). Nombre invalido = 422 con la frase para la persona."""
+    from app import capability_names  # import diferido: modulo chico, solo lo usan estas rutas
+
+    try:
+        display = capability_names.set_name(capability, req.name)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422, detail=f"Ese nombre no sirve. {capability_names.problem(req.name)}"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 -- el crudo va al log, la persona ve una frase
+        logger.warning("Guardar el nombre de %s fallo: %s", capability, exc, exc_info=True)
+        raise HTTPException(
+            status_code=500, detail="No se pudo guardar el nombre. Probá de nuevo; si sigue igual, avisá a soporte."
+        ) from exc
+    return {"name": req.name, "display": display}
+
+
+@app.post("/api/office/name")
+def office_name(request: Request, req: CapabilityNameRequest) -> dict:
+    """REQ-008: guarda el nombre que la persona le pone a la conexion «Office». Solo esta PC y la propia pagina."""
+    _office_guard(request)
+    return _save_capability_name("office", req)
+
+
+class OfficeSwitchRequest(BaseModel):
+    # Booleano ESTRICTO: sin esto pydantic convierte "no", "false" o 0 en False y un valor mal escrito apagaria Office sin avisar.
+    enabled: StrictBool
+
+
+@app.post("/api/office/switch")
+def office_switch(request: Request, req: OfficeSwitchRequest) -> dict:
+    """REQ-009: prende o apaga Office. Apagado, ninguna herramienta `office_*` sale hacia el modelo. No cierra ningun libro ni toca ningun archivo."""
+    _office_guard(request)
+    from app import switches  # import diferido: ver _office_guard
+
+    switches.set_office_enabled(req.enabled)
+    return {"enabled": switches.is_office_enabled()}
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# spec office-outlook-teams-mcp (REQ-M02, REQ-M09, REQ-M11, REQ-M12): iniciar y cerrar sesion en Outlook y Teams (`app/m365/`).
+# Iniciar sesion abre el navegador y cerrarla borra el token: cambian algo de la persona, asi que TODAS las rutas pasan por `_m365_guard` (solo esta PC y la propia pagina de Vision,
+# igual que el audio y las contraseñas guardadas). El retorno del navegador (`/callback`) llega desde el sitio de la empresa hacia 127.0.0.1, asi que solo exige que sea ESTA PC.
+# Nada de aca se llama solo: iniciar sesion lo dispara una accion explicita de la persona.
+# ---------------------------------------------------------------------------------------------------------------------
+def _m365_guard(request: Request, *, from_empresa_redirect: bool = False) -> None:
+    from app import secret_access  # import diferido: modulo chico, mismo guard que el audio y las contraseñas
+
+    client_host = request.client.host if request.client else None
+    if from_empresa_redirect:
+        # El navegador vuelve del sitio de la empresa (otro origen): solo se exige que el pedido llegue desde ESTA PC y a la direccion local.
+        problem = secret_access.local_page_problem(
+            client_host, request.url.hostname, None, None, f"{request.url.scheme}://{request.url.netloc}"
+        )
+    else:
+        problem = secret_access.local_page_problem(
+            client_host,
+            request.url.hostname,
+            request.headers.get("origin"),
+            request.headers.get("sec-fetch-site"),
+            f"{request.url.scheme}://{request.url.netloc}",
+        )
+    if problem:
+        raise HTTPException(
+            status_code=403,
+            detail="Outlook y Teams solo se pueden conectar desde la página de Vision en esta misma PC.",
+        )
+
+
+@app.get("/api/m365/status")
+def m365_status(request: Request) -> dict:
+    """REQ-M09: estado de Outlook y Teams para Configuracion (`connected`, `waiting`, `error`, `disconnected`) y si el interruptor esta `enabled`. Nunca lleva el token."""
+    _m365_guard(request)
+    from app import capability_names, switches  # import diferido: ver _m365_guard
+    from app.m365 import service
+
+    # spec conexiones-office-m365-visibles REQ-008: el nombre que la PERSONA le puso («Principal» si no puso ninguno)
+    return {
+        **service.status(),
+        "enabled": switches.is_m365_enabled(),
+        "name": capability_names.get("m365"),
+        "display": capability_names.display("m365"),
+    }
+
+
+@app.post("/api/m365/name")
+def m365_name(request: Request, req: CapabilityNameRequest) -> dict:
+    """REQ-008: guarda el nombre que la persona le pone a la conexion «Outlook y Teams». Solo esta PC y la propia pagina."""
+    _m365_guard(request)
+    return _save_capability_name("m365", req)
+
+
+class M365SwitchRequest(BaseModel):
+    # Booleano ESTRICTO: sin esto pydantic convierte "no", "false" o 0 en False y un valor mal escrito apagaria Outlook y Teams sin avisar. Solo `true` o `false` reales; el resto da 422.
+    enabled: StrictBool
+
+
+@app.post("/api/m365/switch")
+def m365_switch(request: Request, req: M365SwitchRequest) -> dict:
+    """REQ-M09: prende o apaga Outlook y Teams. Apagado, ninguna herramienta `m365_*` sale hacia el modelo. NO cierra la sesion ni borra el token."""
+    _m365_guard(request)
+    from app import switches  # import diferido: ver _m365_guard
+
+    switches.set_m365_enabled(req.enabled)
+    return {"enabled": switches.is_m365_enabled()}
+
+
+@app.post("/api/m365/login")
+async def m365_login(request: Request) -> dict:
+    """REQ-M02: empieza el inicio de sesion con la cuenta de la empresa (abre el navegador). Responde ya con `waiting`; la pantalla consulta `/status`. La direccion de retorno usa el puerto REAL."""
+    _m365_guard(request)
+    from app.m365 import service  # import diferido: ver _m365_guard
+
+    port = request.url.port or (443 if request.url.scheme == "https" else 80)
+    return await service.start_login(port)
+
+
+@app.post("/api/m365/logout")
+async def m365_logout(request: Request) -> dict:
+    """REQ-M11: cierra la sesion (borra el token cifrado y corta un login en espera)."""
+    _m365_guard(request)
+    from app.m365 import service  # import diferido: ver _m365_guard
+
+    return await service.sign_out()
+
+
+_M365_CALLBACK_PAGE = (
+    '<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Vision</title>'
+    "<style>body{{font-family:Segoe UI,Arial,sans-serif;background:#10131a;color:#e8eaf0;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}}"
+    "main{{max-width:30rem;padding:2rem;text-align:center}}h1{{font-size:1.25rem;margin:0 0 .75rem}}p{{margin:0;color:#aab0bf}}</style></head>"
+    "<body><main><h1>{title}</h1><p>{text}</p></main></body></html>"
+)
+
+
+def _m365_callback_page(title: str, text: str):
+    from fastapi.responses import HTMLResponse  # import diferido: solo lo usa esta ruta
+
+    # `title` y `text` son SIEMPRE frases fijas de arriba: lo que llega por la URL (codigo, estado, motivo) nunca se escribe en el HTML.
+    return HTMLResponse(_M365_CALLBACK_PAGE.format(title=title, text=text))
+
+
+@app.get("/api/m365/callback")
+def m365_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    """REQ-M02: a esta direccion vuelve el navegador tras iniciar sesion en la empresa. Entrega el codigo al login en curso (solo si el `state` es el suyo) y le muestra a la persona una pagina
+    simple. La pagina NUNCA repite el codigo ni el motivo crudo de un rechazo: lo recibido no se escribe en el HTML."""
+    _m365_guard(request, from_empresa_redirect=True)
+    from app.m365 import service  # import diferido: ver _m365_guard
+
+    if error:
+        if service.deliver_error(state=state, reason=error):
+            return _m365_callback_page(
+                "No se pudo iniciar sesión",
+                "No se autorizó el acceso. Podés cerrar esta pestaña y volver a tocar «Iniciar sesión» en Vision.",
+            )
+    elif code and service.deliver_callback(code=code, state=state):
+        return _m365_callback_page(
+            "Listo, ya podés volver a Vision", "Iniciaste sesión en Outlook y Teams. Podés cerrar esta pestaña."
+        )
+    return _m365_callback_page(
+        "Este aviso no corresponde a ningún inicio de sesión",
+        "No se cambió nada. Si querés conectarte, volvé a Vision y tocá «Iniciar sesión». Podés cerrar esta pestaña.",
+    )
+
+
 # REQ-004: estado del gate heuristico, UNO por sesion -- vive en memoria
 # del proceso (igual que SessionState), se descarta si el proceso se
 # reinicia (no hace falta persistirlo, es solo el timestamp del throttle
@@ -560,6 +1008,122 @@ class MeetingAnalyzeRequest(BaseModel):
     # por "ya opino hace poco"). Default False para no cambiar el
     # comportamiento del camino automatico existente.
     force: bool = False
+
+
+# REQ-004/005 revisado: se manda TODA la transcripcion acumulada como
+# contexto, con el fragmento que disparo la invocacion resaltado al
+# final -- asi el LLM "razona sobre todo lo que entendio" en la
+# reunion, no solo sobre las ultimas palabras sueltas.
+#
+# Instruccion de brevedad (pedido explicito del usuario): las
+# respuestas se sentian "muy largas" al ESCUCHARLAS en voz durante una
+# reunion en vivo (un parrafo largo que se lee rapido en pantalla se
+# siente eterno hablado) -- se le pide al LLM que sea breve por
+# default, PERO sin un limite fijo de caracteres/oraciones: el usuario
+# eligio explicitamente que "Vision decida segun la pregunta" (una
+# pregunta simple amerita 1 frase, una que pide explicacion real puede
+# extenderse un poco mas). Esto es una instruccion de PROMPT, no un
+# truncado mecanico del texto -- truncar a la fuerza podria cortar una
+# respuesta a la mitad de una idea.
+_MEETING_BREVITY_INSTRUCTION = (
+    "[Instrucción de estilo para esta respuesta, Modo reunión] Estás respondiendo "
+    "en VOZ ALTA durante una reunión en vivo, no en un chat de texto -- una respuesta "
+    "larga se siente pesada de escuchar hablada. Sé breve por defecto (1-2 frases para "
+    "preguntas simples/directas). Extendete solo si la pregunta realmente lo amerita "
+    "(pide una explicación, un análisis, o varios datos) -- vos decidís según la "
+    "pregunta, sin un límite fijo."
+)
+# REQ-006 / categoria 6 de la spec (regla de negocio "Transcripcion
+# confusa/ambigua al pedir opinion"): la transcripcion viene de
+# whisper-large sobre audio en vivo de una reunion real -- puede tener
+# ruido de fondo, voces superpuestas, o cortes que dejan una pregunta a
+# medias. En vez de "opinar a ciegas" sobre algo mal entendido (lo cual
+# puede ser peor que no responder), se le pide al LLM un protocolo
+# explicito de 3 pasos SOLO para ese caso -- nunca para una pregunta
+# que se entiende bien, donde debe responder directo como siempre.
+_MEETING_CONFUSION_PROTOCOL_INSTRUCTION = (
+    "[Regla de negocio, Modo reunión -- SOLO si aplica] La transcripción que sigue "
+    "viene de reconocimiento de voz automático sobre audio real de una reunión: puede "
+    "tener ruido de fondo, voces superpuestas, o cortes que dejan una idea a medias. "
+    "Si al leerla notás que la pregunta o pedido dirigido a vos es confusa/ambigua "
+    "-- no por falta de contexto de negocio, sino porque el propio texto transcrito "
+    "no permite entender con confianza qué te están pidiendo -- NO opines a ciegas "
+    "adivinando la intención. En ese caso específico: (1) decí explícitamente qué "
+    "fue lo que entendiste de la conversación hasta ahora (sin inventar lo que no "
+    "quedó claro), (2) preguntá si preferís dar directamente un resumen del tema "
+    "tratado en vez de una opinión puntual sobre algo que no se entendió bien, y "
+    "(3) si al armar ese resumen notás que la conversación se desvió mucho del tema "
+    "original, señalalo explícitamente y recién ahí retomá una opinión sobre el tema "
+    "real. Si la pregunta SÍ se entiende con confianza, ignorá esta regla por "
+    "completo y respondé directo, igual que siempre."
+)
+# REQ-001 (spec asistente-contextual-voz): fix de un bug real reportado
+# por el usuario -- preguntado algo en Modo reunión, el modelo a veces
+# respondia "no puedo acceder al chat" pese a que ARQUITECTONICAMENTE
+# SI tiene el historial completo disponible (este mismo `user_message`
+# se agrega a `session.messages`, el MISMO objeto que ya contiene todo
+# el historial de chat de texto previo de esta sesion -- ver run_turn
+# en app/llm/loop.py). La causa real no era falta de contexto, sino que
+# nada en el prompt le decia EXPLICITAMENTE al modelo que ese historial
+# de chat de texto anterior esta disponible en los mensajes de arriba
+# -- sin esa aclaracion, el modelo podia interpretar la pregunta como
+# referida solo a la transcripcion de audio (lo unico "presentado"
+# explicitamente como contexto) y, al no encontrar la respuesta ahi,
+# negar acceso en vez de mirar los turnos anteriores de la conversacion.
+_MEETING_CHAT_CONTEXT_INSTRUCTION = (
+    "[Aclaración de contexto, Modo reunión] Tenés acceso COMPLETO al historial de "
+    "chat de texto de esta misma sesión: todos los mensajes anteriores (tuyos y del "
+    "usuario) que ves más arriba en esta conversación son reales y forman parte de tu "
+    "contexto disponible, igual que en el chat de texto normal. Si te preguntan algo "
+    "sobre lo que se habló antes en el chat (no solo en la transcripción de audio de "
+    "esta reunión), respondé usando ESE historial -- nunca digas que no podés acceder "
+    "al chat o que no tenés esa información disponible."
+)
+# REQ-003 (spec asistente-contextual-voz): encuadre de rol -- Record es
+# para ESCUCHAR y OPINAR sobre una reunion, no para operar activamente
+# sobre archivos/rutas de un proyecto (ese caso de uso vive en el Modo
+# Cerebro). Se lo aclara al modelo para que, si le piden algo tipo
+# "revisame el archivo X" durante una reunion, redirija al usuario en
+# vez de intentar ejecutar tools de archivos sin el contexto adecuado
+# de una sesion de trabajo 1:1.
+_MEETING_ROLE_SCOPE_INSTRUCTION = (
+    "[Alcance de tu rol, Modo reunión] Estás en el Modo reunión: tu función acá es "
+    "escuchar la conversación (potencialmente de varias personas) y opinar cuando te "
+    "lo piden, usando tus herramientas de consulta (Oracle/BigQuery/SharePoint/skills) "
+    "si hace falta fundamento. Si te piden específicamente operar sobre un archivo o "
+    'ruta de un proyecto (ej. "revisá el archivo X", "corregí el bug en Y"), '
+    "aclará brevemente que ese tipo de trabajo puntual sobre archivos se hace mejor "
+    "en el chat de texto o en el Modo Cerebro (pensado para eso), en vez de intentarlo "
+    "acá sin el contexto adecuado de una sesión de trabajo dedicada."
+)
+
+
+def _build_meeting_message(fragment: str, full_transcript: str) -> str:
+    """Arma el mensaje que Record le manda al modelo en el Modo reunion.
+
+    Las cuatro instrucciones (brevedad, transcripcion confusa, acceso al chat y alcance del rol) van
+    SIEMPRE y antes de la transcripcion. Con transcripcion acumulada se manda toda, con la ultima frase
+    resaltada al final; sin ella (primer fragmento de una reunion) se manda solo el fragmento."""
+    transcript_context = full_transcript.strip()
+    if transcript_context:
+        return (
+            f"{_MEETING_BREVITY_INSTRUCTION}\n\n"
+            f"{_MEETING_CONFUSION_PROTOCOL_INSTRUCTION}\n\n"
+            f"{_MEETING_CHAT_CONTEXT_INSTRUCTION}\n\n"
+            f"{_MEETING_ROLE_SCOPE_INSTRUCTION}\n\n"
+            "[Transcripción completa de audio en vivo, Modo reunión, hasta este momento]\n"
+            f"{transcript_context}\n\n"
+            "[Última frase transcrita -- acaban de mencionarte y pedirte algo, "
+            "respondé basándote en TODO el contexto de arriba]\n"
+            f"{fragment.strip()}"
+        )
+    return (
+        f"{_MEETING_BREVITY_INSTRUCTION}\n\n"
+        f"{_MEETING_CONFUSION_PROTOCOL_INSTRUCTION}\n\n"
+        f"{_MEETING_CHAT_CONTEXT_INSTRUCTION}\n\n"
+        f"{_MEETING_ROLE_SCOPE_INSTRUCTION}\n\n"
+        f"[Transcripción de audio en vivo, Modo reunión] {fragment.strip()}"
+    )
 
 
 @app.post("/api/meeting/analyze")
@@ -619,113 +1183,9 @@ async def meeting_analyze(req: MeetingAnalyzeRequest) -> dict:
         # repita si no llego a procesar algo, mismo criterio se aplica aca.
         return {"opinion": None}
 
-    # REQ-004/005 revisado: se manda TODA la transcripcion acumulada como
-    # contexto, con el fragmento que disparo la invocacion resaltado al
-    # final -- asi el LLM "razona sobre todo lo que entendio" en la
-    # reunion, no solo sobre las ultimas palabras sueltas.
-    #
-    # Instruccion de brevedad (pedido explicito del usuario): las
-    # respuestas se sentian "muy largas" al ESCUCHARLAS en voz durante una
-    # reunion en vivo (un parrafo largo que se lee rapido en pantalla se
-    # siente eterno hablado) -- se le pide al LLM que sea breve por
-    # default, PERO sin un limite fijo de caracteres/oraciones: el usuario
-    # eligio explicitamente que "Vision decida segun la pregunta" (una
-    # pregunta simple amerita 1 frase, una que pide explicacion real puede
-    # extenderse un poco mas). Esto es una instruccion de PROMPT, no un
-    # truncado mecanico del texto -- truncar a la fuerza podria cortar una
-    # respuesta a la mitad de una idea.
-    brevity_instruction = (
-        "[Instrucción de estilo para esta respuesta, Modo reunión] Estás respondiendo "
-        "en VOZ ALTA durante una reunión en vivo, no en un chat de texto -- una respuesta "
-        "larga se siente pesada de escuchar hablada. Sé breve por defecto (1-2 frases para "
-        "preguntas simples/directas). Extendete solo si la pregunta realmente lo amerita "
-        "(pide una explicación, un análisis, o varios datos) -- vos decidís según la "
-        "pregunta, sin un límite fijo."
-    )
-    # REQ-006 / categoria 6 de la spec (regla de negocio "Transcripcion
-    # confusa/ambigua al pedir opinion"): la transcripcion viene de
-    # whisper-large sobre audio en vivo de una reunion real -- puede tener
-    # ruido de fondo, voces superpuestas, o cortes que dejan una pregunta a
-    # medias. En vez de "opinar a ciegas" sobre algo mal entendido (lo cual
-    # puede ser peor que no responder), se le pide al LLM un protocolo
-    # explicito de 3 pasos SOLO para ese caso -- nunca para una pregunta
-    # que se entiende bien, donde debe responder directo como siempre.
-    confusion_protocol_instruction = (
-        "[Regla de negocio, Modo reunión -- SOLO si aplica] La transcripción que sigue "
-        "viene de reconocimiento de voz automático sobre audio real de una reunión: puede "
-        "tener ruido de fondo, voces superpuestas, o cortes que dejan una idea a medias. "
-        "Si al leerla notás que la pregunta o pedido dirigido a vos es confusa/ambigua "
-        "-- no por falta de contexto de negocio, sino porque el propio texto transcrito "
-        "no permite entender con confianza qué te están pidiendo -- NO opines a ciegas "
-        "adivinando la intención. En ese caso específico: (1) decí explícitamente qué "
-        "fue lo que entendiste de la conversación hasta ahora (sin inventar lo que no "
-        "quedó claro), (2) preguntá si preferís dar directamente un resumen del tema "
-        "tratado en vez de una opinión puntual sobre algo que no se entendió bien, y "
-        "(3) si al armar ese resumen notás que la conversación se desvió mucho del tema "
-        "original, señalalo explícitamente y recién ahí retomá una opinión sobre el tema "
-        "real. Si la pregunta SÍ se entiende con confianza, ignorá esta regla por "
-        "completo y respondé directo, igual que siempre."
-    )
-    # REQ-001 (spec asistente-contextual-voz): fix de un bug real reportado
-    # por el usuario -- preguntado algo en Modo reunión, el modelo a veces
-    # respondia "no puedo acceder al chat" pese a que ARQUITECTONICAMENTE
-    # SI tiene el historial completo disponible (este mismo `user_message`
-    # se agrega a `session.messages`, el MISMO objeto que ya contiene todo
-    # el historial de chat de texto previo de esta sesion -- ver run_turn
-    # en app/llm/loop.py). La causa real no era falta de contexto, sino que
-    # nada en el prompt le decia EXPLICITAMENTE al modelo que ese historial
-    # de chat de texto anterior esta disponible en los mensajes de arriba
-    # -- sin esa aclaracion, el modelo podia interpretar la pregunta como
-    # referida solo a la transcripcion de audio (lo unico "presentado"
-    # explicitamente como contexto) y, al no encontrar la respuesta ahi,
-    # negar acceso en vez de mirar los turnos anteriores de la conversacion.
-    chat_context_instruction = (
-        "[Aclaración de contexto, Modo reunión] Tenés acceso COMPLETO al historial de "
-        "chat de texto de esta misma sesión: todos los mensajes anteriores (tuyos y del "
-        "usuario) que ves más arriba en esta conversación son reales y forman parte de tu "
-        "contexto disponible, igual que en el chat de texto normal. Si te preguntan algo "
-        "sobre lo que se habló antes en el chat (no solo en la transcripción de audio de "
-        "esta reunión), respondé usando ESE historial -- nunca digas que no podés acceder "
-        "al chat o que no tenés esa información disponible."
-    )
-    # REQ-003 (spec asistente-contextual-voz): encuadre de rol -- Record es
-    # para ESCUCHAR y OPINAR sobre una reunion, no para operar activamente
-    # sobre archivos/rutas de un proyecto (ese caso de uso vive en el Modo
-    # Cerebro). Se lo aclara al modelo para que, si le piden algo tipo
-    # "revisame el archivo X" durante una reunion, redirija al usuario en
-    # vez de intentar ejecutar tools de archivos sin el contexto adecuado
-    # de una sesion de trabajo 1:1.
-    role_scope_instruction = (
-        "[Alcance de tu rol, Modo reunión] Estás en el Modo reunión: tu función acá es "
-        "escuchar la conversación (potencialmente de varias personas) y opinar cuando te "
-        "lo piden, usando tus herramientas de consulta (Oracle/BigQuery/SharePoint/skills) "
-        "si hace falta fundamento. Si te piden específicamente operar sobre un archivo o "
-        'ruta de un proyecto (ej. "revisá el archivo X", "corregí el bug en Y"), '
-        "aclará brevemente que ese tipo de trabajo puntual sobre archivos se hace mejor "
-        "en el chat de texto o en el Modo Cerebro (pensado para eso), en vez de intentarlo "
-        "acá sin el contexto adecuado de una sesión de trabajo dedicada."
-    )
-    transcript_context = req.full_transcript.strip()
-    if transcript_context:
-        user_message = (
-            f"{brevity_instruction}\n\n"
-            f"{confusion_protocol_instruction}\n\n"
-            f"{chat_context_instruction}\n\n"
-            f"{role_scope_instruction}\n\n"
-            "[Transcripción completa de audio en vivo, Modo reunión, hasta este momento]\n"
-            f"{transcript_context}\n\n"
-            "[Última frase transcrita -- acaban de mencionarte y pedirte algo, "
-            "respondé basándote en TODO el contexto de arriba]\n"
-            f"{req.fragment.strip()}"
-        )
-    else:
-        user_message = (
-            f"{brevity_instruction}\n\n"
-            f"{confusion_protocol_instruction}\n\n"
-            f"{chat_context_instruction}\n\n"
-            f"{role_scope_instruction}\n\n"
-            f"[Transcripción de audio en vivo, Modo reunión] {req.fragment.strip()}"
-        )
+    # REQ-004/005 revisado: TODA la transcripcion acumulada va como contexto, con el fragmento que
+    # disparo la invocacion resaltado al final (ver `_build_meeting_message` y sus instrucciones).
+    user_message = _build_meeting_message(req.fragment, req.full_transcript)
     opinion_text = ""
     llm_error: str | None = None
     try:
@@ -741,9 +1201,7 @@ async def meeting_analyze(req: MeetingAnalyzeRequest) -> dict:
                 # aprobo" (bug real encontrado en pruebas contra el proveedor de IA
                 # real: un 429 por limite de gasto se tragaba sin dejar
                 # rastro).
-                llm_error = event.get("data", {}).get(
-                    "message", "Error desconocido del LLM"
-                )
+                llm_error = event.get("data", {}).get("message", "Error desconocido del LLM")
     except Exception:
         logger.exception("Error invocando al LLM desde el Modo reunion")
         raise HTTPException(
@@ -825,9 +1283,7 @@ async def meeting_summarize(req: MeetingSummarizeRequest) -> dict:
             if event.get("type") == "text-delta":
                 summary_text += event.get("data", {}).get("text", "")
             elif event.get("type") == "error":
-                llm_error = event.get("data", {}).get(
-                    "message", "Error desconocido del LLM"
-                )
+                llm_error = event.get("data", {}).get("message", "Error desconocido del LLM")
     except Exception:
         logger.exception("Error generando el resumen del Modo reunion")
         raise HTTPException(
@@ -932,6 +1388,8 @@ def _model_entry(model_id: str, provider: Any = None, free: bool = False) -> dic
         # Los modelos actuales aceptan imagenes; si uno no, el chat lo explica
         # (MODELO-IMAGEN en app/friendly_errors.py).
         "supports_image_input": True,
+        # Ventana de contexto: solo si el proveedor la informa (spec ia-local); sin dato, `resolve_context_window` usa 200.000.
+        "context_window": None,
         "secret_data_compliant": None,
     }
 
@@ -960,7 +1418,9 @@ def _provider_catalog() -> tuple[list[dict], list[dict]]:
             ids = llm_providers.provider_models(provider)
         except Exception as exc:  # noqa: BLE001 -- un proveedor caido no tapa a los demas
             logger.warning("No se pudo obtener la lista de modelos de %s: %s", provider.label, exc)
-            ids, error = [], "no respondió (revisá la clave o la conexión)"
+            # spec proxy-autoheal REQ-006 (de la version de origen): la persona ve una frase con que hacer (un proxy caido manda a
+            # Configuracion > Red); el texto crudo de la falla queda solo en el log.
+            ids, error = [], describe_model_error(exc).message
         suggested = list(ids) if provider.fixed_models else llm_providers.suggested_models(provider, ids)
         visible = [m for m in cfg.provider_models.get(provider.id, suggested) if m in ids] if ids else []
         # REQ-006: un proveedor gratuito se usa recien cuando el usuario lo
@@ -1023,6 +1483,9 @@ def list_models() -> dict:
         warning = "No hay ningún proveedor de IA con clave en el .env."
     elif failed:
         warning = f"No se pudo consultar la lista de modelos de: {', '.join(failed)}."
+        reason = next((s["error"] for s in status if s["error"]), "")
+        if reason and reason not in warning:
+            warning = f"{warning} {reason}"
     ids = {m["id"] for m in models}
     # El por defecto: el del principal (LLM_MODEL) o, sin principal, el primero.
     default = default_model_id() if llm_providers.has_principal() or not models else models[0]["id"]
@@ -1075,10 +1538,7 @@ def get_model_detail(model_id: str) -> dict:
     """Devuelve valid_args/reasoning_levels de UN modelo puntual (por id o
     alias), leyendo del cache que arma list_models() -- si el cache esta
     vacio/vencido, lo refresca primero."""
-    if (
-        _MODELS_CACHE.get("by_id") is None
-        or (time.monotonic() - _MODELS_CACHE["fetched_at"]) >= _MODELS_CACHE_TTL
-    ):
+    if _MODELS_CACHE.get("by_id") is None or (time.monotonic() - _MODELS_CACHE["fetched_at"]) >= _MODELS_CACHE_TTL:
         list_models()
 
     entry = (_MODELS_CACHE.get("by_id") or {}).get(model_id)
@@ -1094,9 +1554,7 @@ def _sse_format(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
-async def _drain_session_queue(
-    session, wait_for_turn_id: str | None = None, queue=None
-):
+async def _drain_session_queue(session, wait_for_turn_id: str | None = None, queue=None):
     """Generador SSE que se SUSCRIBE a los eventos de la sesion (fan-out,
     ver SessionState.subscribe()/push_event() para el detalle) -- no crea
     ni cancela ninguna tarea. Si el cliente corta la conexion (recarga de
@@ -1155,7 +1613,23 @@ async def _drain_session_queue(
                 wait_for_turn_id,
             ):
                 continue
-            yield _sse_format({k: v for k, v in event.items() if k != "_turn_id"})
+            payload = {k: v for k, v in event.items() if k != "_turn_id"}
+            # REQ-014 f (spec fix-detener-y-progreso-visible): cada evento de un turno sale con su `turn_id`, asi el frontend sabe
+            # que turno esta viendo responder y Detener frena ESE (no el siguiente de la cola que arranco en los ultimos
+            # milisegundos). Los eventos sin turno ('queued'/'dequeued') salen como siempre.
+            if event.get("_turn_id"):
+                payload["turn_id"] = event["_turn_id"]
+            yield _sse_format(payload)
+            # REQ-014 c (spec fix-detener-y-progreso-visible): el usuario BORRO el mensaje que esta conexion esperaba mientras
+            # seguia en la cola. Ese turno ya no va a arrancar: su conexion se cierra ACA (antes quedaba abierta para siempre y
+            # el navegador seguia con el boton en «Detener» y «Vision está trabajando…» sin que corriera nada).
+            if (
+                wait_for_turn_id is not None
+                and event.get("type") == "dequeued"
+                and (event.get("data") or {}).get("reason") == "deleted"
+                and (event.get("data") or {}).get("message_id") == wait_for_turn_id
+            ):
+                return
             if event.get("type") in ("done", "error", "stopped", "loop-stopped"):
                 # BUG real corregido (deteccion QA 2026-09-14, 4 rondas --
                 # historial completo porque cada intento parcial genero un
@@ -1210,14 +1684,105 @@ def _resolve_gen_params(req: ChatRequest) -> dict:
     persistidos (o ninguno, si tampoco hay guardados)."""
     cfg = pc.get_project_config()
     return {
-        "temperature": req.temperature
-        if req.temperature is not None
-        else cfg.temperature,
+        "temperature": req.temperature if req.temperature is not None else cfg.temperature,
         "top_p": req.top_p if req.top_p is not None else cfg.top_p,
         "max_tokens": req.max_tokens if req.max_tokens is not None else cfg.max_tokens,
         "reasoning_effort": req.reasoning_effort or cfg.reasoning_effort or None,
         "verbosity": req.verbosity or cfg.verbosity or None,
     }
+
+
+def _text_for_model(text: str) -> str:
+    """REQ-005 (spec clasificador-tipo-respuesta): texto que de verdad recibe el modelo. Solo el comando `/plan <pedido>` se
+    reescribe; cualquier otro mensaje (incluido `/plan` sin pedido) pasa tal cual. Funcion pura, sin I/O."""
+    # REQ-005 (spec clasificador-tipo-respuesta): comando /plan
+    # override manual que fuerza la clasificacion a Planificable. Se
+    # instrumenta agregandole una instruccion fuerte e in-place al texto
+    # del usuario (el LLM se acopla a las instrucciones).
+    final_text = text
+    if final_text.lstrip().lower().startswith("/plan "):
+        pedido = final_text.replace("/plan ", "", 1).strip()
+        final_text = (
+            "OVER@ride de clasificacion: este mensaje llego con el comando /plan. "
+            "Obligatoriamente printea como PRIMER TOKEN [[TIPO: Planificable]] y luego "
+            f"responde este pedido: {pedido}"
+        )
+    return final_text
+
+
+def _push_internal_turn_error(session, session_id: str, turn) -> None:
+    """Falla DENTRO de Vision a mitad de un turno (no del modelo: esas llegan como evento `error` del loop). Llamar SOLO desde
+    un `except` (el `logger.exception` necesita la excepcion en curso): deja el detalle tecnico en el log con una referencia
+    y le avisa a la persona en lenguaje simple por el mismo stream."""
+    internal = describe_internal_error()
+    when = datetime.now().astimezone().strftime("%H:%M:%S")
+    logger.exception(
+        "Fallo interno del turno %s (sesion %s) [%s · %s]",
+        turn.id,
+        session_id,
+        internal.code,
+        when,
+    )
+    session.push_event(
+        "error",
+        {
+            "message": internal.message,
+            "code": internal.code,
+            "technical": internal.technical(when=when),
+        },
+    )
+
+
+def _finish_turn(session, session_id: str, turn) -> None:
+    """Cierre de un turno de fondo (con exito, error o Detener): lo marca `done`, descarta lo borrado, avisa `__turn_done__` y
+    arranca el siguiente de la cola o del loop. TODO el cuerpo es SINCRONO a proposito (sin `await`): ningun otro pedido puede
+    meterse entre el descarte y el arranque del siguiente turno."""
+    turn.status = "done"
+    # REQ-014 b: el usuario borro este mensaje con el turno ya arrancado -> se descarta (memoria y SQLite) ANTES de
+    # arrancar el siguiente de la cola, asi el siguiente nunca ve nada del mensaje borrado. Sin `await` de por medio:
+    # ningun otro pedido puede meterse entre el descarte y el arranque del siguiente.
+    if turn.id in session.discard_turn_ids:
+        try:
+            _discard_finished_turn(session, session_id, turn)
+        except Exception:  # noqa: BLE001 -- un fallo del descarte nunca deja la sesion trabada ni la cola parada
+            logger.exception("No se pudo descartar el turno borrado %s (sesion %s)", turn.id, session_id)
+    session.turn_baseline = None
+    session.active_turn_id = None
+    # "__turn_done__" es una senal INTERNA (nunca llega al
+    # frontend, se filtra en _drain_session_queue) que le dice a
+    # la conexion que esperaba ESTE turno puntual que ya puede
+    # cerrar su stream. Lleva `turn_id` explicito en el `data`
+    # (ademas del `_turn_id` que push_event agrega automatico,
+    # que en este punto ya es None porque active_turn_id se
+    # limpio arriba) para que cada conexion sepa si es SU turno
+    # el que termino o el de otro -- bug real detectado en
+    # pruebas: antes cualquier conexion que viera CUALQUIER
+    # "__turn_done__" cortaba su propio stream, incluso si
+    # pertenecia a otro turno (ej. la conexion de B cortaba
+    # apenas terminaba A, antes de que el turno de B arrancara).
+    session.push_event("__turn_done__", {"turn_id": turn.id})
+
+    # REQ-003/007: apenas termina este turno, si hay algo en cola
+    # se dispara automaticamente -- el frontend no necesita
+    # reenviar nada. El nuevo turno sigue empujando eventos a la
+    # MISMA session.event_queue, asi que cualquier cliente que
+    # siga escuchando (via /api/chat/stream/{id}) ve la
+    # continuacion sin cortes.
+    next_turn = session.dequeue_next_turn()
+    if next_turn is not None:
+        # REQ-014 d: se avisa que salio de la cola (antes 'dequeued' nunca se emitia y el cartel «En cola · posición N»
+        # quedaba pegado). Va ANTES de los eventos del turno y con la cola que queda, para renumerar a los demas.
+        session.push_event(
+            "dequeued",
+            {"message_id": next_turn.id, "reason": "started", "queue": list(session.queue_order)},
+        )
+        _launch_turn(session, session_id, next_turn)
+    elif session.loop_active:
+        # spec modo-plan-loop REQ-006/007: sin nada en la cola
+        # HUMANA, pero con el loop activo -- se sintetiza el
+        # PROXIMO turno automaticamente (mismo mecanismo de
+        # auto-encadenamiento de arriba, reusado tal cual).
+        _maybe_continue_loop(session, session_id)
 
 
 def _launch_turn(session, session_id: str, turn) -> None:
@@ -1238,21 +1803,20 @@ def _launch_turn(session, session_id: str, turn) -> None:
     # cuando ya paso a ser "historial viejo".
     turn.messages_start_index = len(session.messages) + (0 if session.messages else 1)
     session.turns[turn.id] = turn
+    # REQ-014 b (spec fix-detener-y-progreso-visible): lo que ya habia ANTES de este turno. Si el usuario borra el mensaje
+    # con el turno ya arrancado, al terminar se descarta solo lo que quedo despues (ver `_discard_finished_turn`). El loop
+    # lo refina despues de compactar (la compactacion rearma la lista).
+    session.turn_baseline = list(session.messages)
+    # spec office-outlook-teams-mcp REQ-M07b: cada turno EMPIEZA sin la marca de «se leyo texto de otra persona» (correo, chat, transcripcion). Si no, una lectura de ayer seguiria
+    # frenando acciones legitimas de hoy en modo Auto. Es solo la marca de lectura: las autorizaciones ya dadas (`m365_write_seen`) sobreviven al cambio de turno.
+    from app.m365 import (
+        policy as m365_policy,
+    )  # import diferido: el paquete m365 importa tools, y estas importan este modulo
+
+    m365_policy.new_turn(session)
 
     async def _run_in_background():
-        # REQ-005 (spec clasificador-tipo-respuesta): comando /plan
-        # REQ-005 (spec clasificador-tipo-respuesta): comando /plan
-        # override manual que fuerza la clasificacion a Planificable. Se
-        # instrumenta agregandole una instruccion fuerte e in-place al texto
-        # del usuario (el LLM se acopla a las instrucciones).
-        final_text = turn.text
-        if final_text.lstrip().lower().startswith("/plan "):
-            pedido = final_text.replace("/plan ", "", 1).strip()
-            final_text = (
-                "OVER@ride de clasificacion: este mensaje llego con el comando /plan. "
-                "Obligatoriamente printea como PRIMER TOKEN [[TIPO: Planificable]] y luego "
-                f"responde este pedido: {pedido}"
-            )
+        final_text = _text_for_model(turn.text)
 
         # Corre COMPLETAMENTE independiente del generador SSE que lo
         # escucha: se crea con asyncio.create_task() y se guarda en
@@ -1272,68 +1836,71 @@ def _launch_turn(session, session_id: str, turn) -> None:
                 images=turn.images,
                 voice_confirm=turn.voice_confirm,
                 narrate=turn.narrate,
+                narrate_level=turn.narrate_level,
+                attachments=turn.attachments,
             ):
-                session.push_event(event["type"], event.get("data", {}))
+                data = event.get("data", {})
+                if event["type"] == "stopped" and turn.id in session.discard_turn_ids:
+                    # REQ-014 b: no fue un Detener a secas: el usuario borro este mensaje (la pantalla lo dice asi).
+                    data = {**data, "reason": "message_deleted"}
+                session.push_event(event["type"], data)
         except Exception:  # turno en background: si no se avisa aca, nadie lo ve
             # Antes solo habia `finally`: si algo fallaba DENTRO de Vision (no
             # en el modelo -- esas fallas ya llegan como evento "error" del
             # loop), la excepcion moria dentro de la Task y el chat terminaba
             # EN SILENCIO, sin ningun aviso (pedido del usuario 2026-09-24:
             # errores entendibles para personas no tecnicas).
-            internal = describe_internal_error()
-            when = datetime.now().astimezone().strftime("%H:%M:%S")
-            logger.exception(
-                "Fallo interno del turno %s (sesion %s) [%s · %s]",
-                turn.id,
-                session_id,
-                internal.code,
-                when,
-            )
-            session.push_event(
-                "error",
-                {
-                    "message": internal.message,
-                    "code": internal.code,
-                    "technical": internal.technical(when=when),
-                },
-            )
+            _push_internal_turn_error(session, session_id, turn)
         finally:
-            turn.status = "done"
-            session.active_turn_id = None
-            # "__turn_done__" es una senal INTERNA (nunca llega al
-            # frontend, se filtra en _drain_session_queue) que le dice a
-            # la conexion que esperaba ESTE turno puntual que ya puede
-            # cerrar su stream. Lleva `turn_id` explicito en el `data`
-            # (ademas del `_turn_id` que push_event agrega automatico,
-            # que en este punto ya es None porque active_turn_id se
-            # limpio arriba) para que cada conexion sepa si es SU turno
-            # el que termino o el de otro -- bug real detectado en
-            # pruebas: antes cualquier conexion que viera CUALQUIER
-            # "__turn_done__" cortaba su propio stream, incluso si
-            # pertenecia a otro turno (ej. la conexion de B cortaba
-            # apenas terminaba A, antes de que el turno de B arrancara).
-            session.push_event("__turn_done__", {"turn_id": turn.id})
-
-            # REQ-003/007: apenas termina este turno, si hay algo en cola
-            # se dispara automaticamente -- el frontend no necesita
-            # reenviar nada. El nuevo turno sigue empujando eventos a la
-            # MISMA session.event_queue, asi que cualquier cliente que
-            # siga escuchando (via /api/chat/stream/{id}) ve la
-            # continuacion sin cortes.
-            next_turn = session.dequeue_next_turn()
-            if next_turn is not None:
-                _launch_turn(session, session_id, next_turn)
-            elif session.loop_active:
-                # spec modo-plan-loop REQ-006/007: sin nada en la cola
-                # HUMANA, pero con el loop activo -- se sintetiza el
-                # PROXIMO turno automaticamente (mismo mecanismo de
-                # auto-encadenamiento de arriba, reusado tal cual).
-                _maybe_continue_loop(session, session_id)
+            _finish_turn(session, session_id, turn)
 
     session.current_task = asyncio.create_task(_run_in_background())
 
 
+def _discard_finished_turn(session, session_id: str, turn) -> None:
+    """REQ-014 b (spec fix-detener-y-progreso-visible): el usuario borro el mensaje de este turno cuando ya habia arrancado
+    (el borrado llego tarde: el modal de confirmacion seguia abierto mientras el turno anterior terminaba, o despues de
+    Detener). Borrarlo equivale a Detener y DESCARTAR: se quitan su mensaje de usuario y todo lo que el turno agrego (texto
+    parcial, tool-calls y resultados), en memoria y en SQLite, sin tocar los turnos anteriores.
+
+    Se llama desde el `finally` de `_launch_turn`, con el turno YA terminado: nada mas escribe en `session.messages` en ese
+    momento. SQLite va por la misma cola de escritura (en orden): el truncado corre despues de las escrituras de este turno
+    y antes de las del siguiente. Antes, un borrado tardio caia en el camino de «historial» con el turno CORRIENDO: truncaba
+    `session.messages` debajo del turno, no lo detenia, y el mensaje borrado se respondia entero."""
+    session.discard_turn_ids.discard(turn.id)
+    removed = session.discard_active_turn_messages()
+    persistence_service.truncate_from_message(session_id, turn.id)
+    turn.status = "cancelled"
+    session.turns.pop(turn.id, None)
+    logger.info("Turno %s descartado (el usuario borro su mensaje): %d mensajes quitados", turn.id, removed)
+
+
+def _request_stop(session) -> None:
+    """REQ-001 (parada-y-cola-mensajes): marca el Detener del turno activo. Cancelacion cooperativa (el loop lo ve entre
+    pasos y durante el streaming), nunca `Task.cancel()`. Compartido por Detener y por borrar un mensaje cuyo turno ya
+    arranco (REQ-014 b: «equivale a Detener ese turno y descartarlo»)."""
+    session.stop_requested = True
+    session.edit_pending_text = None  # asegura que sea un STOP real, no una edicion
+    # spec modo-plan-loop REQ-007b: STOP tambien apaga el loop autonomo --
+    # sin esto, _maybe_continue_loop sintetizaria el proximo turno apenas
+    # termine el actual, ignorando la intencion real del usuario de frenar.
+    _turn_off_loop(session)
+
+
+def _turn_off_loop(session) -> None:
+    """spec modo-plan-loop REQ-007b/011: apaga el loop autonomo (y su modo auto) sin tocar el turno que este corriendo. Lo usa todo
+    Detener (`_request_stop`) y tambien el Detener que llega tarde a un turno del loop cuando lo que corre ahora es un mensaje que el
+    usuario dejo en cola (REQ-014 f, spec fix-detener-y-progreso-visible, revision: ese mensaje no se frena, pero el loop no sigue)."""
+    session.loop_active = False
+    session.loop_turns_count = 0
+    session.loop_paused_for_question = False
+    session.loop_auto = False  # REQ-011: detener el loop apaga el modo auto
+
+
 LOOP_MAX_TURNS = 30
+# spec modo-plan-loop REQ-006: id de los turnos que arma el loop solo (los del usuario usan el id que manda la pagina, un uuid).
+# REQ-014 f (spec fix-detener-y-progreso-visible, revision): Detener lo usa para reconocer la continuacion del loop.
+LOOP_TURN_ID_PREFIX = "loop-"
 
 
 def _maybe_continue_loop(session, session_id: str) -> None:
@@ -1368,7 +1935,7 @@ def _maybe_continue_loop(session, session_id: str) -> None:
     from app.session.events import UserTurn
 
     synthetic_turn = UserTurn(
-        id=f"loop-{uuid.uuid4()}",
+        id=f"{LOOP_TURN_ID_PREFIX}{uuid.uuid4()}",
         text=(
             "Continuá automáticamente con la próxima tarea 'pending' de la lista de tareas "
             "(todowrite). Marcala 'completed' cuando termines. Si necesitás tomar una decisión "
@@ -1377,6 +1944,52 @@ def _maybe_continue_loop(session, session_id: str) -> None:
         ),
     )
     _launch_turn(session, session_id, synthetic_turn)
+
+
+def _validated_attachments(req: ChatRequest) -> list[dict] | None:
+    """REQ-003 b: cada ruta tiene que estar dentro de `<proyecto>/attachment/` o
+    ser una ruta registrada para leer en su lugar (REQ-007). Si no, 400.
+    Devuelve dicts completos (metadata real del disco), no lo que dijo el
+    cliente: tamano, tipo y ruta canonica salen del archivo."""
+    if not req.attachments:
+        return None
+    from app import attachments as attachments_module
+    from app.persistence import service as persistence
+
+    if len(req.attachments) > attachments_module.MAX_FILES_PER_MESSAGE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Solo se pueden adjuntar hasta {attachments_module.MAX_FILES_PER_MESSAGE} archivos por mensaje.",
+        )
+    project_root = persistence.project_root_for_session(req.session_id)
+    if project_root is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Elegí una carpeta para la sesión antes de adjuntar archivos.",
+        )
+    registered = attachment_service.registered_inplace(req.session_id)
+    out: list[dict] = []
+    for ref in req.attachments:
+        real = attachments_module.resolve_attachment_path(project_root, ref.path, registered)
+        if real is None or not real.is_file():
+            raise HTTPException(
+                status_code=400,
+                detail=f"No encuentro el archivo adjunto «{ref.name or ref.path}». Volvé a adjuntarlo.",
+            )
+        inplace = str(real) in registered
+        rel = str(real) if inplace else real.relative_to(project_root.resolve()).as_posix()
+        out.append(
+            {
+                "name": real.name,
+                "path": rel,
+                "size": real.stat().st_size,
+                "mime": ref.mime,
+                "kind": attachments_module.kind_for(real.name),
+                "inplace": inplace,
+                "token_estimate": attachments_module.estimate_tokens_for_file(real),
+            }
+        )
+    return out
 
 
 @app.post("/api/chat")
@@ -1394,8 +2007,10 @@ async def chat(req: ChatRequest) -> StreamingResponse:
         model=req.model,
         generation_params=_resolve_gen_params(req),
         images=req.images or None,
+        attachments=_validated_attachments(req),
         voice_confirm=req.voice_confirm,
         narrate=req.narrate,
+        narrate_level=normalize_level(req.narrate_level),
     )
 
     if session.is_busy:
@@ -1456,28 +2071,57 @@ async def chat(req: ChatRequest) -> StreamingResponse:
     )
 
 
+class StopTurnRequest(BaseModel):
+    # REQ-014 f (spec fix-detener-y-progreso-visible): el turno que el usuario estaba viendo responder al apretar Detener.
+    # None (o sin cuerpo) = el que este corriendo, como siempre.
+    turn_id: str | None = None
+
+
 @app.post("/api/chat/{session_id}/stop")
-def stop_turn_endpoint(session_id: str) -> dict:
+async def stop_turn_endpoint(session_id: str, req: StopTurnRequest | None = None) -> dict:
     """REQ-001: pide detener el turno activo de la sesion. NO cancela la
         tarea a la fuerza (asyncio.Task.cancel()) -- eso cortaria una tool en
         ejecucion a mitad de camino. En cambio, marca `stop_requested = True`,
         que `run_turn` chequea entre pasos del loop y tambien durante el
     streaming de texto (ver app/llm/loop.py), garantizando que cualquier
-        tool ya en curso termine de correr por completo antes de cortar."""
+        tool ya en curso termine de correr por completo antes de cortar.
+
+    REQ-014 e/f (spec fix-detener-y-progreso-visible): `async def` -- corre en el event loop, igual que el fin de un turno y el
+    arranque del siguiente de la cola (`finally` de `_launch_turn`), asi el "¿cual es el turno activo?" y la marca no se
+    intercalan con ese cambio (antes corria en el threadpool). Con `turn_id`, solo se detiene si ese sigue siendo el turno
+    activo: si ya termino y arranco el siguiente de la cola, NO se lo frena (antes un Detener en los ultimos 10-100 ms del
+    turno frenaba al SIGUIENTE mensaje) y se contesta `stopped: false` con el turno que esta corriendo ahora.
+
+    Con el loop autonomo (REQ-014 f, revision; spec modo-plan-loop REQ-007b «un Detener frena el turno y apaga el loop»): si lo
+    que corre ahora es la continuacion del loop (un turno `loop-...` que `_maybe_continue_loop` armo apenas termino el que el
+    usuario miraba), ese turno NO es un mensaje del usuario: se lo frena y se apaga el loop, como antes de REQ-014 f. Antes
+    contestaba `other_turn_active` y el loop seguia hasta un segundo Detener (el turno nuevo no emite nada mientras compacta o
+    pide la lista de modelos). Si lo que corre es un mensaje que el USUARIO dejo en cola, no se lo frena, pero el loop se apaga
+    igual: no sigue despues de ese mensaje."""
     _assert_session_owner(session_id)
     store = get_session_store()
     session = store.get(session_id)
     if session is None or not session.is_busy:
         return {"stopped": False, "reason": "no_active_turn"}
-    session.stop_requested = True
-    session.edit_pending_text = None  # asegura que sea un STOP real, no una edicion
-    # spec modo-plan-loop REQ-007b: STOP tambien apaga el loop autonomo --
-    # sin esto, _maybe_continue_loop sintetizaria el proximo turno apenas
-    # termine el actual, ignorando la intencion real del usuario de frenar.
-    session.loop_active = False
-    session.loop_turns_count = 0
-    session.loop_paused_for_question = False
-    session.loop_auto = False  # REQ-011: detener el loop apaga el modo auto
+    wanted = req.turn_id if req is not None else None
+    if wanted and wanted != session.active_turn_id:
+        if (session.active_turn_id or "").startswith(LOOP_TURN_ID_PREFIX):
+            _request_stop(session)
+            logger.info(
+                "Detener del turno %s: ya era el siguiente del loop (%s), se frena y se apaga el loop",
+                wanted,
+                session.active_turn_id,
+            )
+            return {"stopped": True}
+        if session.loop_active:
+            _turn_off_loop(session)
+            logger.info(
+                "Detener del turno %s con el loop prendido: se apaga el loop y sigue el mensaje en cola %s",
+                wanted,
+                session.active_turn_id,
+            )
+        return {"stopped": False, "reason": "other_turn_active", "active_turn_id": session.active_turn_id}
+    _request_stop(session)
     return {"stopped": True}
 
 
@@ -1497,9 +2141,12 @@ def clear_conversation_endpoint(session_id: str) -> dict:
     se esta generando una respuesta)."""
     _assert_session_owner(session_id)
     store = get_session_store()
-    session = store.get(session_id)
+    session = store.get_or_restore(session_id)  # persistencia-sqlite-sesiones REQ-003: tambien tras un reinicio
     if session is None:
-        raise HTTPException(404, detail="Esta conversación ya no está abierta en Vision (puede que se haya reiniciado). Recargá la página.")
+        raise HTTPException(
+            404,
+            detail="Esta conversación ya no está abierta en Vision (puede que se haya reiniciado). Recargá la página.",
+        )
     if session.is_busy:
         raise HTTPException(
             409,
@@ -1515,9 +2162,7 @@ def clear_conversation_endpoint(session_id: str) -> dict:
 
 
 @app.post("/api/session/{session_id}/loop")
-async def start_loop_endpoint(
-    session_id: str, req: StartLoopRequest | None = None
-) -> dict:
+async def start_loop_endpoint(session_id: str, req: StartLoopRequest | None = None) -> dict:
     """spec modo-plan-loop REQ-006/010/011: dispara /loop -- activa
         `loop_active` y, si la sesion no tiene ya un turno corriendo, arranca
         el primer turno sintetico de inmediato (si SI hay un turno activo, el
@@ -1538,9 +2183,7 @@ async def start_loop_endpoint(
 
     pending = collect_pending_todos(session)
     if not pending:
-        raise HTTPException(
-            400, detail="No hay tareas pendientes para ejecutar en loop."
-        )
+        raise HTTPException(400, detail="No hay tareas pendientes para ejecutar en loop.")
 
     session.loop_active = True
     session.loop_turns_count = 0
@@ -1577,10 +2220,81 @@ class EditMessageRequest(BaseModel):
     text: str
 
 
+def _user_content_text(content) -> str:
+    """Texto de un mensaje `user` de session.messages (str, o lista con bloques text/image_url)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def _locate_closed_user_message(session, session_id: str, message_id: str, turn, snapshot: dict | None) -> int | None:
+    """editar-mensaje-tras-reinicio REQ-001/004/006: indice en `session.messages` del mensaje `user` ya cerrado.
+
+    1) `turn.messages_start_index` si SIGUE apuntando a ese mensaje (se valida por texto: el indice en
+       memoria se corre al borrar respuestas anteriores y apuntaria al mensaje equivocado).
+    2) Fallback `idx:N` (clientes viejos).
+    3) SQLite: la base guarda el id real de cada mensaje -> posicion entre los mensajes `user`; es lo unico que
+       sobrevive a un reinicio. Se valida igual por texto.
+    Devuelve None si no se puede ubicar con certeza (nunca adivina: truncar el mensaje equivocado borraria
+    conversacion que el usuario no pidio tocar)."""
+    msgs = session.messages
+
+    def matches(i: int | None, expected: str | None) -> bool:
+        if i is None or i < 0 or i >= len(msgs) or msgs[i].get("role") != "user":
+            return False
+        return expected is None or _user_content_text(msgs[i].get("content")).startswith(expected)
+
+    expected = (turn.text if turn is not None else None) or (snapshot or {}).get("text")
+    if turn is not None and turn.messages_start_index is not None and matches(turn.messages_start_index, expected):
+        return turn.messages_start_index
+    if message_id.startswith("idx:"):
+        try:
+            return session.find_user_message_index(int(message_id.removeprefix("idx:")))
+        except ValueError:
+            return None
+    occurrence = persistence_service.find_user_occurrence(session_id, message_id)
+    if occurrence is None:
+        return None
+    found = _nth_user_message_index(msgs, occurrence)
+    return found if found is not None and matches(found, expected) else None
+
+
+def _resendable_files(session_id: str, saved_files: list[dict]) -> list[dict] | None:
+    """editar-mensaje-tras-reinicio REQ-003: archivos guardados en SQLite que SIGUEN siendo validos para
+    reenviar. Se revalida cada ruta contra la carpeta del proyecto (o las registradas para leer en su lugar):
+    lo guardado no se confia. Un archivo eliminado o que ya no existe se descarta, nunca se reenvia."""
+    if not saved_files:
+        return None
+    from app import attachments as attachments_module
+
+    project_root = persistence_service.project_root_for_session(session_id)
+    if project_root is None:
+        return None
+    registered = attachment_service.registered_inplace(session_id)
+    out: list[dict] = []
+    for f in saved_files:
+        real = attachments_module.resolve_attachment_path(project_root, f.get("path") or "", registered)
+        if real is None or not real.is_file():
+            continue
+        inplace = str(real) in registered
+        out.append(
+            {
+                "name": real.name,
+                "path": str(real) if inplace else real.relative_to(project_root.resolve()).as_posix(),
+                "size": real.stat().st_size,
+                "mime": f.get("mime", ""),
+                "kind": attachments_module.kind_for(real.name),
+                "inplace": inplace,
+                "token_estimate": attachments_module.estimate_tokens_for_file(real),
+            }
+        )
+    return out or None
+
+
 @app.patch("/api/chat/{session_id}/message/{message_id}")
-async def edit_message_endpoint(
-    session_id: str, message_id: str, req: EditMessageRequest
-) -> dict:
+async def edit_message_endpoint(session_id: str, message_id: str, req: EditMessageRequest) -> dict:
     """Edita un mensaje de usuario, con 3 casos distintos segun donde este
         ese mensaje ahora mismo (ver spec REQ-004/005/009):
             1. Es el turno ACTIVO ahora mismo -> REQ-004: se detiene la
@@ -1598,10 +2312,13 @@ async def edit_message_endpoint(
     """
     _assert_session_owner(session_id)
     store = get_session_store()
-    session = store.get(session_id)
+    # editar-mensaje-tras-reinicio REQ-001: tras un reinicio la sesion no esta en memoria pero SI en SQLite;
+    # `get_or_create` la reconstruye desde la base. Una sesion que no existe en ningun lado sigue dando 404.
+    session = store.get_or_create(session_id) if store.exists(session_id) else None
     if session is None:
         raise HTTPException(
-            status_code=404, detail="Esta conversación ya no está abierta en Vision (puede que se haya reiniciado). Recargá la página."
+            status_code=404,
+            detail="Esta conversación ya no está abierta en Vision (puede que se haya reiniciado). Recargá la página.",
         )
 
     # Caso 1: turno activo ahora mismo (REQ-004)
@@ -1623,13 +2340,8 @@ async def edit_message_endpoint(
     # como "posicion desde el final" si viene con el prefijo especial
     # 'idx:N' (usado por el frontend cuando no hay un id real registrado).
     turn = session.turns.get(message_id)
-    if turn is not None and turn.messages_start_index is not None:
-        start = turn.messages_start_index
-    elif message_id.startswith("idx:"):
-        occurrence = int(message_id.removeprefix("idx:"))
-        start = session.find_user_message_index(occurrence)
-    else:
-        start = None
+    snapshot = persistence_service.user_message_snapshot(session_id, message_id)
+    start = _locate_closed_user_message(session, session_id, message_id, turn, snapshot)
 
     if start is None:
         raise HTTPException(
@@ -1640,44 +2352,76 @@ async def edit_message_endpoint(
     # Trunca desde ese mensaje user en adelante (descarta su respuesta
     # original y todo lo posterior) y arranca un turno nuevo con el texto
     # editado, como si fuera el mensaje mas reciente de la conversacion.
-    del session.messages[start:]
+    # editar-mensaje-tras-reinicio REQ-002/007: la base se trunca igual, ANTES de relanzar (misma cola de
+    # escritura): sin esto el turno nuevo reutilizaba el id y SQLite le pegaba el texto nuevo al viejo.
+    # REQ-014 c (spec fix-detener-y-progreso-visible, revision): con OTRO turno corriendo se trunca solo hasta donde
+    # empieza ese turno (antes se llevaba tambien su mensaje y su salida, en memoria y en SQLite) y el editado espera en
+    # la cola, igual que al borrar.
+    _truncate_closed_history(session, session_id, message_id, start, after_stop="editalo")
     turn_id = message_id
     from app.session.events import UserTurn
 
-    new_turn = UserTurn(id=turn_id, text=req.text)
+    # REQ-003 e (adjuntar-archivos-chat) + editar-mensaje-tras-reinicio REQ-003: el reenvio conserva los
+    # archivos e imagenes del mensaje. Salen del turno en memoria; si no esta (servidor reiniciado), de lo
+    # guardado en SQLite, con las rutas revalidadas.
+    if turn is not None:
+        images, attachments = turn.images, turn.attachments
+    else:
+        images = (snapshot or {}).get("images") or None
+        attachments = _resendable_files(session_id, (snapshot or {}).get("files") or [])
+    new_turn = UserTurn(
+        id=turn_id,
+        text=req.text,
+        images=images,
+        attachments=attachments,
+        model=getattr(turn, "model", None),
+        generation_params=getattr(turn, "generation_params", None),
+    )
     if session.is_busy:
         session.enqueue_turn(new_turn)
-        session.push_event(
-            "queued", {"message_id": turn_id, "position": session.queue_length - 1}
-        )
+        session.push_event("queued", {"message_id": turn_id, "position": session.queue_length - 1})
     else:
         _launch_turn(session, session_id, new_turn)
     return {"case": "history_truncated_and_relaunched", "message_id": message_id}
 
 
 @app.delete("/api/chat/{session_id}/message/{message_id}")
-def delete_message_endpoint(session_id: str, message_id: str) -> dict:
-    """Elimina un mensaje. Solo tiene sentido para mensajes EN COLA
-    (REQ-005/007) o de historial viejo (REQ-009) -- no se puede 'eliminar'
-    el turno activo ahora mismo sin mas contexto (para eso esta STOP)."""
+async def delete_message_endpoint(session_id: str, message_id: str) -> dict:
+    """Elimina un mensaje de usuario. REQ-014 (spec fix-detener-y-progreso-visible, regla del usuario: «Detener como hoy, pero
+    si elimino el mensaje con el botón borrar, se elimina de la cola»): un mensaje que el usuario BORRA no se responde nunca.
+      a. Sigue EN COLA (REQ-005/007 de parada-y-cola-mensajes): sale de la cola sin procesarse, como antes. Ademas se avisa
+         con 'dequeued' (reason 'deleted', con la cola que queda): la conexion que esperaba ese mensaje se CIERRA (c; antes
+         quedaba abierta para siempre y el boton seguia en «Detener») y los demas se renumeran (d).
+      b. Su turno YA ARRANCO (el borrado llego tarde: el modal de confirmacion seguia abierto cuando el turno anterior
+         termino, o despues de Detener; antes caia en el camino de historial, le truncaba el historial al turno EN CURSO y el
+         mensaje se respondia entero): equivale a Detener ese turno y descartarlo. Al terminar, `_launch_turn` quita su
+         mensaje y su salida parcial de memoria y de SQLite (`_discard_finished_turn`) antes de arrancar el siguiente.
+      c. Historial ya cerrado (REQ-009): se trunca desde ese mensaje, como antes. Si hay OTRO turno corriendo, se trunca solo
+         hasta donde empieza ese turno: lo que esta respondiendo ahora no es historial cerrado (antes perdia su propio
+         mensaje y seguia respondiendo sobre un historial roto, en memoria y en SQLite).
+    `async def` (REQ-014 e): corre en el event loop, igual que el desencolado del `finally` de `_launch_turn` -- sin carreras
+    entre "¿esta en la cola?/¿es el turno activo?" y el arranque del siguiente (antes, en el threadpool: ValueError -> 500)."""
     _assert_session_owner(session_id)
     store = get_session_store()
     session = store.get_or_create(session_id)
-    if session is None:
-        raise HTTPException(
-            status_code=404, detail="Esta conversación ya no está abierta en Vision (puede que se haya reiniciado). Recargá la página."
-        )
 
     if session.remove_queued_turn(message_id):
+        session.push_event(
+            "dequeued", {"message_id": message_id, "reason": "deleted", "queue": list(session.queue_order)}
+        )
         return {"case": "queued_turn_removed", "message_id": message_id}
 
+    if session.is_busy and session.active_turn_id == message_id:
+        session.discard_turn_ids.add(message_id)
+        _request_stop(session)
+        logger.info(
+            "Mensaje %s borrado con su turno en curso: se detiene y se descarta (sesion %s)", message_id, session_id
+        )
+        return {"case": "active_turn_discarded", "message_id": message_id}
+
     turn = session.turns.get(message_id)
-    if turn is not None and turn.messages_start_index is not None:
-        start = turn.messages_start_index
-    elif message_id.startswith("idx:"):
-        start = session.find_user_message_index(int(message_id.removeprefix("idx:")))
-    else:
-        start = None
+    snapshot = persistence_service.user_message_snapshot(session_id, message_id)
+    start = _locate_closed_user_message(session, session_id, message_id, turn, snapshot)
 
     if start is None:
         raise HTTPException(
@@ -1685,8 +2429,55 @@ def delete_message_endpoint(session_id: str, message_id: str) -> dict:
             detail="No encontré ese mensaje en la conversación: puede que ya se haya borrado. Recargá la página.",
         )
 
-    del session.messages[start:]
+    # editar-mensaje-tras-reinicio REQ-004: tambien en la base; si no, el mensaje borrado reaparecia al reiniciar.
+    _truncate_closed_history(session, session_id, message_id, start, after_stop="borralo")
     return {"case": "history_truncated", "message_id": message_id}
+
+
+def _truncate_closed_history(session, session_id: str, message_id: str, start: int, after_stop: str) -> None:
+    """Trunca el historial YA CERRADO desde el mensaje de usuario `message_id` (indice `start` en `session.messages`), en memoria y
+    en SQLite (misma cola de escritura que el resto). Lo comparten borrar (REQ-009/REQ-014 c) y editar (REQ-009) un mensaje viejo.
+
+    REQ-014 c (spec fix-detener-y-progreso-visible; la revision encontro que editar tenia el mismo defecto): si hay OTRO turno
+    corriendo, se trunca solo hasta donde empieza ese turno -- lo que esta respondiendo ahora no es historial cerrado. Antes se
+    truncaba hasta el final: el turno en curso perdia su propio mensaje y seguia respondiendo sobre un historial roto, en memoria y
+    en SQLite. `after_stop` completa el aviso para personas del caso que no deberia pasar («... y después borralo/editalo»)."""
+    running_turn_id = session.active_turn_id if session.is_busy else None
+    if running_turn_id is None:
+        del session.messages[start:]
+        persistence_service.truncate_from_message(session_id, message_id)
+        return
+    running_start = session.active_turn_start_index()
+    if start >= running_start:
+        # No deberia pasar (el turno activo sale por su propio caso): ante la duda no se toca nada antes que romper lo que corre.
+        raise HTTPException(
+            status_code=409,
+            detail=f"Ese mensaje es parte de lo que Vision está respondiendo ahora. Frenala con el botón Detener y después {after_stop}.",
+        )
+    del session.messages[start:running_start]
+    persistence_service.truncate_from_message(session_id, message_id, until_message_id=running_turn_id)
+
+
+def _assistant_block_end(messages: list[dict], user_idx: int) -> int:
+    """Indice (exclusivo) donde termina la respuesta del turno cuyo mensaje de usuario esta en `user_idx`: todo lo que le sigue
+    mientras sea `assistant` o `tool` (texto, tool-calls y sus resultados). Se detiene en el PROXIMO mensaje de usuario o al
+    acabarse la lista. Si el turno no tiene respuesta devuelve `user_idx + 1`. Funcion pura."""
+    end = user_idx + 1
+    while end < len(messages) and messages[end].get("role") in ("assistant", "tool"):
+        end += 1
+    return end
+
+
+def _nth_user_message_index(messages: list[dict], occurrence: int) -> int | None:
+    """Indice en `messages` del mensaje de usuario que ocupa el lugar `occurrence` (0 = el primero) entre los de usuario, o None
+    si no hay tantos. Es como se ubica un turno cuando no hay `message_id` en memoria (sesion reconstruida desde SQLite)."""
+    seen = 0
+    for i, message in enumerate(messages):
+        if message.get("role") == "user":
+            if seen == occurrence:
+                return i
+            seen += 1
+    return None
 
 
 @app.delete("/api/chat/{session_id}/response/{message_id}")
@@ -1705,7 +2496,8 @@ def delete_response_endpoint(session_id: str, message_id: str) -> dict:
     session = store.get_or_create(session_id)
     if session is None:
         raise HTTPException(
-            status_code=404, detail="Esta conversación ya no está abierta en Vision (puede que se haya reiniciado). Recargá la página."
+            status_code=404,
+            detail="Esta conversación ya no está abierta en Vision (puede que se haya reiniciado). Recargá la página.",
         )
 
     # REQ-006 (reglas de negocio): no se puede borrar el turno activo
@@ -1741,8 +2533,7 @@ def delete_response_endpoint(session_id: str, message_id: str) -> dict:
     if (
         user_idx is None
         or user_idx < 0
-        or user_idx
-        >= len(session.messages)  # FIX (2026-09): selo desbordaba -> IndexError 500
+        or user_idx >= len(session.messages)  # FIX (2026-09): selo desbordaba -> IndexError 500
         or session.messages[user_idx].get("role") != "user"
     ):
         occurrence = persistence_service.find_user_occurrence(session_id, message_id)
@@ -1754,21 +2545,9 @@ def delete_response_endpoint(session_id: str, message_id: str) -> dict:
         user_occurrence = occurrence
         # Sincronizar el historial EN MEMORIA (si esta hidratado): hallar el
         # indice real del user message en session.messages por ocurrencia.
-        user_idx = None
-        cnt = 0
-        for i, m in enumerate(session.messages):
-            if m.get("role") == "user":
-                if cnt == occurrence:
-                    user_idx = i
-                    break
-                cnt += 1
+        user_idx = _nth_user_message_index(session.messages, occurrence)
         if user_idx is not None:
-            end = user_idx + 1
-            while end < len(session.messages) and session.messages[end].get("role") in (
-                "assistant",
-                "tool",
-            ):
-                end += 1
+            end = _assistant_block_end(session.messages, user_idx)
             if end > user_idx + 1:
                 del session.messages[user_idx + 1 : end]
         persistence_service.delete_assistant_response(session_id, user_occurrence)
@@ -1777,12 +2556,7 @@ def delete_response_endpoint(session_id: str, message_id: str) -> dict:
     # REQ-004: el bloque a borrar es TODO lo que sigue inmediatamente al
     # mensaje 'user' mientras sea 'assistant' o 'tool' -- se detiene apenas
     # aparece el PROXIMO 'user' (inicio de otro turno) o se acaba la lista.
-    end = user_idx + 1
-    while end < len(session.messages) and session.messages[end].get("role") in (
-        "assistant",
-        "tool",
-    ):
-        end += 1
+    end = _assistant_block_end(session.messages, user_idx)
 
     if end == user_idx + 1:
         raise HTTPException(
@@ -1794,9 +2568,7 @@ def delete_response_endpoint(session_id: str, message_id: str) -> dict:
 
     # REQ-005: consistencia SQLite -- se identifica el turno por CUANTOS
     # mensajes 'user' lo preceden (0-indexed), NO por el indice absoluto.
-    user_occurrence = sum(
-        1 for m in session.messages[:user_idx] if m.get("role") == "user"
-    )
+    user_occurrence = sum(1 for m in session.messages[:user_idx] if m.get("role") == "user")
     persistence_service.delete_assistant_response(session_id, user_occurrence)
 
     return {"case": "response_deleted", "message_id": message_id}
@@ -1815,12 +2587,14 @@ def reorder_queue_endpoint(session_id: str, req: ReorderQueueRequest) -> dict:
     session = store.get(session_id)
     if session is None:
         raise HTTPException(
-            status_code=404, detail="Esta conversación ya no está abierta en Vision (puede que se haya reiniciado). Recargá la página."
+            status_code=404,
+            detail="Esta conversación ya no está abierta en Vision (puede que se haya reiniciado). Recargá la página.",
         )
     ok = session.reorder_queue(req.message_id, req.new_position)
     if not ok:
         raise HTTPException(
-            status_code=404, detail="Ese mensaje ya no está en la cola (puede que ya se haya enviado)."
+            status_code=404,
+            detail="Ese mensaje ya no está en la cola (puede que ya se haya enviado).",
         )
     return {"reordered": True, "queue_order": session.queue_order}
 
@@ -1842,9 +2616,7 @@ async def chat_stream_attach(session_id: str) -> StreamingResponse:
 
         return StreamingResponse(_empty(), media_type="text/event-stream")
 
-    return StreamingResponse(
-        _drain_session_queue(session), media_type="text/event-stream"
-    )
+    return StreamingResponse(_drain_session_queue(session), media_type="text/event-stream")
 
 
 def collect_pending_todos(session) -> list[dict]:
@@ -1869,7 +2641,7 @@ def collect_pending_todos(session) -> list[dict]:
 def get_todos(session_id: str) -> dict:
     _assert_session_owner(session_id)
     store = get_session_store()
-    session = store.get(session_id)
+    session = store.get_or_restore(session_id)  # persistencia-sqlite-sesiones REQ-003: tambien tras un reinicio
     return {"todos": session.todos if session else []}
 
 
@@ -1880,6 +2652,23 @@ def get_todos(session_id: str) -> dict:
 # la sesion activa. El motor de disparo es FRONTEND (timers, REQ-005) que
 # persiste via esta API.
 # ---------------------------------------------------------------------------
+def _reject_invalid_trigger(kind: str, trigger: dict | None) -> None:
+    """PQ-004 / BL-019: 422 con un mensaje para personas si el horario no es valido (ver app/scheduler/triggers.py)."""
+    from app.scheduler.triggers import validate_trigger
+
+    problem = validate_trigger(kind, trigger)
+    if problem is not None:
+        raise HTTPException(status_code=422, detail=problem)
+
+
+def _reject_invalid_edit(current: dict, patch: dict) -> None:
+    """Valida una edicion SOLO si toca `kind` o `trigger`: asi un agente o alarma ya guardados con un horario malo (de antes de esta
+    validacion) se pueden apagar o renombrar. Se valida el resultado COMBINADO (lo que quedaria guardado)."""
+    if "kind" not in patch and "trigger" not in patch:
+        return
+    _reject_invalid_trigger(patch.get("kind", current["kind"]), patch.get("trigger", current["trigger"]))
+
+
 class ScheduleCreate(BaseModel):
     label: str = ""
     kind: str = "once"  # once | recurring
@@ -1909,6 +2698,7 @@ def list_alarms() -> dict:
 def create_alarm(body: ScheduleCreate) -> dict:
     from app.persistence import master_index as mi
 
+    _reject_invalid_trigger(body.kind, body.trigger)
     schedule = mi.create_schedule(
         uuid.uuid4().hex,
         body.label,
@@ -1926,6 +2716,9 @@ def update_alarm(schedule_id: str, body: SchedulePatch) -> dict:
     from app.persistence import master_index as mi
 
     patch = body.model_dump(exclude_unset=True)
+    current = mi.get_schedule(schedule_id)
+    if current is not None:
+        _reject_invalid_edit(current, patch)
     schedule = mi.update_schedule(schedule_id, patch)
     if schedule is None:
         raise HTTPException(status_code=404, detail="No se encontró la alarma.")
@@ -1978,9 +2771,7 @@ def run_alarm_file(schedule_id: str) -> dict:
         # (equivale a doble clic). Windows unicamente -- Vision es local en win32.
         os.startfile(path)
     except OSError as exc:
-        tool_base._audit(
-            "run_file", {"path": path, "status": "error", "error": str(exc)}
-        )
+        tool_base._audit("run_file", {"path": path, "status": "error", "error": str(exc)})
         raise HTTPException(status_code=400, detail=describe_os_error(exc).message) from exc
     tool_base._audit("run_file", {"path": path, "status": "ok"})
     return {"ok": True, "message": f"Ejecutado: {path}"}
@@ -2047,6 +2838,144 @@ def set_agent_fallback_session_config(req: AgentFallbackSessionRequest) -> dict:
 # toast NATIVO de Windows via app/scheduler/alarms.py, no dependen de una
 # pestaña abierta.
 # ---------------------------------------------------------------------------
+# Adjuntos de archivo (spec adjuntar-archivos-chat). Rutas finas: la logica y las
+# validaciones viven en app/attachment_service.py. Toda ruta que manda el cliente
+# se valida con resolve() contra <proyecto>/attachment/ o una ruta registrada.
+# ---------------------------------------------------------------------------
+def _attachment_error(exc: attachment_service.AttachmentError) -> HTTPException:
+    return HTTPException(status_code=exc.status, detail=exc.message)
+
+
+class AttachmentPathRequest(BaseModel):
+    path: str
+
+
+class AttachmentCleanupRequest(BaseModel):
+    # ids de la vista previa (`GET .../attachments/cleanup-preview`) a borrar.
+    delete: list[str] = []
+
+
+class AttachmentThresholdsRequest(BaseModel):
+    warn_mb: int | None = None
+    inplace_mb: int | None = None
+
+
+@app.post("/api/sessions/{session_id}/attachments")
+async def upload_attachment(session_id: str, request: Request, name: str = "") -> dict:
+    """REQ-002: sube UN archivo (cuerpo crudo, en streaming) a `attachment/`.
+    El nombre viaja por query (`?name=`, url-encoded); no se usa multipart."""
+    _assert_session_owner(session_id)
+    length = request.headers.get("content-length")
+    try:
+        return await attachment_service.upload(
+            session_id,
+            name or "archivo",
+            request.stream(),
+            int(length) if length and length.isdigit() else None,
+        )
+    except attachment_service.AttachmentError as exc:
+        raise _attachment_error(exc) from exc
+
+
+@app.delete("/api/sessions/{session_id}/attachments/{name}")
+def remove_pending_attachment(session_id: str, name: str) -> dict:
+    """REQ-002 a: quita un adjunto pendiente (que ningun mensaje referencia)."""
+    _assert_session_owner(session_id)
+    try:
+        return attachment_service.remove_pending(session_id, name)
+    except attachment_service.AttachmentError as exc:
+        raise _attachment_error(exc) from exc
+
+
+@app.post("/api/sessions/{session_id}/attachments/register-path")
+def register_attachment_path(session_id: str, req: AttachmentPathRequest) -> dict:
+    """REQ-007: registra una ruta absoluta para leerla en su lugar (sin copiar)."""
+    _assert_session_owner(session_id)
+    try:
+        return attachment_service.register_path(session_id, req.path)
+    except attachment_service.AttachmentError as exc:
+        raise _attachment_error(exc) from exc
+
+
+@app.post("/api/sessions/{session_id}/attachments/open")
+def open_session_attachment(session_id: str, req: AttachmentPathRequest) -> dict:
+    """REQ-004 d/e: abre un adjunto de ESTA sesion con la app de Windows; un
+    ejecutable nunca se ejecuta (se muestra en el Explorador)."""
+    _assert_session_owner(session_id)
+    try:
+        return attachment_service.open_attachment(session_id, req.path)
+    except attachment_service.AttachmentError as exc:
+        raise _attachment_error(exc) from exc
+
+
+@app.get("/api/sessions/{session_id}/attachments/cleanup-preview")
+def attachments_cleanup_preview(session_id: str) -> dict:
+    """REQ-009 a: que se va a liberar (archivos, imagenes, huerfanos)."""
+    _assert_session_owner(session_id)
+    try:
+        return attachment_service.cleanup_preview(session_id)
+    except attachment_service.AttachmentError as exc:
+        raise _attachment_error(exc) from exc
+
+
+@app.post("/api/sessions/{session_id}/attachments/cleanup")
+async def attachments_cleanup(session_id: str, req: AttachmentCleanupRequest) -> dict:
+    """REQ-009 b/c/d: borra del disco lo elegido, deja tombstones y compacta la base."""
+    _assert_session_owner(session_id)
+    try:
+        return await asyncio.to_thread(attachment_service.cleanup_apply, session_id, req.delete)
+    except attachment_service.AttachmentError as exc:
+        raise _attachment_error(exc) from exc
+
+
+@app.get("/api/sessions/{session_id}/attachments/summary")
+def attachments_summary(session_id: str) -> dict:
+    """REQ-009 g: la sesion tiene adjuntos? (decide si eliminarla lleva 2 pasos)."""
+    _assert_session_owner(session_id)
+    return {"has_attachments": attachment_service.has_attachments(session_id)}
+
+
+@app.get("/api/config/attachments")
+def get_attachment_thresholds() -> dict:
+    """REQ-007 a: umbrales de tamano de un adjunto (MB)."""
+    return attachment_service.thresholds()
+
+
+@app.post("/api/config/attachments")
+def set_attachment_thresholds(req: AttachmentThresholdsRequest) -> dict:
+    try:
+        cfg = pc.set_attachment_thresholds(req.warn_mb, req.inplace_mb)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"warn_mb": cfg.attachment_warn_mb, "inplace_mb": cfg.attachment_inplace_mb}
+
+
+class DocumentImagesRequest(BaseModel):
+    min_px: int | None = None
+    ask_count: int | None = None
+    ask_pct: int | None = None
+
+
+def _document_images_payload(cfg) -> dict:
+    return {"min_px": cfg.image_min_px, "ask_count": cfg.image_ask_count, "ask_pct": cfg.image_ask_pct}
+
+
+@app.get("/api/config/document-images")
+def get_document_images_thresholds() -> dict:
+    """spec leer-imagenes-pdf-word REQ-007: filtro y umbral de costo de la lectura de imagenes de PDF/Word."""
+    return _document_images_payload(pc.get_project_config())
+
+
+@app.post("/api/config/document-images")
+def set_document_images_thresholds(req: DocumentImagesRequest) -> dict:
+    try:
+        cfg = pc.set_image_thresholds(req.min_px, req.ask_count, req.ask_pct)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _document_images_payload(cfg)
+
+
+# ---------------------------------------------------------------------------
 class AgentCreate(BaseModel):
     label: str = ""
     session_id: str
@@ -2091,6 +3020,7 @@ def list_agents() -> dict:
 def create_agent(body: AgentCreate) -> dict:
     from app.persistence import master_index as mi
 
+    _reject_invalid_trigger(body.kind, body.trigger)
     agent = mi.create_agent(
         uuid.uuid4().hex,
         body.label,
@@ -2111,6 +3041,9 @@ def update_agent(agent_id: str, body: AgentPatch) -> dict:
     from app.persistence import master_index as mi
 
     patch = body.model_dump(exclude_unset=True)
+    current = mi.get_agent(agent_id)
+    if current is not None:
+        _reject_invalid_edit(current, patch)
     agent = mi.update_agent(agent_id, patch)
     if agent is None:
         raise HTTPException(status_code=404, detail="No se encontró el agente.")
@@ -2145,11 +3078,16 @@ def delete_agent(agent_id: str) -> dict:
 
 
 @app.post("/api/agents/{agent_id}/run")
-def run_agent_now_endpoint(agent_id: str) -> dict:
+async def run_agent_now_endpoint(agent_id: str) -> dict:
     """Pedido del usuario: "Ejecutar ahora" desde el panel lateral de la
     sesion o la pestaña Agentes -- dispara este agente YA, sin esperar su
     horario. Cuenta como un disparo real (marca `last_fired_at`, ver
-    `run_agent_now`), asi un 'once' no se dispara DE NUEVO mas tarde."""
+    `run_agent_now`), asi un 'once' no se dispara DE NUEVO mas tarde.
+
+    Bug real corregido (2026-10-21, mismo patron de AGENTS.md: "un endpoint que hace `asyncio.create_task()` debe ser `async def`"): estaba definido con
+    `def` sync, asi que FastAPI lo corria en un hilo de su pool SIN event loop y `run_agent_now` -> `fire_agent` -> `_launch_sequence` -> `_launch_turn`
+    -> `asyncio.create_task()` explotaba con `RuntimeError: no running event loop` (500 «Vision tuvo un problema interno» al tocar «Ejecutar ahora»).
+    Con `async def` corre en el event loop, igual que el reloj de agentes (`run_agents_loop`), y no espera nada: `run_agent_now` es rapido y no bloquea."""
     from app.scheduler.agents import run_agent_now
 
     if not run_agent_now(agent_id):
@@ -2216,15 +3154,11 @@ def get_session_status(session_id: str) -> dict:
         # historial no se esta guardando". proyecto-por-sesion REQ-002:
         # se resuelve para ESTA sesion especifica (carpeta propia si tiene,
         # sino el default), no un valor global unico.
-        "persistence_available": persistence_service.is_persistence_available(
-            session_id
-        ),
+        "persistence_available": persistence_service.is_persistence_available(session_id),
         # proyecto-por-sesion REQ-006: ruta a mostrar en el chip del
         # command-bar -- carpeta propia, default sugerido, o raiz de
         # Vision como referencia visual si no hay ninguna.
-        "project_path": persistence_service.resolve_project_path_for_display(
-            session_id
-        ),
+        "project_path": persistence_service.resolve_project_path_for_display(session_id),
         # spec modo-plan-loop REQ-001/005: modo actual ("plan"/"active") --
         # el frontend lo usa para pintar el chip correcto sin depender de
         # un estado local que se desincronice al recargar/cambiar de sesion.
@@ -2232,9 +3166,7 @@ def get_session_status(session_id: str) -> dict:
         # REQ-006/009: el frontend usa esto para saber si debe mostrar el
         # banner+alarma de "el loop necesita tu ayuda" al reconectarse.
         "loop_active": session.loop_active if session else False,
-        "loop_paused_for_question": session.loop_paused_for_question
-        if session
-        else False,
+        "loop_paused_for_question": session.loop_paused_for_question if session else False,
         "loop_auto": session.loop_auto if session else False,  # REQ-011
     }
 
@@ -2250,9 +3182,7 @@ def list_persisted_sessions_endpoint(session_id: str = "") -> dict:
     como fuente adicional al indice liviano de localStorage."""
     return {
         "sessions": persistence_service.list_persisted_sessions(session_id or None),
-        "persistence_available": persistence_service.is_persistence_available(
-            session_id or None
-        ),
+        "persistence_available": persistence_service.is_persistence_available(session_id or None),
     }
 
 
@@ -2299,12 +3229,18 @@ def rename_session_endpoint(session_id: str, req: RenameSessionRequest) -> dict:
 class AssignProjectPathRequest(BaseModel):
     path: str
     title: str = ""
+    # spec cambio-carpeta-historial REQ-003: solo con True y una carpeta anterior distinta se COPIA el historial; sin el campo todo
+    # sigue exactamente como antes.
+    copy_history: bool = False
+    # spec importar-historial-de-carpeta REQ-004: id de una conversacion ANTERIOR que ya vive en la carpeta elegida, para COPIAR su historial a esta
+    # sesion (nueva). Vacio = no importar: todo sigue exactamente como antes.
+    import_from_session_id: str = ""
+    # spec sesion-publica-privada REQ-001/008: al CREAR la sesion se puede dejar publica. Sin el campo (o False) queda privada, como siempre.
+    public: bool = False
 
 
 @app.post("/api/sessions/{session_id}/project-path")
-def assign_session_project_path_endpoint(
-    session_id: str, req: AssignProjectPathRequest
-) -> dict:
+def assign_session_project_path_endpoint(session_id: str, req: AssignProjectPathRequest) -> dict:
     """Arquitectura carpeta-por-sesion (definitiva, ver docstring largo en
         app/persistence/service.py): asigna la carpeta de proyecto de UNA
         sesion especifica -- llamado desde el modal BLOQUEANTE de "Nueva
@@ -2317,11 +3253,160 @@ def assign_session_project_path_endpoint(
     path = req.path.strip()
     if not path:
         raise HTTPException(400, detail="La ruta no puede estar vacía.")
+    # REQ-016 (spec fix-detener-y-progreso-visible, revision): lo que la sesion ya hablo sin carpeta (solo en memoria) se guarda
+    # en SQLite al asignarle la primera carpeta (ver `assign_project_path`); sin esto, F5 lo perdia.
+    session = get_session_store().get(session_id)
+    unsaved_history = _unsaved_history_with_page_ids(session) if session is not None else None
+    copied = 0
+    imported = 0
+    import_failed = False
     try:
-        persistence_service.assign_project_path(session_id, path, title=req.title)
+        if req.import_from_session_id:
+            # spec importar-historial-de-carpeta REQ-004/006/008: la sesion es NUEVA y la carpeta ya tiene conversaciones anteriores del usuario;
+            # se COPIA el historial de una de ellas (la de origen no se toca). Excluyente con `copy_history` (que es para una sesion que cambia
+            # de carpeta). Un origen inexistente/ajeno o una sesion que ya hablo es un 400 claro y NO asigna nada; si la copia falla por otra
+            # causa, la carpeta se asigna igual y la respuesta lo dice (`import_failed`).
+            try:
+                persistence_service.preflight_import(session_id, path, req.import_from_session_id)
+            except ValueError as exc:
+                raise HTTPException(400, detail=str(exc)) from exc
+            persistence_service.assign_project_path(session_id, path, title=req.title, unsaved_history=unsaved_history)
+            try:
+                imported = persistence_service.import_session_history(session_id, path, req.import_from_session_id)
+                _reload_session_memory(session_id)
+            except Exception:
+                import_failed = True
+                logger.warning(
+                    "No se pudo importar el historial de %s a la sesion %s (carpeta %s)",
+                    req.import_from_session_id,
+                    session_id,
+                    path,
+                    exc_info=True,
+                )
+        elif req.copy_history:
+            # spec cambio-carpeta-historial REQ-003: la persona eligio copiar el historial al cambiar de carpeta. Si NO habia carpeta
+            # anterior (primera asignacion) esto cae en el camino de siempre, con lo hablado sin carpeta.
+            if persistence_service.master_index_has_folder(session_id):
+                copied = persistence_service.change_folder_with_history(session_id, path, req.title)
+            else:
+                persistence_service.assign_project_path(
+                    session_id, path, title=req.title, unsaved_history=unsaved_history
+                )
+        else:
+            persistence_service.assign_project_path(session_id, path, title=req.title, unsaved_history=unsaved_history)
     except FileNotFoundError as exc:
         raise HTTPException(400, detail=str(exc)) from exc
-    return {"assigned": True, "path": path}
+    if req.public:
+        # spec sesion-publica-privada REQ-001: nace publica (sin dueño en la base). El indice maestro de esta PC no cambia: sigue siendo mia.
+        try:
+            persistence_service.set_session_visibility(session_id, True)
+        except Exception as exc:
+            logger.warning("No se pudo dejar publica la sesion %s", session_id, exc_info=True)
+            raise HTTPException(
+                500,
+                detail="La carpeta se asignó, pero no pude dejar la sesión como pública. Probá de nuevo desde Editar sesión.",
+            ) from exc
+    response: dict = {"assigned": True, "path": path}
+    if req.copy_history and not req.import_from_session_id:
+        # Aditivo: `copied_messages` aparece SOLO si se pidio copiar. Sin `copy_history` la respuesta es EXACTAMENTE la de siempre
+        # (un test existente y cualquier cliente que compare el cuerpo completo dependen de eso).
+        response["copied_messages"] = copied
+    if req.import_from_session_id:
+        response["imported_messages"] = imported
+        if import_failed:
+            response["import_failed"] = True
+    return response
+
+
+def _reload_session_memory(session_id: str) -> None:
+    """spec importar-historial-de-carpeta REQ-007: tras importar, la sesion en memoria pasa a tener el historial importado, para que el proximo
+    mensaje ya parta con todo el contexto anterior. NO toca la memoria si hay un turno corriendo (se pisaria lo que ese turno esta armando) ni
+    si la sesion no esta en memoria (se cargara de SQLite cuando alguien la use: `get_or_create`). No incluye el mensaje de sistema: el loop lo
+    agrega solo, y solo si falta."""
+    session = get_session_store().get(session_id)
+    if session is None:
+        return
+    task = session.current_task
+    if task is not None and not task.done():
+        return
+    session.messages = persistence_service.load_session_messages(session_id)
+    session.todos = persistence_service.load_session_todos(session_id)
+
+
+class VisibilityRequest(BaseModel):
+    public: bool
+
+
+@app.get("/api/sessions/{session_id}/visibility")
+def get_session_visibility_endpoint(session_id: str) -> dict:
+    """spec sesion-publica-privada REQ-007: si la sesion esta marcada publica. Sin carpeta asignada (o sin fila todavia) es privada."""
+    _assert_session_owner(session_id)
+    return {"public": persistence_service.get_session_visibility(session_id)}
+
+
+@app.post("/api/sessions/{session_id}/visibility")
+def set_session_visibility_endpoint(session_id: str, req: VisibilityRequest) -> dict:
+    """spec sesion-publica-privada REQ-007: marca la sesion como publica o privada. Solo la dueña (403 si no). Publica = sin dueño en la base
+    de la carpeta, para que otra persona pueda importar una COPIA; privada = el dueño vuelve a ser quien la marca. Sin carpeta asignada no hay
+    donde guardarlo: 400 con una frase."""
+    _assert_session_owner(session_id)
+    try:
+        public = persistence_service.set_session_visibility(session_id, req.public)
+    except LookupError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
+    return {"public": public}
+
+
+@app.get("/api/sessions/{session_id}/folder-sessions")
+def folder_sessions_endpoint(session_id: str, path: str = "") -> dict:
+    """spec importar-historial-de-carpeta REQ-001: consultado por el modal de edicion y por el de «Nueva sesion» ANTES de guardar una carpeta,
+    para avisar si ya tiene conversaciones anteriores del usuario y ofrecer importarlas o abrirlas. Solo lectura."""
+    _assert_session_owner(session_id)
+    folder = path.strip()
+    if not folder:
+        raise HTTPException(400, detail="Falta indicar la carpeta.")
+    return persistence_service.folder_sessions(session_id, folder)
+
+
+@app.get("/api/sessions/{session_id}/folder-change-preview")
+def folder_change_preview_endpoint(session_id: str, path: str = "") -> dict:
+    """spec cambio-carpeta-historial REQ-001: consultado por el modal de edicion ANTES de guardar una carpeta distinta, para saber si
+    corresponde preguntar «¿copiar el historial?». Solo lectura (no crea nada ni escribe en ninguna base)."""
+    _assert_session_owner(session_id)
+    new_path = path.strip()
+    if not new_path:
+        raise HTTPException(400, detail="Falta indicar la carpeta nueva.")
+    return persistence_service.folder_change_preview(session_id, new_path)
+
+
+def _unsaved_history_with_page_ids(session) -> list[dict]:
+    """REQ-016 (spec fix-detener-y-progreso-visible, revision): copia de `session.messages` (sin el system prompt) donde cada mensaje
+    de usuario que se puede atribuir CON CERTEZA a un turno lleva `message_id` = el id con que la pagina lo mando (el del turno: F5,
+    ↻ y 🗑 lo buscan por ese id) y `text` = lo que escribio la persona (sin las instrucciones que Vision le agrega al modelo, igual
+    que lo que guarda el turno en vivo). Se atribuye con el mismo criterio que editar/borrar (`_locate_closed_user_message`): el
+    indice del turno tiene que seguir apuntando a un mensaje de usuario que empiece con su texto; si no (indice corrido por un
+    borrado o una compactacion), el mensaje se guarda igual, con un id nuevo. Si dos turnos apuntan al mismo, gana el mas reciente."""
+    msgs = list(session.messages)
+    turn_at: dict[int, object] = {}
+    for turn in list(session.turns.values()):
+        index = turn.messages_start_index
+        if index is None or not 0 <= index < len(msgs) or msgs[index].get("role") != "user":
+            continue
+        text, content_text = turn.text or "", _user_content_text(msgs[index].get("content"))
+        # Un turno sin texto (solo imagenes) solo se atribuye a un mensaje sin texto: «empieza con ''» no prueba nada.
+        if content_text.startswith(text) if text else not content_text:
+            turn_at[index] = turn
+    history: list[dict] = []
+    for index, message in enumerate(msgs):
+        if message.get("role") == "system":
+            continue
+        item = dict(message)
+        turn = turn_at.get(index)
+        if turn is not None:
+            item["message_id"] = turn.id
+            item["text"] = turn.text
+        history.append(item)
+    return history
 
 
 @app.get("/api/sessions/search")
@@ -2334,12 +3419,20 @@ def search_sessions_endpoint(q: str = "", session_id: str = "") -> dict:
     term = q.strip()
     if session_id:
         _assert_session_owner(session_id)
-    available = persistence_service.is_persistence_available(session_id or None)
-    if not term:
+    # REQ-007 (busqueda-mensajes): la busqueda es GLOBAL -- recorre todas las carpetas de proyecto
+    # del usuario y NO depende de que la sesion abierta tenga carpeta (una "Nueva sesion" todavia
+    # no la tiene, y aun asi el usuario quiere encontrar lo que dijo en las otras). Bug real
+    # ("no me aparece la barra"): con la sesion abierta sin carpeta se respondia vacio SIN buscar.
+    # Solo si NO hay ninguna carpeta conocida queda el modo degradado de REQ-006 (el frontend
+    # busca en localStorage).
+    available = bool(persistence_service.known_project_folders()) or (
+        persistence_service.is_persistence_available(session_id or None)
+    )
+    if not term or not available:
         return {"results": [], "persistence_available": available}
     return {
-        "results": persistence_service.search_sessions(term, session_id or None),
-        "persistence_available": available,
+        "results": persistence_service.search_all_sessions_for_current_user(term),
+        "persistence_available": True,
     }
 
 
@@ -2352,11 +3445,29 @@ def get_session_messages_endpoint(session_id: str) -> dict:
     vacio aunque la sesion SI tenga mensajes persistidos en su propio
     `vision.db`. Devuelve `[]` (no error) si la sesion no tiene carpeta de
     proyecto asignada o simplemente no tiene mensajes todavia -- ambos son
-    casos normales, no fallas."""
+    casos normales, no fallas.
+
+    REQ-018 (spec fix-detener-y-progreso-visible): `pending_question` = la pregunta (tool `question`) que esta sesion dejo sin
+    contestar, o null -- para que F5 la vuelva a mostrar en SU sesion (ver `_pending_question_for_page`)."""
     _assert_session_owner(session_id)
     return {
-        "messages": persistence_service.load_session_messages_for_display(session_id)
+        "messages": persistence_service.load_session_messages_for_display(session_id),
+        "pending_question": _pending_question_for_page(session_id),
     }
+
+
+def _pending_question_for_page(session_id: str) -> dict | None:
+    """REQ-018 (spec fix-detener-y-progreso-visible): {question, options} de la ultima pregunta sin contestar de la sesion, segun su
+    SQLite (la pagina guarda en memoria las que llegan en vivo; con F5 las pierde). None si no hay, si ya la contesto el loop solo, o si
+    la sesion tiene mensajes esperando en la cola: el usuario ya toco una opcion y su respuesta todavia no arranco (por eso no esta en
+    SQLite), y volver a mostrarla invitaria a contestar dos veces."""
+    from app.tools.question import pending_question_view
+
+    session = get_session_store().get(session_id)
+    if session is not None and session.queue_order:
+        return None
+    part = persistence_service.load_pending_question(session_id)
+    return pending_question_view(part) if part else None
 
 
 # REQ-004 (spec controles-seguridad-optimizacion-lightspeed-bigquery): sirve
@@ -2387,9 +3498,7 @@ def download_session_export(session_id: str, filename: str):
 
     project_root = persistence_service.project_root_for_session(session_id)
     if project_root is None:
-        raise HTTPException(
-            status_code=404, detail="Esta sesión no tiene carpeta de proyecto asignada."
-        )
+        raise HTTPException(status_code=404, detail="Esta sesión no tiene carpeta de proyecto asignada.")
 
     exports_dir = (project_root / persistence_service.EXPORTS_SUBDIR).resolve()
     # `filename` nunca deberia traer separadores de path (es el nombre de
@@ -2440,14 +3549,20 @@ def get_session_agent_impact(session_id: str) -> dict:
     count = mi.count_agents_by_session(session_id)
     fallback_id = get_fallback_session_id()
     is_fallback = bool(fallback_id) and fallback_id == session_id
+    # spec indice-resiliente-y-borrado-seguro REQ-010: campos ADITIVOS para que el modal diga cuantos mensajes se van a borrar,
+    # de que carpeta y si el mismo id existe en otra. De mejor esfuerzo: nunca rompe el chequeo de agentes de arriba.
+    try:
+        deletion = persistence_service.deletion_info(session_id)
+    except Exception:
+        logger.warning("No se pudo armar el resumen de borrado de la sesion %s", session_id, exc_info=True)
+        deletion = {"message_count": 0, "project_path": "", "copies_elsewhere": []}
     return {
+        **deletion,
         "agent_count": count,
         "is_fallback_session": is_fallback,
         "is_fallback_blocked": is_fallback and count > 0,
         "fallback_session_id": fallback_id,
-        "will_reassign_to_fallback": count > 0
-        and bool(fallback_id)
-        and fallback_id != session_id,
+        "will_reassign_to_fallback": count > 0 and bool(fallback_id) and fallback_id != session_id,
     }
 
 
@@ -2489,12 +3604,7 @@ def delete_session_endpoint(session_id: str) -> dict:
         )
 
     reassigned = 0
-    if (
-        agent_count > 0
-        and fallback_id
-        and fallback_id != session_id
-        and mi.session_index_exists(fallback_id)
-    ):
+    if agent_count > 0 and fallback_id and fallback_id != session_id and mi.session_index_exists(fallback_id):
         reassigned = mi.reassign_agents_session(session_id, fallback_id)
 
     store = get_session_store()
@@ -2512,26 +3622,47 @@ def delete_session_endpoint(session_id: str) -> dict:
 # ---------------------------------------------------------------------------
 # Contexto/tokens de sesion (medidor del sidebar, ver app/token_estimate.py)
 # ---------------------------------------------------------------------------
+def _valid_context_window(value: object) -> int | None:
+    """Ventana de contexto como entero positivo, o None si falta o es basura (`bool` incluido: True no es 1 token)."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return int(value) if value > 0 else None
+
+
 def resolve_context_window(model_id: str) -> int:
-    """Resuelve el context_window real cacheado o usa fallback seguro."""
-    context_window = 200_000
-    for entry in (_MODELS_CACHE.get("by_id") or {}).values():
-        if entry.get("id") == model_id:
-            context_window = entry.get("context_window") or context_window
-            break
-    return context_window
+    """Ventana de contexto REAL del modelo (por id canonico o por alias), o 200.000 si no se conoce.
+
+    El catalogo guarda la MISMA entrada bajo el id y bajo cada alias (ver `list_models`), asi que se busca
+    por clave: antes se comparaba contra `entry["id"]` y un alias como `claude-sonnet-latest` (el modelo por
+    defecto) nunca coincidia. Tambien la usa la compactacion del historial (85 % de esta ventana)."""
+    fallback = 200_000
+    entry = (_MODELS_CACHE.get("by_id") or {}).get(model_id)
+    return _valid_context_window(entry.get("context_window")) or fallback if entry else fallback
+
+
+def _context_level(pct: int | float) -> str:
+    """spec aviso-contexto-largo REQ-007: semaforo del uso de contexto. ok < 60, warn 60-74, high 75-89, critical >= 90."""
+    if pct >= 90:
+        return "critical"
+    if pct >= 75:
+        return "high"
+    if pct >= 60:
+        return "warn"
+    return "ok"
 
 
 @app.get("/api/context/{session_id}")
-def get_context_usage(session_id: str) -> dict:
+def get_context_usage(session_id: str, model: str | None = None) -> dict:
+    """Uso estimado del contexto. `model` (opcional, spec aviso-contexto-largo REQ-007) mide contra la ventana del modelo elegido en el
+    selector; sin el, contra el modelo por defecto (`default_model_id()`) como siempre. Los campos de siempre no cambian; `level` es aditivo."""
     _assert_session_owner(session_id)
     store = get_session_store()
-    session = store.get(session_id)
+    session = store.get_or_restore(session_id)  # persistencia-sqlite-sesiones REQ-003: tambien tras un reinicio
     if session is None:
-        return {"tokens": 0, "context_window": 0, "pct_used": 0, "estimated": True}
+        return {"tokens": 0, "context_window": 0, "pct_used": 0, "estimated": True, "level": "ok"}
 
     tokens = estimate_tokens(session.messages)
-    context_window = resolve_context_window(default_model_id())
+    context_window = resolve_context_window((model or "").strip() or default_model_id())
 
     pct = min(100, round((tokens / context_window) * 100)) if context_window else 0
     return {
@@ -2539,6 +3670,7 @@ def get_context_usage(session_id: str) -> dict:
         "context_window": context_window,
         "pct_used": pct,
         "estimated": True,
+        "level": _context_level(pct),
     }
 
 
@@ -2548,6 +3680,611 @@ def get_context_usage(session_id: str) -> dict:
 @app.get("/api/connectors/status")
 async def connectors_status() -> dict:
     return {"connectors": await check_all_connectors()}
+
+
+@app.get("/api/connections")
+def list_named_connections() -> dict:
+    """spec conexiones-con-nombre REQ-002/004: las conexiones con nombre que hay (Oracle - Datamart, SharePoint - Sitio Logistico, ...).
+
+    Solo tipo, nombre, estado de configuracion y NOMBRES de los campos que faltan: nunca un valor (ni contrasenas, ni hosts, ni tokens). `error` es el
+    ultimo problema al leer `connections.json` (None si esta bien); un archivo roto conserva la ultima lectura valida (REQ-011)."""
+    return {
+        "connections": connections.describe_all(),
+        "types": [
+            {"type": t.type_id, "label": t.label, "testable": t.tester is not None}
+            for t in connections.get_types().values()
+        ],
+        "error": connections.last_error(),
+        "file": connections.display_path(),  # `~/.vision/connections.json`: sin el nombre de usuario de Windows
+    }
+
+
+def _confluence_for_request(connection: str | None):
+    """(conector, conexion) de Confluence para un endpoint. La conexion se elige SOLO por nombre contra el registro; 404 con los nombres validos si no existe."""
+    settings = get_settings()
+    if not getattr(settings, "enable_confluence", True):
+        raise HTTPException(status_code=400, detail="Confluence está desactivado en esta instalación de Vision.")
+    try:
+        conn = switches.resolve_enabled("confluence", connection or None)
+    except switches.DisabledConnectionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except connections.ConnectionLookupError as exc:
+        if connection:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return ConfluenceConnector(settings), None
+    effective = connections.settings_for(conn) if conn.from_file else settings
+    return ConfluenceConnector(effective), conn
+
+
+def _confluence_http_error(exc: BaseException, conn) -> HTTPException:
+    """Error de Confluence para la pantalla. El texto sale enmascarado (token, correo y valores de la conexion) y el LOG solo lleva el tipo de la
+    excepcion: `_connector_error_detail` registra `exc` crudo, y un fallo de red puede traer credenciales en su mensaje."""
+    logger.warning("Fallo de Confluence (%s)", type(exc).__name__)
+    detail = connections.redact(conn, str(exc)) if conn is not None else str(exc)
+    return HTTPException(status_code=502, detail=f"No pude consultar Confluence. {detail}")
+
+
+@app.get("/api/confluence/tree")
+async def confluence_tree(
+    connection: str | None = None, section: str | None = None, ref: str | None = None, depth: int = 0
+) -> dict:
+    """Raiz de una seccion (o de `ref`) con `depth` niveles (0 = solo la raiz; los hijos se piden con /children al expandir)."""
+    connector, conn = _confluence_for_request(connection)
+    root = (ref or "").strip()
+    if not root:
+        sections = connections.parse_confluence_sections(conn) if conn is not None else []
+        wanted = (section or "").strip().lower()
+        match = (
+            next((s for s in sections if s["name"].lower() == wanted), None)
+            if wanted
+            else (sections[0] if sections else None)
+        )
+        if match is None:
+            raise HTTPException(status_code=404, detail="Esa seccion no existe en la conexion de Confluence.")
+        root = match["page_id"]
+    try:
+        return await asyncio.to_thread(connector.get_page_tree, root, max(0, min(depth, 3)), 300)
+    except Exception as exc:  # noqa: BLE001
+        raise _confluence_http_error(exc, conn) from exc
+
+
+@app.get("/api/confluence/children")
+async def confluence_children(id: str, connection: str | None = None) -> dict:
+    """Hijos directos de una pagina (expansion perezosa del arbol). `id` tiene que ser el numero de la pagina."""
+    if not id.isdigit():
+        raise HTTPException(status_code=400, detail="El id de la página debe ser numérico.")
+    connector, conn = _confluence_for_request(connection)
+    try:
+        return {"children": await asyncio.to_thread(connector.list_child_pages, id)}
+    except Exception as exc:  # noqa: BLE001
+        raise _confluence_http_error(exc, conn) from exc
+
+
+@app.get("/api/confluence/page")
+async def confluence_page(ref: str, connection: str | None = None) -> dict:
+    """Contenido de una pagina como TEXTO PLANO (nunca HTML: la pantalla lo pinta con textContent, asi no hay XSS desde una pagina del wiki)."""
+    connector, conn = _confluence_for_request(connection)
+    try:
+        page = await asyncio.to_thread(connector.get_page, ref)
+    except Exception as exc:  # noqa: BLE001
+        raise _confluence_http_error(exc, conn) from exc
+    return {
+        "id": page["id"],
+        "title": page["title"],
+        "url": page["url"],
+        "space": page["space_key"],
+        "text": page["text"][:60_000],
+    }
+
+
+class SwitchRequest(BaseModel):
+    """Prende o apaga UNA conexion o skill. `key`/`name` se validan contra lo REAL configurado: no se guarda una cadena arbitraria."""
+
+    key: str | None = None  # conexiones: `<tipo>:<nombre en minuscula>`
+    name: str | None = None  # skills: nombre exacto
+    enabled: bool
+
+
+@app.get("/api/switches/connections")
+def list_connection_switches() -> dict:
+    """spec interruptores-conexiones-skills REQ-006/008: TODAS las conexiones configuradas (activas y desactivadas) con su interruptor. Solo tipo, nombre y estado:
+    nunca campos ni credenciales (REQ-011)."""
+    return {"connections": switches.describe_switches()}
+
+
+@app.post("/api/switches/connections")
+def set_connection_switch(req: SwitchRequest) -> dict:
+    """Prende o apaga una conexion. Persiste en `~/.vision/vision.db` (global, no por sesion). 404 si la clave no es de una conexion real; 409 si el `.env` la apaga."""
+    key = (req.key or "").strip()
+    info = switches.all_connection_keys().get(key)
+    if info is None:
+        raise HTTPException(status_code=404, detail="Esa conexión no existe.")
+    if req.enabled and not switches._env_allows(info["type"]):
+        raise HTTPException(
+            status_code=409,
+            detail="Esta conexión está desactivada en el .env (ENABLE_*). Activala allá para poder prenderla desde la pantalla.",
+        )
+    switches.set_connection_enabled(key, req.enabled)
+    return {"connections": switches.describe_switches()}
+
+
+def _known_skill_names(session_id: str | None) -> set[str]:
+    """Nombres de skills REALES: las globales y, si se indica una sesion propia, las locales de esa sesion."""
+    from app.tools.skill import discover_local_skills, discover_skills
+
+    names = {s["name"] for s in discover_skills()}
+    if session_id:
+        _assert_session_owner(session_id)
+        names |= {s["name"] for s in discover_local_skills(session_id)}
+    return names
+
+
+@app.get("/api/switches/skills")
+def list_skill_switches(session_id: str | None = None) -> dict:
+    """Skills (globales y, con `session_id`, las locales de esa sesion) con su interruptor individual. `global_enabled` es el interruptor GENERAL de las globales, que se
+    mantiene y manda por encima. Solo nombre, origen y estado: nunca el contenido de la skill."""
+    from app.persistence import master_index
+    from app.tools.skill import SKILLS_GLOBAL_ENABLED_KEY, discover_local_skills, discover_skills
+
+    off = switches.disabled_skill_names()
+    rows = [{"name": s["name"], "scope": "global", "enabled": s["name"] not in off} for s in discover_skills()]
+    if session_id:
+        _assert_session_owner(session_id)
+        rows += [
+            {"name": s["name"], "scope": "local", "enabled": s["name"] not in off}
+            for s in discover_local_skills(session_id)
+        ]
+    return {
+        "global_enabled": master_index.get_app_setting(SKILLS_GLOBAL_ENABLED_KEY) == "true",
+        "skills": sorted(rows, key=lambda r: (r["scope"], r["name"].lower())),
+    }
+
+
+@app.post("/api/switches/skills")
+def set_skill_switch(req: SwitchRequest, session_id: str | None = None) -> dict:
+    """Prende o apaga UNA skill por su nombre exacto (global o local de la sesion). Persiste en `~/.vision/vision.db`. 404 si no es una skill real."""
+    name = (req.name or "").strip()
+    try:
+        switches.set_skill_enabled(name, req.enabled, _known_skill_names(session_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Esa skill no existe.") from exc
+    return list_skill_switches(session_id)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# spec gestor-conexiones A7: API del almacen cifrado (`/api/vault/*`). TODO pedido pasa por `_vault_guard` (esta PC + la propia pagina de Vision, sin interruptor
+# que lo apague: REQ-007b); ver o cambiar un secreto YA guardado exige ademas el desbloqueo (Windows Hello, B3). Ninguna respuesta lleva un secreto salvo las de
+# `/secret/`, que solo responden desbloqueado. Los errores son para personas (`ConfigStoreError` ya trae el texto).
+# ---------------------------------------------------------------------------------------------------------------------
+_NO_STORE = {"Cache-Control": "no-store"}
+
+
+def _vault_guard(request: Request) -> None:
+    from app import secret_access  # import diferido: modulo chico, solo lo usan estas rutas
+
+    problem = secret_access.local_page_problem(
+        request.client.host if request.client else None,
+        request.url.hostname,
+        request.headers.get("origin"),
+        request.headers.get("sec-fetch-site"),
+        f"{request.url.scheme}://{request.url.netloc}",
+    )
+    if problem:
+        raise HTTPException(status_code=403, detail=problem)
+
+
+def _vault_require_unlocked() -> None:
+    from app import secret_access  # import diferido: modulo chico, solo lo usan estas rutas
+
+    if not secret_access.is_unlocked():
+        raise HTTPException(
+            status_code=423, detail="Para ver o cambiar una contraseña guardada, desbloqueá con Windows Hello."
+        )
+
+
+def _vault_store_error(exc: Exception) -> HTTPException:
+    return HTTPException(status_code=422, detail=str(exc))
+
+
+def _vault_require_imported() -> None:
+    """La PRIMERA escritura en la base la activa como unica fuente. Si todavia hay archivos viejos sin importar, activarla con una sola conexion haria desaparecer de
+    golpe todas las del `.env`: hasta importar, no se escribe nada (409). Una instalacion sin archivos viejos puede cargar directo."""
+    from app import config_import, config_store  # import diferido: modulos del gestor, solo los usan estas rutas
+
+    if not config_store.is_active() and any(config_import.legacy_sources().values()):
+        raise HTTPException(
+            status_code=409,
+            detail="Primero importá lo que tenés en el .env (botón «Importar a Vision»): si no, tus conexiones de ahora dejarían de verse.",
+        )
+
+
+def _vault_secret_keys(type_id: str) -> set[str]:
+    ctype = connections.get_types()[type_id]
+    return {f.key for f in (*ctype.fields, *ctype.personal_fields) if f.secret}
+
+
+def _vault_entry(stored: Any) -> dict:
+    """Una tarjeta (REQ-005): datos NO secretos a la vista, de los secretos solo si estan cargados. Nunca un secreto."""
+    ctype = connections.get_types().get(stored.type_id)
+    conn = connections.Connection(
+        stored.type_id, stored.name, stored.default, True, dict(stored.fields), "vision", stored.undecryptable
+    )
+    secret_keys = _vault_secret_keys(stored.type_id) if ctype else set()
+    all_fields = (*ctype.fields, *ctype.personal_fields) if ctype else ()
+    entry = {
+        "id": stored.id,
+        "type": stored.type_id,
+        "type_label": ctype.label if ctype else stored.type_id,
+        "name": stored.name,
+        "display": conn.display,
+        "default": stored.default,
+        "created_at": stored.created_at,
+        "updated_at": stored.updated_at,
+        "tested_at": stored.tested_at,
+        "test_status": stored.test_status,
+        "unreadable": stored.undecryptable,
+        "missing": connections.missing_fields(conn) if ctype else [],
+        "enabled": switches.is_connection_enabled(stored.type_id, stored.name),
+        "fields": {
+            f.key: stored.fields.get(f.key, "") for f in all_fields if f.key not in secret_keys and not f.structured
+        },
+        "secrets": {key: bool(stored.fields.get(key)) for key in sorted(secret_keys)},
+    }
+    if ctype is not None and ctype.public_info is not None:
+        info = ctype.public_info(conn)
+        if info:
+            entry["info"] = info  # solo datos NO secretos (ej. secciones de Confluence)
+    return entry
+
+
+@app.get("/api/vault/status")
+def vault_status(request: Request) -> dict:
+    """Estado del almacen: si es la fuente activa, que archivos viejos hay (solo si existen), el esquema de cada tipo y si esta desbloqueado. Sin valores."""
+    from app import (
+        config_import,
+        config_store,
+        secret_access,
+    )  # import diferido: modulos del gestor, solo los usan estas rutas
+
+    _vault_guard(request)
+    types = []
+    for ctype in connections.get_types().values():
+        types.append(
+            {
+                "type": ctype.type_id,
+                "label": ctype.label,
+                "derived": ctype.derived_from is not None,
+                "fields": [
+                    {
+                        "key": f.key,
+                        "label": f.label,
+                        "secret": f.secret,
+                        "required": f.required,
+                        "structured": f.structured,
+                    }
+                    for f in (*ctype.fields, *ctype.personal_fields)
+                ],
+            }
+        )
+    return {
+        "active": config_store.is_active(),
+        "legacy": config_import.legacy_sources(),
+        "types": types,
+        "unlocked_until": secret_access.unlocked_until(),
+    }
+
+
+@app.post("/api/vault/import")
+def vault_import(request: Request) -> dict:
+    """REQ-003: importa una vez el .env, connections.json y .env.enc. Informe por NOMBRE, nunca con valores. No toca los archivos."""
+    from app import config_import  # import diferido: modulo del gestor, solo lo usan estas rutas
+
+    _vault_guard(request)
+    return config_import.import_legacy().as_dict()
+
+
+@app.delete("/api/vault/legacy-files")
+def vault_delete_legacy_files(request: Request) -> dict:
+    """REQ-011 (Fase C): borra el .env, connections.json y .env.enc ya importados (la pantalla pide confirmacion antes). Solo con la base activa: borrarlos antes de
+    importar perderia esas conexiones (409). Devuelve los nombres borrados."""
+    from app import config_import, config_store  # import diferido: modulos del gestor, solo los usan estas rutas
+
+    _vault_guard(request)
+    if not config_store.is_active():
+        raise HTTPException(
+            status_code=409,
+            detail="Primero importá tus archivos a Vision: si los borrás antes, perdés esas conexiones.",
+        )
+    return config_import.delete_legacy_files()
+
+
+@app.get("/api/vault/connections")
+def vault_list_connections(request: Request) -> dict:
+    """Las tarjetas (REQ-005). Sin secretos (REQ-010)."""
+    from app import config_store  # import diferido: modulo del gestor, solo lo usan estas rutas
+
+    _vault_guard(request)
+    return {"connections": [_vault_entry(c) for c in config_store.list_stored()]}
+
+
+class VaultConnectionRequest(BaseModel):
+    """Alta o edicion de una conexion. En la edicion, `fields` es PARCIAL (lo que no viene queda igual; null borra el campo)."""
+
+    type: str | None = None
+    name: str | None = None
+    fields: dict[str, str | None] | None = None
+    default: bool | None = None
+
+
+@app.post("/api/vault/connections", status_code=201)
+def vault_add_connection(req: VaultConnectionRequest, request: Request) -> dict:
+    """REQ-004/004b: alta. Sin nombre valido, 422 y no se guarda nada."""
+    from app import config_store  # import diferido: modulo del gestor, solo lo usan estas rutas
+
+    _vault_guard(request)
+    _vault_require_imported()
+    try:
+        stored = config_store.add_connection(
+            str(req.type or ""),
+            req.name,
+            {k: v for k, v in (req.fields or {}).items() if v is not None},
+            default=bool(req.default),
+        )
+    except config_store.ConfigStoreError as exc:
+        raise _vault_store_error(exc) from exc
+    return _vault_entry(stored)
+
+
+@app.put("/api/vault/connections/{conn_id}")
+def vault_update_connection(conn_id: str, req: VaultConnectionRequest, request: Request) -> dict:
+    """REQ-006: edicion. Cambiar un secreto que YA estaba guardado exige el desbloqueo (REQ-007b); cargarlo por primera vez, no."""
+    from app import config_store  # import diferido: modulo del gestor, solo lo usan estas rutas
+
+    _vault_guard(request)
+    try:
+        current = config_store.get_stored(conn_id)
+    except config_store.ConfigStoreError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    try:
+        if req.fields and not current.undecryptable:
+            touched = {k for k in req.fields if k in _vault_secret_keys(current.type_id) and current.fields.get(k)}
+            if touched:
+                _vault_require_unlocked()
+        stored = config_store.update_connection(conn_id, name=req.name, fields=req.fields, default=req.default)
+    except config_store.ConfigStoreError as exc:
+        raise _vault_store_error(exc) from exc
+    return _vault_entry(stored)
+
+
+@app.delete("/api/vault/connections/{conn_id}")
+def vault_delete_connection(conn_id: str, request: Request) -> dict:
+    """REQ-009: baja (la pantalla pide confirmacion antes). Tambien se olvida su interruptor."""
+    from app import config_store  # import diferido: modulo del gestor, solo lo usan estas rutas
+
+    _vault_guard(request)
+    try:
+        gone = config_store.delete_connection(conn_id)
+    except config_store.ConfigStoreError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    switches.forget_connection(switches.connection_key(gone.type_id, gone.name))
+    return {"deleted": gone.id}
+
+
+@app.post("/api/vault/connections/{conn_id}/test")
+async def vault_test_connection(conn_id: str, request: Request) -> dict:
+    """«Probar» de la tarjeta: misma prueba que el resto de Vision; el resultado queda en la tarjeta (insignia y fecha)."""
+    from app import config_store  # import diferido: modulo del gestor, solo lo usan estas rutas
+
+    _vault_guard(request)
+    try:
+        stored = config_store.get_stored(conn_id)
+    except config_store.ConfigStoreError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    result = await test_one_connection(stored.type_id, stored.name)
+    config_store.record_test(conn_id, bool(result.get("ok")))
+    return result
+
+
+class VaultTestDraftRequest(BaseModel):
+    """«Probar» antes de guardar: el formulario tal como esta. `conn_id` al editar (lo que no viene sale de la guardada)."""
+
+    type: str
+    name: str | None = None
+    fields: dict[str, str | None] = {}
+    conn_id: str | None = None
+
+
+@app.post("/api/vault/connections/test-draft")
+async def vault_test_draft(req: VaultTestDraftRequest, request: Request) -> dict:
+    """Pedido del usuario 2026-10-10 («todos deberian tener un boton de probar antes de guardar»): prueba lo escrito SIN guardar nada. Usar una
+    contraseña guardada para probar no la muestra, asi que no pide el desbloqueo (igual que el «Probar» de la tarjeta); la respuesta sale enmascarada."""
+    from app import config_store  # import diferido: modulo del gestor, solo lo usan estas rutas
+
+    _vault_guard(request)
+    base: dict[str, str] | None = None
+    if req.conn_id:
+        try:
+            stored = config_store.get_stored(req.conn_id)
+        except config_store.ConfigStoreError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if stored.type_id != req.type:
+            raise HTTPException(status_code=422, detail="Esa conexión es de otro tipo.")
+        base = dict(stored.fields)
+    try:
+        fields = config_store.check_fields(req.type, {k: v for k, v in req.fields.items() if v is not None})
+    except config_store.ConfigStoreError as exc:
+        raise _vault_store_error(exc) from exc
+    return await test_draft_connection(req.type, fields, base, req.name or (stored.name if req.conn_id else ""))
+
+
+class VaultBigQueryTestRequest(BaseModel):
+    values: dict[str, str | None] = {}
+
+
+@app.post("/api/vault/bigquery/test")
+async def vault_test_bigquery(req: VaultBigQueryTestRequest, request: Request) -> dict:
+    """«Probar» de la seccion BigQuery (pedido del usuario 2026-10-10): proyecto y ubicacion escritos + la key guardada, sin guardar nada."""
+    _vault_guard(request)
+    return await test_bigquery_draft({k: v for k, v in req.values.items() if v is not None})
+
+
+@app.get("/api/vault/connections/{conn_id}/secret/{field_key}")
+def vault_reveal_connection_secret(conn_id: str, field_key: str, request: Request):
+    """REQ-007: el ojo pide UN secreto guardado, solo desde esta PC, desde la pagina de Vision y desbloqueado. Nunca se cachea."""
+    from fastapi.responses import JSONResponse  # import diferido: solo esta ruta arma la respuesta a mano
+
+    from app import config_store  # import diferido: modulo del gestor, solo lo usan estas rutas
+
+    _vault_guard(request)
+    _vault_require_unlocked()
+    try:
+        stored = config_store.get_stored(conn_id)
+    except config_store.ConfigStoreError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if field_key not in _vault_secret_keys(stored.type_id):
+        raise HTTPException(status_code=404, detail="Ese dato no es una contraseña de esta conexión.")
+    return JSONResponse({"value": stored.fields.get(field_key, "")}, headers=_NO_STORE)
+
+
+@app.get("/api/vault/general")
+def vault_general(request: Request) -> dict:
+    """Configuracion general (proveedor de IA, voz, BigQuery, Graph, red, general). Los secretos solo dicen si estan cargados."""
+    from app import general_settings  # import diferido: modulo del gestor, solo lo usan estas rutas
+
+    _vault_guard(request)
+    return {"fields": general_settings.describe(), "graph_sources": connections.names_for("sharepoint")}
+
+
+class VaultGeneralRequest(BaseModel):
+    values: dict[str, str | None]
+
+
+@app.put("/api/vault/general")
+def vault_set_general(req: VaultGeneralRequest, request: Request) -> dict:
+    """REQ-006: guarda y aplica sin reiniciar. Cambiar un secreto ya guardado exige el desbloqueo."""
+    from app import config_store, general_settings  # import diferido: modulos del gestor, solo los usan estas rutas
+
+    _vault_guard(request)
+    _vault_require_imported()
+    stored = config_store.get_general()
+    if any((f := general_settings.field_for(k)) is not None and f.secret and stored.get(k) for k in req.values):
+        _vault_require_unlocked()
+    try:
+        general_settings.save(req.values)
+    except config_store.ConfigStoreError as exc:
+        raise _vault_store_error(exc) from exc
+    return {"fields": general_settings.describe()}
+
+
+@app.get("/api/vault/general/secret/{key}")
+def vault_reveal_general_secret(key: str, request: Request):
+    """REQ-007: un secreto de la configuracion general (ej. la clave de Fish), con las mismas barreras que el de una conexion."""
+    from fastapi.responses import JSONResponse  # import diferido: solo esta ruta arma la respuesta a mano
+
+    from app import config_store, general_settings  # import diferido: modulos del gestor, solo los usan estas rutas
+
+    _vault_guard(request)
+    _vault_require_unlocked()
+    field = general_settings.field_for(key)
+    if field is None or not field.secret:
+        raise HTTPException(status_code=404, detail="Ese dato no es una contraseña de la configuración.")
+    return JSONResponse({"value": config_store.get_general().get(key, "")}, headers=_NO_STORE)
+
+
+class VaultBigQueryKeyRequest(BaseModel):
+    key_json: str
+
+
+_BQ_KEY_REQUIRED = ("type", "project_id", "private_key", "client_email")
+_BQ_KEY_MAX_CHARS = 100_000
+
+
+@app.post("/api/vault/bigquery-key")
+def vault_set_bigquery_key(req: VaultBigQueryKeyRequest, request: Request) -> dict:
+    """REQ-008: importar (o reemplazar) la key de la cuenta de servicio. Se valida, se guarda cifrada (sin archivo) y se autocompleta el proyecto si estaba vacio.
+    Devuelve solo proyecto y cuenta (para la tarjeta), nunca la clave. Reemplazar una key ya guardada exige el desbloqueo."""
+    import json as _json  # import diferido: solo esta ruta parsea la key
+
+    from app import config_store, general_settings  # import diferido: modulos del gestor, solo los usan estas rutas
+
+    _vault_guard(request)
+    _vault_require_imported()
+    text = req.key_json.strip()
+    if len(text) > _BQ_KEY_MAX_CHARS:
+        raise HTTPException(
+            status_code=422, detail="Ese archivo es demasiado grande para ser una clave de cuenta de servicio."
+        )
+    try:
+        info = _json.loads(text)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Ese archivo no es una clave de cuenta de servicio de Google (no es un JSON válido).",
+        ) from exc
+    if (
+        not isinstance(info, dict)
+        or info.get("type") != "service_account"
+        or any(not str(info.get(k) or "").strip() for k in _BQ_KEY_REQUIRED)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Ese archivo no es una clave de cuenta de servicio de Google: le faltan datos (tipo, proyecto, cuenta o clave).",
+        )
+    stored = config_store.get_general()
+    if stored.get("bq_key_json"):
+        _vault_require_unlocked()
+    updates = {"bq_key_json": text}
+    project_set = not stored.get("bq_project_id")
+    if project_set:
+        updates["bq_project_id"] = str(info["project_id"])
+    general_settings.save(updates)
+    return {
+        "project_id": str(info["project_id"]),
+        "client_email": str(info["client_email"]),
+        "project_set": project_set,
+    }
+
+
+@app.get("/api/vault/unlock")
+def vault_unlock_status(request: Request) -> dict:
+    from app import secret_access  # import diferido: modulo chico, solo lo usan estas rutas
+
+    _vault_guard(request)
+    return {"unlocked_until": secret_access.unlocked_until()}
+
+
+@app.post("/api/vault/unlock")
+def vault_unlock(request: Request) -> dict:
+    """REQ-007b: confirma la identidad (Windows Hello) y desbloquea unos minutos."""
+    from app import secret_access  # import diferido: modulo chico, solo lo usan estas rutas
+
+    _vault_guard(request)
+    try:
+        until = secret_access.unlock()
+    except secret_access.UnlockError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return {"unlocked_until": until}
+
+
+@app.delete("/api/vault/unlock")
+def vault_lock(request: Request) -> dict:
+    """Bloquear ya (al cerrar la pantalla)."""
+    from app import secret_access  # import diferido: modulo chico, solo lo usan estas rutas
+
+    _vault_guard(request)
+    secret_access.lock()
+    return {"unlocked_until": None}
+
+
+@app.post("/api/connections/{type_id}/test")
+async def test_named_connection(type_id: str, name: str | None = None) -> dict:
+    """Prueba UNA conexion por nombre (boton «Probar» de su tarjeta). Sin `name`, la predeterminada del tipo."""
+    try:
+        return await test_one_connection(type_id, name)
+    except connections.ConnectionLookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Tipo de conexion desconocido: '{type_id}'.") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -2594,11 +4331,7 @@ def get_project_config_endpoint() -> dict:
 def set_sharepoint_project_endpoint(req: SharepointProjectRequest) -> dict:
     from dataclasses import asdict
 
-    return asdict(
-        pc.set_sharepoint_project(
-            req.drive_id, req.drive_name, req.folder_id, req.folder_path
-        )
-    )
+    return asdict(pc.set_sharepoint_project(req.drive_id, req.drive_name, req.folder_id, req.folder_path))
 
 
 @app.delete("/api/config/project/sharepoint")
@@ -2672,7 +4405,8 @@ def set_model_fallback_config(req: ModelFallbackRequest) -> dict:
     enabled = current.enabled if req.enabled is None else req.enabled
     if enabled and not (order if order is not None else current.order):
         raise HTTPException(
-            400, detail="Agregá al menos un modelo a la lista para activar el salto automático."
+            400,
+            detail="Agregá al menos un modelo a la lista para activar el salto automático.",
         )
     if req.pause_minutes is not None and not (
         model_fallback.MIN_PAUSE_MINUTES <= req.pause_minutes <= model_fallback.MAX_PAUSE_MINUTES
@@ -2703,7 +4437,13 @@ def check_model_fallback(req: ModelFallbackCheckRequest) -> dict:
     al proveedor de IA: es el mismo con el que el loop registro las pausas."""
     fallback = model_fallback.load_settings()
     if not fallback.enabled:
-        return {"enabled": False, "model": None, "home": None, "text": None, "resume_at": None}
+        return {
+            "enabled": False,
+            "model": None,
+            "home": None,
+            "text": None,
+            "resume_at": None,
+        }
     catalog = _MODELS_CACHE.get("by_id") or {}
     return {
         "enabled": True,
@@ -2798,9 +4538,7 @@ async def list_bigquery_datasets_for_config() -> dict:
         )
         return {"datasets": sorted(datasets)}
     except Exception as exc:
-        raise HTTPException(
-            status_code=502, detail=_connector_error_detail(exc, "BigQuery")
-        ) from exc
+        raise HTTPException(status_code=502, detail=_connector_error_detail(exc, "BigQuery")) from exc
 
 
 @app.get("/api/config/connections/bigquery/tables")
@@ -2817,21 +4555,26 @@ async def list_bigquery_tables_for_config(dataset_id: str) -> dict:
         )
     try:
         tables = await asyncio.wait_for(
-            asyncio.to_thread(
-                lambda: BigQueryConnector(settings).list_tables(dataset_id)
-            ),
+            asyncio.to_thread(lambda: BigQueryConnector(settings).list_tables(dataset_id)),
             timeout=15,
         )
         return {"tables": sorted(tables)}
     except Exception as exc:
-        raise HTTPException(
-            status_code=502, detail=_connector_error_detail(exc, "BigQuery")
-        ) from exc
+        raise HTTPException(status_code=502, detail=_connector_error_detail(exc, "BigQuery")) from exc
 
 
 @app.get("/api/config/connections/sharepoint/lists")
-async def list_sharepoint_lists_for_config() -> dict:
+async def list_sharepoint_lists_for_config(name: str | None = None) -> dict:
+    """Listas de un SharePoint. `name` = conexion con nombre (spec conexiones-con-nombre REQ-010); sin `name`, la predeterminada."""
     settings = get_settings()
+    try:
+        conn = connections.resolve("sharepoint", name)
+    except connections.ConnectionLookupError as exc:
+        if name:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        conn = None  # sin ninguna conexion: se sigue con el `.env` de siempre y el conector explica que falta
+    if conn is not None and conn.from_file:
+        settings = connections.settings_for(conn)
     if not settings.enable_sharepoint:
         raise HTTPException(
             status_code=400,
@@ -2842,11 +4585,15 @@ async def list_sharepoint_lists_for_config() -> dict:
             asyncio.to_thread(lambda: SharePointConnector(settings).list_lists()),
             timeout=15,
         )
-        return {"lists": sorted(lists)}
+        result = {"lists": sorted(lists)}
+        if conn is not None and conn.from_file:
+            result["connection"] = (
+                conn.name
+            )  # solo cuando hay una conexion con nombre: sin archivo la respuesta es la de siempre
+        return result
     except Exception as exc:
-        raise HTTPException(
-            status_code=502, detail=_connector_error_detail(exc, "SharePoint")
-        ) from exc
+        detail = _connector_error_detail(exc, "SharePoint")
+        raise HTTPException(status_code=502, detail=connections.redact(conn, detail) if conn else detail) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -2887,6 +4634,8 @@ class SaveCredentialsRequest(BaseModel):
 def save_credentials_endpoint(req: SaveCredentialsRequest) -> dict:
     try:
         credentials.save_credentials(req.fields)
+    except credentials.CredentialsMovedError as exc:  # spec gestor-conexiones: la configuracion ya esta en Vision
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except credentials.CredentialsError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     # Bug real (2026-09-27, cambio de Claude a Gemini): la lista de modelos
@@ -2898,7 +4647,10 @@ def save_credentials_endpoint(req: SaveCredentialsRequest) -> dict:
 
 @app.delete("/api/config/credentials")
 def clear_credentials_endpoint() -> dict:
-    credentials.clear_credentials()
+    try:
+        credentials.clear_credentials()
+    except credentials.CredentialsMovedError as exc:  # spec gestor-conexiones: la configuracion ya esta en Vision
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return credentials.get_credentials_status()
 
 
@@ -2917,6 +4669,9 @@ async def test_connector_credentials_endpoint(connector: str) -> dict:
     from app.connectors.sap_connector import SapConnector
     from app.connectors.sharepoint_connector import SharePointConnector
 
+    # spec conexiones-con-nombre: Oracle/SharePoint/SAP salieron de la pestaña Credenciales y se prueban por NOMBRE en POST /api/connections/{tipo}/test.
+    # Este endpoint sigue sirviendo a BigQuery (la unica conexion que conserva la pestaña) y, por compatibilidad, a los otros tres con la
+    # conexion PREDETERMINADA del tipo (la misma que usan las tools sin indicar `connection`).
     testers = {
         "oracle": OracleConnector,
         "bigquery": BigQueryConnector,
@@ -2930,10 +4685,13 @@ async def test_connector_credentials_endpoint(connector: str) -> dict:
             detail=f"Conector desconocido: '{connector}' (esperado uno de {sorted(testers)})",
         )
     settings = get_settings()
+    if connector != "bigquery":
+        try:
+            settings = connections.settings_for(connections.resolve(connector))
+        except connections.ConnectionLookupError:
+            pass  # sin conexion configurada: se prueba con el `.env` de siempre y el conector explica que falta
     try:
-        ok = await asyncio.wait_for(
-            asyncio.to_thread(connector_cls(settings).test_connection), timeout=15.0
-        )
+        ok = await asyncio.wait_for(asyncio.to_thread(connector_cls(settings).test_connection), timeout=15.0)
     except TimeoutError as exc:
         system = CONNECTOR_NAMES.get(connector, connector)
         raise HTTPException(
@@ -3085,14 +4843,20 @@ async def fs_native_picker(initial_path: str = "", mode: str = "folder") -> dict
         try:
             root = tkinter.Tk()
             root.withdraw()
-            root.attributes(
-                "-topmost", True
-            )  # necesario pero INSUFICIENTE en Windows -- ver _force_foreground_window
+            root.attributes("-topmost", True)  # necesario pero INSUFICIENTE en Windows -- ver _force_foreground_window
             root.lift()
             root.focus_force()
             _force_foreground_window(root)
             try:
-                if mode == "file":
+                if mode == "any-file":
+                    # spec adjuntar-archivos-chat REQ-007 c: elegir CUALQUIER archivo para
+                    # leerlo en su lugar (sin filtro de ejecutables, a diferencia de "file").
+                    selected = filedialog.askopenfilename(
+                        initialdir=initial_path or str(Path.home()),
+                        title="Elegir archivo a adjuntar - Vision",
+                        filetypes=[("Todos los archivos", "*.*")],
+                    )
+                elif mode == "file":
                     selected = filedialog.askopenfilename(
                         initialdir=initial_path or str(Path.home()),
                         title="Elegir archivo a ejecutar - Vision",
@@ -3114,9 +4878,7 @@ async def fs_native_picker(initial_path: str = "", mode: str = "folder") -> dict
 
     try:
         path = await asyncio.wait_for(asyncio.to_thread(_pick), timeout=1800)
-    except (
-        Exception
-    ) as exc:  # tkinter puede fallar en entornos sin display (ej. servidor headless)
+    except Exception as exc:  # tkinter puede fallar en entornos sin display (ej. servidor headless)
         logger.warning("No se pudo abrir el explorador nativo de Windows: %s", exc)
         raise HTTPException(
             status_code=500,
@@ -3154,9 +4916,7 @@ def sharepoint_drives() -> dict:
         sp = SharePointConnector(settings)
         return {"drives": sp.list_drives()}
     except SharePointConnectionError as exc:
-        raise HTTPException(
-            status_code=502, detail=_connector_error_detail(exc, "SharePoint")
-        ) from exc
+        raise HTTPException(status_code=502, detail=_connector_error_detail(exc, "SharePoint")) from exc
 
 
 @app.get("/api/sharepoint/children")
@@ -3167,9 +4927,7 @@ def sharepoint_children(drive_id: str, item_id: str | None = None) -> dict:
         path = sp.get_item_path(drive_id, item_id) if item_id else ""
         return {"children": children, "path": path}
     except SharePointConnectionError as exc:
-        raise HTTPException(
-            status_code=502, detail=_connector_error_detail(exc, "SharePoint")
-        ) from exc
+        raise HTTPException(status_code=502, detail=_connector_error_detail(exc, "SharePoint")) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -3284,9 +5042,7 @@ def get_skills_config_endpoint() -> dict:
     from app.tools.skill import SKILLS_GLOBAL_ENABLED_KEY, SKILLS_REPO_PATH_KEY
 
     return {
-        "global_enabled": (
-            master_index.get_app_setting(SKILLS_GLOBAL_ENABLED_KEY) == "true"
-        ),
+        "global_enabled": (master_index.get_app_setting(SKILLS_GLOBAL_ENABLED_KEY) == "true"),
         "repo_path": master_index.get_app_setting(SKILLS_REPO_PATH_KEY) or "",
     }
 
@@ -3300,9 +5056,7 @@ def set_skills_config_endpoint(req: SkillsConfigRequest) -> dict:
     from app.tools.skill import SKILLS_GLOBAL_ENABLED_KEY, SKILLS_REPO_PATH_KEY
 
     if req.global_enabled is not None:
-        master_index.set_app_setting(
-            SKILLS_GLOBAL_ENABLED_KEY, "true" if req.global_enabled else "false"
-        )
+        master_index.set_app_setting(SKILLS_GLOBAL_ENABLED_KEY, "true" if req.global_enabled else "false")
     if req.repo_path is not None:
         master_index.set_app_setting(SKILLS_REPO_PATH_KEY, req.repo_path.strip())
     return get_skills_config_endpoint()
@@ -3331,11 +5085,11 @@ def list_commands_endpoint(session_id: str = "") -> dict:
     propios son los de `commands/` dentro de la carpeta PROPIA de
     `session_id`, no de una carpeta global)."""
     project_path = persistence_service.project_root_for_session(session_id)
+    # spec comando-update-sesiones-publicas REQ-010: `/update` solo aparece si esta carpeta tiene conversaciones publicas de otras personas.
+    offer_update = bool(session_id) and persistence_service.has_foreign_public_sessions(session_id)
     return {
-        "system": commands_module.SYSTEM_COMMANDS,
-        "custom": commands_module.list_custom_commands(
-            str(project_path) if project_path else None
-        ),
+        "system": [c for c in commands_module.SYSTEM_COMMANDS if c["name"] != "update" or offer_update],
+        "custom": commands_module.list_custom_commands(str(project_path) if project_path else None),
     }
 
 
@@ -3348,7 +5102,10 @@ class SaveCustomCommandRequest(BaseModel):
 @app.post("/api/commands/custom")
 def save_custom_command_endpoint(req: SaveCustomCommandRequest) -> dict:
     """REQ-008/009: crea o actualiza (mismo nombre) un comando propio en
-    la carpeta de proyecto PROPIA de `req.session_id`."""
+    la carpeta de proyecto PROPIA de `req.session_id`. REQ-006 (QA-032):
+    `_assert_session_owner` -- antes faltaba, asi que quien conociera un
+    `session_id` ajeno podia escribir comandos en su carpeta."""
+    _assert_session_owner(req.session_id)
     project_path = persistence_service.project_root_for_session(req.session_id)
     if project_path is None:
         raise HTTPException(
@@ -3356,9 +5113,7 @@ def save_custom_command_endpoint(req: SaveCustomCommandRequest) -> dict:
             detail="Esta sesión todavía no tiene carpeta de proyecto asignada.",
         )
     try:
-        commands = commands_module.save_custom_command(
-            str(project_path), req.name, req.prompt
-        )
+        commands = commands_module.save_custom_command(str(project_path), req.name, req.prompt)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"custom": commands}
@@ -3366,12 +5121,46 @@ def save_custom_command_endpoint(req: SaveCustomCommandRequest) -> dict:
 
 @app.delete("/api/commands/custom/{name}")
 def delete_custom_command_endpoint(name: str, session_id: str = "") -> dict:
-    """REQ-009."""
+    """REQ-009. REQ-006 (QA-032): `_assert_session_owner` + el nombre pasa
+    por `validate_command_name` (dentro de `delete_custom_command`) antes
+    de resolver la ruta -- antes un nombre con '..\\' llegaba tal cual
+    (por HTTP incluso decodificado desde '%5C') y borraba un archivo fuera
+    de `commands/` de la sesion."""
+    _assert_session_owner(session_id)
     project_path = persistence_service.project_root_for_session(session_id)
-    commands = commands_module.delete_custom_command(
-        str(project_path) if project_path else "", name
-    )
+    try:
+        commands = commands_module.delete_custom_command(str(project_path) if project_path else "", name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"custom": commands}
+
+
+class ImportCommandsRequest(BaseModel):
+    session_id: str
+    source_path: str
+    # REQ-005: nombres que el usuario YA confirmo sobrescribir (2do paso).
+    overwrite: list[str] = []
+
+
+@app.post("/api/commands/import-path")
+def import_commands_endpoint(req: ImportCommandsRequest) -> dict:
+    """REQ-005 (spec quick-panel-labels-comandos): importa los `.md` de una
+    carpeta local a `commands/` de la sesion. Los conflictos de nombre se
+    devuelven sin sobrescribir -- el frontend confirma y reintenta con
+    `overwrite`. Solo escribe dentro de la carpeta de proyecto de la sesion
+    (el nombre de archivo destino se deriva del stem validado, nunca de una
+    ruta que venga del cliente)."""
+    _assert_session_owner(req.session_id)
+    project_path = persistence_service.project_root_for_session(req.session_id)
+    if project_path is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Esta sesión todavía no tiene carpeta de proyecto asignada. Elegí una carpeta primero.",
+        )
+    try:
+        return commands_module.import_commands_from_folder(str(project_path), req.source_path, req.overwrite)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/commands/init-prompt")
@@ -3384,21 +5173,69 @@ def get_init_prompt_endpoint() -> dict:
     return {"prompt": commands_module.INIT_PROMPT}
 
 
+@app.post("/api/commands/update/{session_id}")
+async def update_from_public_endpoint(session_id: str) -> dict:
+    """spec comando-update-sesiones-publicas REQ-008: resume lo nuevo de las conversaciones publicas de otras personas en la carpeta de esta sesion,
+    con el CSID de quien las publico, y lista sus archivos. Solo la dueña de la sesion (403 si no); sin carpeta, 400 con una frase. El trabajo
+    corre en un hilo: llama al modelo y usa `asyncio.run`, que no puede correr dentro del bucle del servidor."""
+    _assert_session_owner(session_id)
+    folder = persistence_service.master_index.get_project_path(session_id)
+    if not folder:
+        raise HTTPException(
+            400, detail="Primero elegí la carpeta de esta sesión: sin carpeta no hay conversaciones públicas que traer."
+        )
+    try:
+        result = await asyncio.to_thread(persistence_service.update_from_public, session_id, folder)
+    except Exception as exc:  # noqa: BLE001 -- el crudo va al log; la persona recibe un texto entendible
+        logger.warning("No se pudo actualizar la sesion %s desde las publicas", session_id, exc_info=True)
+        raise HTTPException(
+            500, detail="No pude traer las novedades de las conversaciones públicas. Probá de nuevo en un momento."
+        ) from exc
+    _reload_session_memory(session_id)  # las notas ya estan en SQLite: el proximo mensaje las ve
+    return result
+
+
+class CompactRequest(BaseModel):
+    """spec aviso-contexto-largo REQ-006: cuerpo OPCIONAL de `/compact`; sin el, el pedido es el de siempre."""
+
+    model: str | None = None
+
+
 @app.post("/api/commands/compact/{session_id}")
-async def compact_session_endpoint(session_id: str) -> dict:
-    """REQ-002: ejecuta compactacion manual sin crear un turno nuevo."""
+async def compact_session_endpoint(session_id: str, req: CompactRequest | None = None) -> dict:
+    """REQ-002: ejecuta compactacion manual sin crear un turno nuevo.
+
+    spec aviso-contexto-largo REQ-005/006: resume con el modelo elegido en el selector (o, con el salto automatico activo, con el primero
+    disponible, igual que la compactacion automatica del turno) y, si el modelo falla (ej. 429 de tope de gasto), devuelve un texto para
+    una persona en vez de un 500 mudo. El crudo va al log y la sesion no se toca."""
     _assert_session_owner(session_id)
     store = get_session_store()
-    session = store.get(session_id)
+    session = store.get_or_restore(session_id)  # persistencia-sqlite-sesiones REQ-003: tambien tras un reinicio
     if session is None:
         raise HTTPException(status_code=404, detail="Sesión no encontrada.")
     if not session.messages:
         return {"compacted": False, "reason": "sin historial que compactar"}
 
-    model = default_model_id()
-    compacted = await compact_session(
-        session_id, session.messages, resolve_context_window(model), model
-    )
+    chosen = ((req.model if req else None) or "").strip() or None
+    fallback_settings = model_fallback.load_settings()
+    if fallback_settings.enabled:
+        picker = model_fallback.TurnModelPicker(
+            fallback_settings, chosen, default_model_id(), _MODELS_CACHE.get("by_id")
+        )
+        model = picker.first_available()
+    else:
+        model = chosen or default_model_id()
+    try:
+        compacted = await compact_session(session_id, session.messages, resolve_context_window(model), model)
+    except Exception as exc:  # noqa: BLE001 -- el crudo va al log; la persona recibe un texto entendible
+        friendly = describe_model_error(exc, model)
+        logger.warning(
+            "No se pudo compactar la sesion %s con %s [%s]: %s", session_id, model, friendly.code, exc, exc_info=True
+        )
+        raise HTTPException(
+            status_code=429 if friendly.status == 429 else 502,
+            detail=f"No pude resumir la conversación. {friendly.message}",
+        ) from exc
     return {"compacted": compacted}
 
 
@@ -3416,7 +5253,7 @@ async def qa_audit_endpoint(session_id: str) -> dict:
 
     _assert_session_owner(session_id)
     store = get_session_store()
-    session = store.get(session_id)
+    session = store.get_or_restore(session_id)  # persistencia-sqlite-sesiones REQ-003: tambien tras un reinicio
     if session is None:
         raise HTTPException(status_code=404, detail="Sesión no encontrada.")
 
@@ -3440,20 +5277,12 @@ async def qa_audit_endpoint(session_id: str) -> dict:
         )
     except Exception as exc:  # bateria es tooling, no bloquea
         logger.warning("No se pudo correr la bateria QA: %s", exc)
-        raise HTTPException(
-            status_code=500, detail="No se pudo correr la batería QA."
-        ) from exc
+        raise HTTPException(status_code=500, detail="No se pudo correr la batería QA.") from exc
 
     output = (proc.stdout or "") + "\n" + (proc.stderr or "")
-    issues = [
-        line.strip()
-        for line in output.splitlines()
-        if "[FAIL]" in line or "SIN COBERTURA" in line
-    ]
+    issues = [line.strip() for line in output.splitlines() if "[FAIL]" in line or "SIN COBERTURA" in line]
 
-    existing = {
-        t.get("content") for t in (session.todos or []) if t.get("status") == "pending"
-    }
+    existing = {t.get("content") for t in (session.todos or []) if t.get("status") == "pending"}
     added = 0
     for issue in issues:
         content = f"QA: {issue}"
@@ -3554,11 +5383,26 @@ def serve_browser_file(session_id: str, file_path: str):
 
     result = browser_workspace.read_file(session_id, file_path)
     if result is None:
-        raise HTTPException(
-            status_code=404, detail=f"No existe '{file_path}' en esta sesion."
-        )
+        raise HTTPException(status_code=404, detail=f"No existe '{file_path}' en esta sesion.")
     content, content_type = result
     return Response(content=content, media_type=content_type)
+
+
+def _browser_waiting_page():
+    """Pagina que ve el iframe de vista previa cuando la sesion todavia no tiene ningun archivo HTML para mostrar."""
+    from fastapi import Response
+
+    return Response(
+        content=(
+            "<html><body style='font-family:monospace;background:#0b0c0e;"
+            "color:#666d78;display:flex;align-items:center;justify-content:center;"
+            "height:100vh;margin:0'>"
+            "Aún no hay ningún archivo HTML en esta sesión.<br>"
+            "Pedile a Vision que genere un dashboard o proyecto para previsualizar acá."
+            "</body></html>"
+        ),
+        media_type="text/html; charset=utf-8",
+    )
 
 
 @app.get("/browser/{session_id}")
@@ -3571,18 +5415,12 @@ def serve_browser_index(session_id: str):
 
     index_name = browser_workspace.find_index_file(session_id)
     if index_name is None:
-        return Response(
-            content=(
-                "<html><body style='font-family:monospace;background:#0b0c0e;"
-                "color:#666d78;display:flex;align-items:center;justify-content:center;"
-                "height:100vh;margin:0'>"
-                "Aún no hay ningún archivo HTML en esta sesión.<br>"
-                "Pedile a Vision que genere un dashboard o proyecto para previsualizar acá."
-                "</body></html>"
-            ),
-            media_type="text/html; charset=utf-8",
-        )
+        return _browser_waiting_page()
     result = browser_workspace.read_file(session_id, index_name)
+    if result is None:
+        # El archivo desaparecio entre la busqueda y la lectura (el agente reescribe el dashboard justo cuando el iframe pide la raiz).
+        # Mismo caso que 'todavia no hay archivo': antes el desempaquetado de None lanzaba TypeError y respondia 500. (BL-003, mypy)
+        return _browser_waiting_page()
     content, content_type = result
     return Response(content=content, media_type=content_type)
 
@@ -3619,6 +5457,15 @@ if _FRONTEND_DIR.exists():
 
 
 if __name__ == "__main__":
+    # REQ-008 (spec fix-detener-y-progreso-visible): mismo criterio que Iniciar-Vision.bat (`--reload-dir app`): se vigila SOLO el
+    # codigo de Vision (esta carpeta, sin importar desde donde se lance). Sin esto uvicorn vigila la carpeta actual entera y un
+    # `pip install` del agente dentro de backend/.venv reinicia Vision a mitad del turno (bug real del 2026-10-11).
     uvicorn.run(
-        "app.main:app", host=settings.app_host, port=settings.app_port, reload=True
+        "app.main:app",
+        host=settings.app_host,
+        port=settings.app_port,
+        reload=True,
+        reload_dirs=[str(Path(__file__).resolve().parent)],
+        # Hallazgo del 2026-10-17: con un chat abierto (stream que no termina) el reinicio por reload se cuelga sin este limite; ver Iniciar-Vision.bat.
+        timeout_graceful_shutdown=5,
     )

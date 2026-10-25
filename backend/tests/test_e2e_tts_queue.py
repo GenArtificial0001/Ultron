@@ -82,17 +82,17 @@ class FakeLLM:
 
 
 @pytest.fixture(scope="module")
-def fake_llm():
+def proveedor():
     return FakeLLM()
 
 
 @pytest.fixture(scope="module")
-def base_url(fake_llm):
+def base_url(proveedor):
     from app.llm import loop as loop_module
 
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(loop_module, "get_client", lambda *a, **k: fake_llm)
-        with serve_backend(fake_llm) as url:
+        mp.setattr(loop_module, "get_client", lambda *a, **k: proveedor)
+        with serve_backend(proveedor) as url:
             yield url
 
 
