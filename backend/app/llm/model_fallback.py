@@ -59,6 +59,12 @@ TRIGGER_CODES = frozenset(
 )
 
 
+def _is_local(model_id: str) -> bool:
+    from app.llm.providers import is_local  # import diferido: evita ciclo
+
+    return is_local(model_id)
+
+
 def is_gemini(model_id: str) -> bool:
     # spec varios-proveedores: el id puede venir con prefijo de proveedor
     # ("gemini/gemini-2.5-flash", "openrouter/google/gemini-..."): se mira el nombre.
@@ -261,7 +267,10 @@ class TurnModelPicker:
         """REQ-002/008: True si la falla dispara el salto; en ese caso el modelo
         queda en pausa y el proximo `choose` elige otro y arma el aviso."""
         friendly = describe_model_error(exc, model)
-        if friendly.code not in TRIGGER_CODES:
+        # spec ia-local REQ-004: un motor LOCAL apagado (sin conexion) es una caida de ese modelo: se pausa y el turno sigue con el
+        # siguiente de la lista. Para los de la nube, «sin conexion» sigue sin saltar (suele ser la red de la PC, no el modelo).
+        local_down = friendly.code == "MODELO-SIN-CONEXION" and _is_local(model)
+        if friendly.code not in TRIGGER_CODES and not local_down:
             return False
         until = self._pauses.pause(model, self._pause_seconds)
         if friendly.code == "MODELO-LIMITE-USUARIO" and self._catalog:

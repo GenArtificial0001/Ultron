@@ -37,6 +37,7 @@ from dotenv import dotenv_values
 from openai import OpenAI
 
 from app.config import BASE_DIR, get_settings
+from app.llm import local_ai
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ ANTHROPIC_VERSION = "2023-06-01"
 MODELS_TTL_SECONDS = 300
 # Modelos que no sirven para chatear: se esconden de la lista (REQ-003).
 _NOT_CHAT = (
-    "embedding", "tts", "whisper", "transcribe", "image", "imagen", "veo", "guard", "moderation",
+    "embed", "tts", "whisper", "transcribe", "image", "imagen", "veo", "guard", "moderation",
     "audio", "aqa", "orpheus", "dall-e", "sora", "realtime", "live", "learnlm", "robotics",
     # Gemini (medido 2026-09-27): musica, imagenes, agentes de investigacion y variantes especiales.
     "lyria", "nano-banana", "deep-research", "antigravity", "computer-use", "customtools", "safeguard",
@@ -90,6 +91,8 @@ class ProviderSpec:
     suggest: Callable[[list[str]], list[str]] = field(default=lambda ids: ids[:4])
     # Modelos gratuitos dentro de un proveedor pago (OpenRouter: sufijo ":free").
     free_model: Callable[[str], bool] = field(default=lambda model: False)
+    # spec ia-local: motor en la propia PC (Ollama, LM Studio): sin clave, se detecta solo y nunca es «gratis con entrenamiento».
+    local: bool = False
 
 
 KNOWN: dict[str, ProviderSpec] = {
@@ -118,8 +121,23 @@ KNOWN: dict[str, ProviderSpec] = {
             "openai", "OpenAI", "https://api.openai.com/v1", ("OPENAI_API_KEY",),
             suggest=lambda ids: [i for i in ids if i.startswith("gpt-")][:4] or ids[:4],
         ),
+        # spec ia-local REQ-001: despues de los de la nube (el selector los muestra abajo). Sin clave: aparecen si responden.
+        ProviderSpec(
+            "ollama", local_ai.BY_ID["ollama"].label, local_ai.BY_ID["ollama"].default_url, (), local=True,
+            suggest=lambda ids: ids[:6],
+        ),
+        ProviderSpec(
+            "lmstudio", local_ai.BY_ID["lmstudio"].label, local_ai.BY_ID["lmstudio"].default_url, (), local=True,
+            suggest=lambda ids: ids[:6],
+        ),
     )
 }
+# spec ia-local: los motores locales no usan clave, pero la libreria de OpenAI exige una.
+LOCAL_API_KEY = "local"
+# REQ-006: la primera respuesta de un modelo local puede tardar mientras el motor lo carga en memoria (medido: 37 a 53 s en una PC
+# sin placa de video). Para los de la nube no cambia nada.
+LOCAL_TIMEOUT_SECONDS = 180.0
+LOCAL_LIST_TIMEOUT_SECONDS = 10.0
 CUSTOM_ID = "custom"
 PRINCIPAL_ID = "principal"
 PREFIXES = (*KNOWN, CUSTOM_ID, PRINCIPAL_ID)
@@ -135,6 +153,9 @@ class ActiveProvider:
     anthropic: bool
     # Solo el proveedor principal: `LLM_MODELS`, si esta completa (REQ-007).
     fixed_models: tuple[str, ...] = ()
+    # spec ia-local: motor en esta PC (`local`) y si su direccion es de OTRA maquina (`remote`, REQ-005: ahi lo enviado si sale).
+    local: bool = False
+    remote: bool = False
 
     @property
     def headers(self) -> dict[str, str] | None:
@@ -209,6 +230,11 @@ def active_providers() -> dict[str, ActiveProvider]:
             result[spec.id] = ActiveProvider(spec.id, spec.label, spec.base_url, key, spec.free, spec.anthropic, fixed)
         elif principal is not None and principal.id == spec.id:
             result[spec.id] = principal
+    # spec ia-local REQ-001/002: los motores locales que hoy responden (con tope y memoria en `local_ai`). Apagados, no aparecen.
+    for engine, url in local_ai.detected(env_value):
+        result[engine.id] = ActiveProvider(
+            engine.id, engine.label, url, LOCAL_API_KEY, False, False, local=True, remote=not local_ai.is_on_this_pc(url)
+        )
     custom_key, custom_url = env_value("CUSTOM_API_KEY"), env_value("CUSTOM_BASE_URL")
     if custom_key and custom_url:
         label = env_value("CUSTOM_LABEL") or _host_label(custom_url)
@@ -270,7 +296,25 @@ def display_name(model_id: str) -> str:
     if prefix in (PRINCIPAL_ID, CUSTOM_ID) or (has_principal() and prefix == principal_id()):
         return rest
     spec = KNOWN.get(prefix)
+    if spec is not None and spec.local:
+        return f"{rest} ({spec.label.replace(' (local)', ' local')})"  # «qwen3:4b (Ollama local)»
     return f"{rest} ({spec.label})" if spec is not None else model_id
+
+
+def is_local(model_id: str) -> bool:
+    """spec ia-local: True si el modelo es de un motor local (Ollama, LM Studio)."""
+    spec = KNOWN.get(provider_of(model_id) or "")
+    return bool(spec and spec.local)
+
+
+def _make_client(provider: ActiveProvider, listing: bool = False) -> OpenAI:
+    """El cliente de un proveedor. Los locales: clave de relleno, espera larga para la primera respuesta (REQ-006) y, si estan en
+    otra PC, su direccion va directo aunque haya proxy (un motor local nunca esta detras del proxy de la empresa)."""
+    if not provider.local:
+        return OpenAI(api_key=provider.api_key, base_url=provider.base_url, default_headers=provider.headers)
+    local_ai.ensure_direct(provider.base_url)
+    timeout = LOCAL_LIST_TIMEOUT_SECONDS if listing else LOCAL_TIMEOUT_SECONDS
+    return OpenAI(api_key=provider.api_key or LOCAL_API_KEY, base_url=provider.base_url, timeout=timeout)
 
 
 def is_free(provider_id: str | None, name: str) -> bool:
@@ -299,7 +343,7 @@ def client_for_provider(provider_id: str | None, force_refresh: bool = False, mo
     key = (provider.base_url, provider.api_key)
     with _CLIENTS_LOCK:
         if force_refresh or key not in _CLIENTS:
-            _CLIENTS[key] = OpenAI(api_key=provider.api_key, base_url=provider.base_url, default_headers=provider.headers)
+            _CLIENTS[key] = _make_client(provider)
         return _CLIENTS[key]
 
 
@@ -321,7 +365,7 @@ def provider_models(provider: ActiveProvider) -> list[str]:
     cached = _MODELS.get(key)
     if cached and time.monotonic() - cached[0] < MODELS_TTL_SECONDS:
         return list(cached[1])
-    client = OpenAI(api_key=provider.api_key, base_url=provider.base_url, default_headers=provider.headers)
+    client = _make_client(provider, listing=True)
     ids = [str(m.id).removeprefix("models/") for m in client.models.list()]
     models = chat_models(ids)
     _MODELS[key] = (time.monotonic(), models)
@@ -334,6 +378,7 @@ def suggested_models(provider: ActiveProvider, ids: list[str]) -> list[str]:
 
 
 def clear_caches() -> None:
+    local_ai.clear_caches()
     with _ENV_LOCK:
         _ENV_CACHE["mtime"] = None
     _MODELS.clear()

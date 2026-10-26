@@ -3,6 +3,25 @@
 Formato: una entrada por versión, lo más nuevo arriba. Subir `__version__` en
 `backend/app/version.py` y registrar acá cada vez que se toca `backend/app/` o `frontend/`.
 
+## 2.1.0 (2026-10-25) — IA local
+
+**Ollama y LM Studio aparecen solos** (spec `ia-local`). Con el motor abierto y un modelo descargado no hay que configurar nada:
+- **Selector:** «Ollama (local)» o «LM Studio (local)» aparece con sus modelos de chat (los de embeddings no se listan), marcados
+  «local» y con la **ventana de contexto real** con la que el motor cargó el modelo.
+- **Sin demoras:** un motor apagado nunca frena a ULTRON. Cada consulta tiene un tope de 1,5 s y su resultado se recuerda: 5 min si
+  responde y 30 s si no, así aparece solo poco después de abrirlo.
+- **Salto automático:** si el motor local se cae a mitad de un turno, cuenta como caída de ese modelo y el turno sigue con el próximo
+  de la lista.
+- **Espera:** la primera respuesta de un modelo local tiene espera larga, porque el motor lo carga en memoria, y el aviso de
+  «está tardando» sale a los 8 s.
+- **Motor en otra PC:** `OLLAMA_BASE_URL` / `LMSTUDIO_BASE_URL` apuntan a otra PC de la red y ULTRON avisa que lo que se le manda
+  sale de esta PC. `LOCAL_AI=off` apaga la búsqueda.
+- **Seguridad:** las direcciones se validan (`http(s)://host[:puerto]`, nunca con usuario y clave adentro) y los motores locales se
+  consultan siempre directo, sin el proxy.
+- **README:** «Conexión a LLMs» sin el paso manual `CUSTOM_*` para la IA local.
+- **Marca:** la barra lateral y la animación de arranque dicen **ULTRON** (decían VISION), y el logo de la «V» de Vision ya no
+  aparece al lado del título.
+
 ## 2.0.0 (2026-10-25) — ULTRON
 
 **Vision-Personal pasa a llamarse ULTRON** (spec `portar-desde-origen`) y trae todas las mejoras de la versión de origen hasta

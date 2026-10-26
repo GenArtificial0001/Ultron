@@ -1375,6 +1375,14 @@ def _valid_args_for(model_id: str) -> list[str]:
     return ["max_tokens"]
 
 
+def _local_context_window(provider: Any, name: str) -> int | None:
+    if provider is None or not getattr(provider, "local", False):
+        return None
+    from app.llm import local_ai  # import diferido: solo hace falta con un motor local
+
+    return local_ai.context_length(provider.id, provider.base_url, name)
+
+
 def _model_entry(model_id: str, provider: Any = None, free: bool = False) -> dict:
     provider_id, name = llm_providers.split_model(model_id)
     return {
@@ -1391,8 +1399,11 @@ def _model_entry(model_id: str, provider: Any = None, free: bool = False) -> dic
         # Los modelos actuales aceptan imagenes; si uno no, el chat lo explica
         # (MODELO-IMAGEN en app/friendly_errors.py).
         "supports_image_input": True,
-        # Ventana de contexto: solo si el proveedor la informa (spec ia-local); sin dato, `resolve_context_window` usa 200.000.
-        "context_window": None,
+        # Ventana de contexto: solo si el proveedor la informa (spec ia-local REQ-011: la del modelo CARGADO en el motor local);
+        # sin dato, `resolve_context_window` usa 200.000.
+        "context_window": _local_context_window(provider, name),
+        # spec ia-local: marca «local» en el selector (en lugar de «gratis»).
+        "local": bool(getattr(provider, "local", False)) if provider is not None else llm_providers.is_local(model_id),
         "secret_data_compliant": None,
     }
 
@@ -1445,6 +1456,13 @@ def _provider_catalog() -> tuple[list[dict], list[dict]]:
                 "visible": visible,
                 "suggested": suggested,
                 "error": error,
+                # spec ia-local REQ-005: un motor local en OTRA maquina: lo que se le manda sale de esta PC.
+                "local": provider.local,
+                "notice": (
+                    f"{provider.label} está en otra PC ({llm_providers._host_label(provider.base_url)}): lo que le mandás sale de esta PC."
+                    if provider.remote
+                    else None
+                ),
             }
         )
     return models, status
@@ -1519,9 +1537,15 @@ def get_providers() -> dict:
     missing = [
         {"id": spec.id, "label": spec.label, "key_names": list(spec.key_names), "free": spec.free}
         for spec in llm_providers.KNOWN.values()
-        if spec.id not in active
+        if spec.id not in active and not spec.local
     ]
-    return {"providers": status, "available": missing}
+    # spec ia-local: los motores locales no llevan clave; si no aparecen es porque no estan abiertos.
+    local_hint = (
+        "IA local: abrí Ollama o LM Studio con un modelo descargado y aparece sola (ver «Conexión a LLMs» en el README)."
+        if not any(s.get("local") for s in status)
+        else None
+    )
+    return {"providers": status, "available": missing, "local_hint": local_hint}
 
 
 class ProvidersRequest(BaseModel):

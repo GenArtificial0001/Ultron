@@ -1138,7 +1138,7 @@ function renderModelOptions(models) {
     idSpan.textContent = m.name || m.id;
     btn.appendChild(idSpan);
 
-    const sub = [m.free ? "gratis" : null, m.hosted_on_prem ? "on-prem" : null, (m.aliases || [])[0]]
+    const sub = [m.local ? "local" : null, m.free ? "gratis" : null, m.hosted_on_prem ? "on-prem" : null, (m.aliases || [])[0]]
       .filter(Boolean)
       .join(" · ");
     if (sub) {
@@ -2731,11 +2731,18 @@ function scheduleThinkingTip() {
 // tambien es del modelo), y se desarma apenas el modelo produce algo (texto, una tool-call, o -- REQ-005 de fix-detener-y-progreso-visible
 // -- el primer aviso `tool-writing` de que esta escribiendo los argumentos de una herramienta) o el turno termina.
 const SLOW_MODEL_NOTICE_MS = 30_000;
+// spec ia-local REQ-006: con un modelo LOCAL la primera respuesta puede tardar mientras el motor lo carga en memoria: se avisa antes
+// (8 s) y con otro texto, para que la persona no piense que se colgo.
+const LOCAL_MODEL_NOTICE_MS = 8_000;
+function isLocalModelId(modelId) {
+  return /^(ollama|lmstudio)\//.test(modelId || "");
+}
 let _slowModelTimer = null;
 let _slowModelNoticeEl = null;
 
 function armSlowModelNotice() {
   cancelSlowModelNotice();
+  const localModel = isLocalModelId(state.activeModel || state.selectedModel);
   _slowModelTimer = setTimeout(() => {
     _slowModelTimer = null;
     if (state.sending <= 0 || _slowModelNoticeEl) return;
@@ -2746,12 +2753,14 @@ function armSlowModelNotice() {
     note.setAttribute("role", "status");
     // REQ-005 (spec fix-detener-y-progreso-visible): no dice «sin responder» -- en el caso real el modelo SI estaba trabajando (escribia
     // un archivo de 15 KB como argumento de una herramienta). Solo dice lo que se sabe: que tarda mas de lo normal.
-    note.textContent = "⏳ El modelo está tardando más de lo normal (lleva más de 30 segundos). Podés esperar, o cambiar de modelo desde el selector de modelos y volver a enviar. No cambio nada por mi cuenta.";
+    note.textContent = localModel
+      ? "⏳ Cargando el modelo local en memoria: la primera respuesta puede tardar (hasta un par de minutos sin placa de video). Las siguientes son más rápidas."
+      : "⏳ El modelo está tardando más de lo normal (lleva más de 30 segundos). Podés esperar, o cambiar de modelo desde el selector de modelos y volver a enviar. No cambio nada por mi cuenta.";
     wrap.appendChild(note);
     messagesEl.appendChild(wrap);
     _slowModelNoticeEl = wrap;
     messagesEl.scrollTop = messagesEl.scrollHeight;
-  }, SLOW_MODEL_NOTICE_MS);
+  }, localModel ? LOCAL_MODEL_NOTICE_MS : SLOW_MODEL_NOTICE_MS);
 }
 
 function cancelSlowModelNotice() {
@@ -11737,6 +11746,13 @@ function renderProviders(data) {
     const name = document.createElement("span");
     name.className = "provider-card-name";
     name.textContent = provider.label + (provider.principal ? " (principal)" : "") + (provider.free ? " · gratis" : "");
+    // spec ia-local REQ-005: un motor local en otra PC lo avisa (lo que se le manda sale de esta PC).
+    if (provider.notice) {
+      const notice = document.createElement("div");
+      notice.className = "settings-hint";
+      notice.textContent = provider.notice;
+      card.appendChild(notice);
+    }
     const stateEl = document.createElement("span");
     stateEl.className = "provider-card-state" + (provider.error ? " error" : "");
     stateEl.textContent = provider.error
@@ -11785,9 +11801,10 @@ function renderProviders(data) {
   const available = (data.available || []).map(
     (p) => `${p.label}${p.free ? " (gratis)" : ""}: ${p.key_names.join(" o ")}`,
   );
-  cfgProvidersAvailableEl.textContent = available.length
-    ? `Para sumar otro, poné su clave en el .env — ${available.join(" · ")}.`
-    : "";
+  cfgProvidersAvailableEl.textContent = [
+    available.length ? `Para sumar otro, poné su clave en el .env — ${available.join(" · ")}.` : "",
+    data.local_hint || "",  // spec ia-local: los motores locales aparecen solos al abrirlos
+  ].filter(Boolean).join(" ");
 }
 
 cfgProvidersSaveEl.addEventListener("click", async () => {

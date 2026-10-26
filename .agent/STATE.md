@@ -1,6 +1,6 @@
 # ESTADO ACTUAL (ULTRON)
 
-Última actualización: 2026-10-25 16:45 (Claude Code, modo de desarrollo automático autorizado por el usuario: «repara y arregla
+Última actualización: 2026-10-25 23:30 (Claude Code, modo de desarrollo automático autorizado por el usuario: «repara y arregla
 todo... sin mi decisión hasta llegar al objetivo planificado... sin romper nada de lo que ya funciona»).
 
 **Si una sesión se corta, retomar desde acá:** leé este archivo, después `git status` y `git log --oneline -5` en
@@ -54,6 +54,18 @@ antes de seguir.
   - `app/llm/local_ai.py`, el módulo de `ia-local`, escrito y en el índice de git pero SIN conectar todavía a `providers.py`.
 - **Corriendo:** cobertura con orden aleatorio (`u2_cov2.txt`). Si sale verde: commit, `git branch -f dev ultron-2.0`
   (fast-forward) y push de las dos ramas.
+
+## 2.1.0 (`ia-local`) terminada (2026-10-25 noche)
+- **Commits:** 2.0.0 = `cc36a56`. 2.1.0 = el commit siguiente en `ultron-2.0`, con `dev` llevado a ese commit (fast-forward);
+  las dos ramas en `origin`. `main` sigue en 1.0.0.
+- **Batería en verde:**
+  - sin e2e: 4.784 ok y 0 fallos;
+  - los 51 e2e en verde (`session_visibility` tuvo un fallo intermitente con la PC cargada y repetido dio 21/21);
+  - guardián, qa_battery y `test_marca_ultron`.
+- **Prueba con el Ollama real:** detección, chat, herramienta y ventana de 16.384 (ver `specs/ia-local/progress.md`).
+- **Pedido del usuario:** la marca dice ULTRON y el logo de la «V» está vacío.
+- **Falta:** REQ-011 de `portar-desde-origen` (renombrar la carpeta a `C:\Proyectos\Ultron` y actualizar la tarea programada
+  `status-vision`); después, `portar-desde-origen` en DONE.
 
 ## En curso (histórico)
 - **e2e completos:** salida en `u2_e2e.txt`. Ya corregidos en los tests:

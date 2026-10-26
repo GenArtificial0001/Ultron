@@ -73,6 +73,7 @@
     {"slug": "credenciales-clave-local", "tokens": ["test_new_install_can_save_credentials_and_generates_its_own_key"]},
     {"slug": "varios-proveedores", "tokens": ["test_each_key_in_the_env_enables_its_provider_with_its_address", "test_out_of_credit_pauses_the_whole_provider_and_jumps_to_another", "test_free_providers_are_hidden_until_the_user_confirms", "test_the_list_starts_empty"]},
     {"slug": "dictado-motivo-real", "tokens": ["test_voice_modes_explain_that_dictation_is_not_configured"]},
-    {"slug": "claude-parametros-por-modelo", "tokens": ["test_anthropic_models_only_get_the_sampling_params_they_accept"]}
+    {"slug": "claude-parametros-por-modelo", "tokens": ["test_anthropic_models_only_get_the_sampling_params_they_accept"]},
+    {"slug": "ia-local", "tokens": ["test_a_running_ollama_shows_up_by_itself_with_its_chat_models", "test_a_stopped_engine_costs_at_most_the_probe_and_then_is_remembered", "test_a_stopped_local_engine_is_a_fall_that_jumps_to_the_next_model", "test_the_probe_never_goes_through_the_company_proxy", "test_the_window_of_a_loaded_model_comes_from_the_engine"]}
   ]
 }

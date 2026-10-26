@@ -95,16 +95,27 @@ Core Ultra 5 238V con gráfica integrada Arc, 32 GB de RAM, sin placa de video d
    - **Gráfica integrada:** Ollama la detecta pero la descarta si no se lo pedís. En la PC de prueba, la respuesta en caliente
      bajó de 24,8 s a **9,4 s** y una llamada con herramienta de 150 s a **32 s**.
 5. **Comprobá que responde**: abrí http://127.0.0.1:11434/v1/models en el navegador. Tiene que listar el modelo.
-6. **Conectalo a ULTRON**. Hasta que llegue la detección automática (spec `ia-local`, en desarrollo), se carga como «otro
-   compatible» en el `.env`:
-   ```
-   CUSTOM_BASE_URL=http://127.0.0.1:11434/v1
-   CUSTOM_API_KEY=local
-   CUSTOM_LABEL=Ollama (local)
-   ```
+6. **Listo: no hay que configurar nada.** Con Ollama abierto, ULTRON lo encuentra solo. En el selector de modelos aparece
+   «Ollama (local)», con sus modelos de chat marcados «local». Los de embeddings no se listan.
+   - Si cerrás Ollama, desaparece del selector en unos minutos. Cuando lo volvés a abrir, aparece en unos 30 s.
+   - Un motor apagado nunca frena a ULTRON: la consulta tiene un tope de 1,5 s y su resultado se recuerda.
+   - El selector muestra la **ventana de contexto real** con la que Ollama cargó el modelo (la columna CONTEXT de `ollama ps`).
+     Si dice 4.096, hacé el paso 4.
+   - Si el motor local se cae a mitad de un turno y tenés el salto automático, sigue con el próximo modelo de la lista.
 
-**LM Studio** (https://lmstudio.ai) funciona igual: activá su servidor local (pestaña *Developer*) y usá
-`CUSTOM_BASE_URL=http://127.0.0.1:1234/v1`.
+**LM Studio** (https://lmstudio.ai) funciona igual: activá su servidor local (pestaña *Developer*, puerto 1234) y aparece solo
+como «LM Studio (local)».
+
+**Opcional, en el `.env`:**
+
+| Variable | Para qué |
+|---|---|
+| `OLLAMA_BASE_URL=http://192.168.0.20:11434/v1` | Ollama en otra PC de tu red, o en otro puerto. ULTRON avisa que lo que le mandás sale de esta PC. |
+| `LMSTUDIO_BASE_URL=http://127.0.0.1:1234/v1` | Lo mismo para LM Studio. |
+| `LOCAL_AI=off` | No buscar motores locales. |
+
+Las direcciones deben ser `http(s)://host[:puerto]`. Una dirección con usuario y clave adentro se rechaza, y se usa la de fábrica.
+Los motores locales se consultan siempre directo, sin pasar por el proxy.
 
 ### Si algo falla con el LLM
 

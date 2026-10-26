@@ -13,7 +13,7 @@
 
 import { initVoiceEye, destroyVoiceEye } from "./voice-eye.js";
 
-const TITLE_TEXT = "VISION";
+const TITLE_TEXT = "ULTRON";
 const AUTO_ENTER_TIMEOUT_MS = 5000; // REQ-004
 const TRANSITION_DURATION_MS = 1000; // REQ-003: ~0.8-1.2s total confirmado en la spec
 
@@ -50,7 +50,7 @@ function playClickSound() {
 }
 
 /**
- * REQ-001: anima el titulo "VISION" letra por letra + la linea decorativa
+ * REQ-001: anima el titulo "ULTRON" letra por letra + la linea decorativa
  * debajo, portado de _mockup_jarvis_animation.html (ya validado
  * visualmente por el usuario para el modo reunion).
  */

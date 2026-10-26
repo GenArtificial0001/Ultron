@@ -1,6 +1,6 @@
 ---
 feature: ia-local
-status: APPROVED       # NEW | IN_PROGRESS | PENDING_APPROVAL | APPROVED | IN_DEVELOPMENT | DONE
+status: DONE           # NEW | IN_PROGRESS | PENDING_APPROVAL | APPROVED | IN_DEVELOPMENT | DONE
 created: 2026-10-25
 last_updated: 2026-10-25
 approved_on: 2026-10-25   # aprobada junto con portar-desde-origen; se construye despues de la base 2.0

@@ -102,10 +102,17 @@ _SECRET_PREFIXES = (
     "CUSTOM_",
     "FISH_",
     "ELEVENLABS_",
+    # spec ia-local: direcciones de los motores locales y su interruptor.
+    "OLLAMA_",
+    "LMSTUDIO_",
+    "LOCAL_AI",
 )
 for _name in list(os.environ):
     if _name.upper().startswith(_SECRET_PREFIXES):
         del os.environ[_name]
+# spec ia-local REQ-008: la suite NUNCA busca un Ollama o LM Studio de verdad (si la PC tiene uno abierto, los resultados cambiarian).
+# Los tests de `test_ia_local.py` la prenden apuntando a un servidor falso.
+os.environ["LOCAL_AI"] = "off"
 
 if str(_BACKEND_DIR) not in sys.path:  # `import app` sin depender del cwd
     sys.path.insert(0, str(_BACKEND_DIR))
