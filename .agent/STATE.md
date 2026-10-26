@@ -66,6 +66,9 @@ antes de seguir.
 - **Pedido del usuario:** la marca dice ULTRON y el logo de la «V» está vacío.
 - **Falta:** REQ-011 de `portar-desde-origen` (renombrar la carpeta a `C:\Proyectos\Ultron` y actualizar la tarea programada
   `status-vision`); después, `portar-desde-origen` en DONE.
+  - Intentado el 2026-10-25: Windows no dejó renombrar porque OpenCode (del usuario) tiene la carpeta abierta. No se cierra
+    nada del usuario: se renombra cuando él cierre OpenCode.
+  - Ya revisado que el `.venv` sigue andando si se mueve (se usa `python -m`) y que no hay worktrees extra.
 
 ## En curso (histórico)
 - **e2e completos:** salida en `u2_e2e.txt`. Ya corregidos en los tests:
