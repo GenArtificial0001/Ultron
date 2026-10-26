@@ -1,11 +1,19 @@
 # ESTADO ACTUAL (ULTRON)
 
-Última actualización: 2026-10-25 23:30 (Claude Code, modo de desarrollo automático autorizado por el usuario: «repara y arregla
+Última actualización: 2026-10-26 (Claude Code, modo de desarrollo automático autorizado por el usuario: «repara y arregla
 todo... sin mi decisión hasta llegar al objetivo planificado... sin romper nada de lo que ya funciona»).
 
 **Si una sesión se corta, retomar desde acá:** leé este archivo, después `git status` y `git log --oneline -5` en
-`C:\Proyectos\Vision-personal` (rama `ultron-2.0`). Lo que está sin commitear es trabajo a medias: verificalo con la batería
-antes de seguir.
+`C:\Proyectos\Ultron` (rama `ultron-2.0`; hasta el 2026-10-26 la carpeta se llamaba `Vision-personal`). Lo que está sin
+commitear es trabajo a medias: verificalo con la batería antes de seguir. Usá siempre `backend\.venv\Scripts\python.exe -m …`:
+los `.exe` del entorno virtual (pip, pytest) quedaron apuntando a la ruta vieja.
+
+## Hoy (2026-10-26): 2.1.1, IA local sin internet
+- **Carpeta renombrada** a `C:\Proyectos\Ultron` y tarea programada `status-vision` actualizada (REQ-011 de portar-desde-origen).
+- **Caso real del usuario:** ULTRON sin internet con Ollama no respondía nada. Arreglado: el aviso de contexto corto
+  (REQ-011 de ia-local), la compactación y el PDF al proveedor del modelo, la respuesta vacía explicada y el LSP como
+  `python -m pylsp`. Detalle en `specs/ia-local/progress.md`.
+- **Pruebas:** `test_ia_local_sin_internet.py` 14/14 y 9 de 9 mutantes detectados. Batería completa: ver `u2_sin_internet.txt`.
 
 ## Objetivo planificado
 1. **ULTRON 2.0** (spec `portar-desde-origen`, IN_DEVELOPMENT): las mejoras de la versión de origen 0.36.2 sobre Personal 1.1.0,
@@ -19,7 +27,7 @@ antes de seguir.
    actualizar la tarea programada `status-vision`.
 
 ## Dónde está cada cosa
-- Repo: `C:\Proyectos\Vision-personal`, rama `ultron-2.0`. Remotos: `origin` = Ultron (SSH), `vision` = el repo viejo.
+- Repo: `C:\Proyectos\Ultron` (antes `Vision-personal`), rama `ultron-2.0`. Remotos: `origin` = Ultron (SSH), `vision` = el repo viejo.
   Identidad local: GenArtificial0001.
 - Punto de control commiteado: `9dc570c` (merge + limpieza + tests adaptados). Todo lo posterior está sin commitear: renombre,
   migración, README, CHANGELOG 2.0.0 y specs.
@@ -64,11 +72,9 @@ antes de seguir.
   - guardián, qa_battery y `test_marca_ultron`.
 - **Prueba con el Ollama real:** detección, chat, herramienta y ventana de 16.384 (ver `specs/ia-local/progress.md`).
 - **Pedido del usuario:** la marca dice ULTRON y el logo de la «V» está vacío.
-- **Falta:** REQ-011 de `portar-desde-origen` (renombrar la carpeta a `C:\Proyectos\Ultron` y actualizar la tarea programada
-  `status-vision`); después, `portar-desde-origen` en DONE.
-  - Intentado el 2026-10-25: Windows no dejó renombrar porque OpenCode (del usuario) tiene la carpeta abierta. No se cierra
-    nada del usuario: se renombra cuando él cierre OpenCode.
-  - Ya revisado que el `.venv` sigue andando si se mueve (se usa `python -m`) y que no hay worktrees extra.
+- **REQ-011 de `portar-desde-origen`: hecho el 2026-10-26.** El 2026-10-25 Windows no dejó renombrar porque OpenCode tenía la
+  carpeta abierta. El usuario lo cerró, se renombró a `C:\Proyectos\Ultron` y se actualizó la tarea programada
+  `status-vision`. `portar-desde-origen` queda en DONE.
 
 ## En curso (histórico)
 - **e2e completos:** salida en `u2_e2e.txt`. Ya corregidos en los tests:

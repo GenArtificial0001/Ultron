@@ -46,6 +46,13 @@ def _find_pylsp_command() -> list[str] | None:
     # mismo con un modo interno que ejecuta pylsp sobre stdio.
     if getattr(sys, "frozen", False):
         return [sys.executable, "--vision-pylsp"]
+    # Como modulo del MISMO Python, antes que `pylsp.exe`. Bug real 2026-10-26: al renombrar la carpeta del proyecto, el
+    # `pylsp.exe` del entorno virtual seguia apuntando al Python de la ruta vieja, no arrancaba y los diagnosticos salian
+    # vacios en silencio. `python -m pylsp` no depende de rutas guardadas.
+    import importlib.util
+
+    if importlib.util.find_spec("pylsp") is not None:
+        return [sys.executable, "-m", "pylsp"]
     exe_dir = Path(sys.executable).parent
     candidate = exe_dir / ("pylsp.exe" if sys.platform == "win32" else "pylsp")
     if candidate.exists():

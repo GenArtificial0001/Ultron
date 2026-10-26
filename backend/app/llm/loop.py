@@ -47,7 +47,13 @@ from app.browser_workspace import (
     get_or_create_browser_dir,
 )
 from app.config import get_settings
-from app.friendly_errors import FriendlyError, describe_model_error, describe_step_limit
+from app.friendly_errors import (
+    FriendlyError,
+    describe_empty_answer,
+    describe_local_context_too_short,
+    describe_model_error,
+    describe_step_limit,
+)
 from app.llm import model_fallback
 from app.llm import providers as llm_providers
 from app.llm.client import get_client
@@ -58,7 +64,7 @@ from app.persistence import service as persistence
 from app.project_context import build_project_context_prompt
 from app.session.events import SessionState
 from app.tech_report import LEVEL_DETAILED, LiveNarrator, describe_call, normalize_level
-from app.token_estimate import estimate_tokens
+from app.token_estimate import CHARS_PER_TOKEN_ESTIMATE, estimate_tokens
 from app.tool_timings import describe_operation, get_budget_ms, record_duration
 from app.tools import get_registry
 from app.tools.base import CURRENT_TOOL_CALL_ID
@@ -1265,6 +1271,38 @@ async def _compaction_events(
         yield {"type": "system-note", "data": {"text": _compaction_notice("failed", report)}}
 
 
+# spec ia-local REQ-011: lugar que se deja libre para la respuesta. Un pedido que llena la ventana entera tampoco sirve: el
+# motor no tiene donde escribir.
+LOCAL_ANSWER_RESERVE_TOKENS = 1_024
+
+
+def _local_context_problem(
+    model_id: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None
+) -> FriendlyError | None:
+    """spec ia-local REQ-011: si el modelo es local y el pedido no entra en la ventana con la que el motor lo tiene cargado,
+    el aviso para el chat (en lugar de mandarlo y que el motor recorte el principio en silencio). None si entra, si no es
+    local, si el motor esta apagado (el pedido real da el error de siempre y el salto sigue) o si la ventana no se sabe.
+
+    Sincronica (consulta al motor y, si hace falta, carga el modelo): llamar con `asyncio.to_thread`. El pedido se mide con
+    las herramientas incluidas, que en ULTRON son la parte mas grande (antes de cualquier mensaje)."""
+    if not llm_providers.is_local(model_id):
+        return None
+    provider = llm_providers.active_providers().get(llm_providers.provider_of(model_id) or "")
+    if provider is None:
+        return None
+    from app.llm import local_ai  # import diferido: solo hace falta con un motor local
+
+    name = llm_providers.api_model(model_id)
+    window = local_ai.loaded_context_length(provider.id, provider.base_url, name)
+    if window is None:
+        return None
+    need = estimate_tokens(messages) + len(json.dumps(tools or [], ensure_ascii=False)) // CHARS_PER_TOKEN_ESTIMATE
+    if need + LOCAL_ANSWER_RESERVE_TOKENS <= window:
+        return None
+    logger.warning("Contexto corto en %s: ventana %s, pedido estimado %s tokens", model_id, window, need)
+    return describe_local_context_too_short(provider.label, name, window, need, provider.id)
+
+
 async def _compact_history_best_effort(
     session: SessionState, session_id: str, active_model: str, picker: model_fallback.TurnModelPicker | None
 ) -> bool:
@@ -1428,6 +1466,19 @@ async def _run_turn_impl(
     # respondia entero aunque el usuario lo hubiera borrado.
     session.stop_requested = user_message_id is not None and user_message_id in getattr(session, "discard_turn_ids", ())
     session.edit_pending_text = None
+
+    # spec ia-local REQ-011: con un modelo local, ANTES de compactar se mira si al menos las instrucciones, las herramientas y
+    # este mensaje entran en su ventana. Si no entran, compactar no lo arregla (bug real 2026-10-26: se intento resumir para
+    # 4.096 tokens un pedido de 11.000 que era casi todo instrucciones) y mandarlo da una respuesta vacia: se avisa y se corta.
+    first_model = picker.first_available() if picker is not None else active_model
+    if llm_providers.is_local(first_model):
+        minimal = [m for m in session.messages if m.get("role") == "system"] + session.messages[-1:]
+        problem = await asyncio.to_thread(
+            _local_context_problem, first_model, minimal, registry.definitions(exclude_dangerous=session.mode == "plan")
+        )
+        if problem is not None:
+            yield _friendly_event(problem, first_model)
+            return
 
     async for notice in _compaction_events(session, session_id, active_model, picker):
         yield notice
@@ -1594,6 +1645,16 @@ async def _run_turn_impl(
         # 2 min 30 s despues de empezar a responder). Son dos reintentos independientes -- por eso banderas propias en
         # vez del `range(2)` de antes --: el del corte NO pide token nuevo y es con el MISMO modelo (no pasa por el
         # salto automatico: un corte no es un limite ni una caida del modelo, ver model_fallback.TRIGGER_CODES).
+        # spec ia-local REQ-011: el pedido de ESTE paso (con los resultados de las herramientas de los pasos anteriores) tiene
+        # que entrar en la ventana del modelo local. La ventana queda recordada (CONTEXT_TTL): esto no consulta al motor cada paso.
+        if llm_providers.is_local(active_model):
+            step_messages = history_for_model(session.messages, model_fallback.resolve(active_model, catalog)[0])
+            step_tools = None if final_step else registry.definitions(exclude_dangerous=session.mode == "plan")
+            problem = await asyncio.to_thread(_local_context_problem, active_model, step_messages, step_tools)
+            if problem is not None:
+                yield _friendly_event(problem, active_model)
+                return
+
         refresh_token = False
         retried_401 = False
         retried_cut = False
@@ -1938,6 +1999,17 @@ async def _run_turn_impl(
                             "llegó a hacerlo. Volvé a enviar tu pedido, o pedilo de "
                             "forma más concreta (por ejemplo, qué dato o archivo "
                             "necesitás)."
+                        )
+                    },
+                }
+            if not assistant_text.strip() and not empty_promise:
+                # Bug real 2026-10-26: qwen3 en Ollama, con el pedido recortado, «penso» 3 minutos y termino sin escribir
+                # nada. El chat quedaba en blanco y el usuario no sabia que habia pasado.
+                yield {
+                    "type": "system-note",
+                    "data": {
+                        "text": describe_empty_answer(
+                            llm_providers.display_name(active_model), llm_providers.is_local(active_model)
                         )
                     },
                 }

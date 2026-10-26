@@ -209,9 +209,12 @@ def test_stop_cuts_a_running_command_and_its_children_at_once(tmp_path, heartbea
 def test_timeout_closes_the_whole_process_tree(tmp_path, heartbeat):
     command, beat = heartbeat
     started = time.monotonic()
-    out = run({"command": command, "workdir": str(tmp_path), "timeout": 3})
-    assert out.startswith("Error: el comando excedio el timeout de 3s")
-    assert time.monotonic() - started < 20
+    # 8 s y no 3 (medido 2026-10-26): con el antivirus revisando cada proceso nuevo, el python nieto a veces tardaba mas
+    # de 3 s en arrancar. El timeout lo cerraba antes de su primer latido y el test fallaba con «no arranco», aunque el
+    # arbol se cerraba bien. Con 8 s el nieto llega a latir y el test prueba lo que tiene que probar: que el timeout lo cierra.
+    out = run({"command": command, "workdir": str(tmp_path), "timeout": 8})
+    assert out.startswith("Error: el comando excedio el timeout de 8s")
+    assert time.monotonic() - started < 25
     wait_for_beats(beat, count=1, limit=1)
     assert not still_beating(beat)
 

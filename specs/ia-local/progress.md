@@ -59,3 +59,40 @@ activada), con el código de ULTRON y sin configurar nada:
 **Pedido del usuario durante esta versión:** la barra lateral dice ULTRON (decía VISION) y el logo de la «V» de al lado quedó
 vacío. La animación de arranque también escribe ULTRON. Lo cubre `tests/test_marca_ultron.py`, que falló antes del cambio y pasa
 después.
+
+## 2026-10-26: arreglo de un caso real sin internet (versión 2.1.1)
+
+**Qué vio el usuario:** abrió ULTRON sin internet, con Ollama y `qwen3:4b` en su PC, y no respondió nada.
+
+**Diagnóstico, con los logs de ULTRON y de Ollama:**
+1. **Contexto corto.** Ollama corría con su ventana de fábrica: en el Windows del usuario no estaban `OLLAMA_CONTEXT_LENGTH`
+   ni `OLLAMA_IGPU_ENABLE`. Su log dice `truncating input prompt limit=2050 prompt=11078`: recortó en silencio el pedido de
+   ULTRON. `qwen3:4b` «pensó» 186 s y terminó sin escribir nada (`ttft_ms: null`), y el chat quedó en blanco.
+2. **Compactación al proveedor equivocado.** Después, al compactar, `compaction._summarize` llamaba a `call_with_token_retry`
+   sin `client_getter`. Con eso el pedido iba al proveedor principal, en la nube, con el nombre `ollama/qwen3:4b`. Sin internet
+   falló, el salto automático le echó la culpa a Ollama y lo pausó 10 minutos: los «hola» siguientes no recibieron nada.
+   `pdf_vision.complete_with_proveedor` tenía el mismo error.
+
+**Arreglo:**
+- **`client.call_model_with_token_retry(model, fn)`:** el cliente del proveedor del modelo, con el nombre que ese proveedor
+  entiende. Lo usan la compactación y la lectura de PDF.
+- **REQ-011, que había quedado incompleto** (solo se mostraba la ventana en el selector):
+  - `local_ai.loaded_context_length` carga el modelo con `POST /api/generate` sin `prompt` si Ollama todavía no lo cargó, y
+    lee su ventana.
+  - `loop._local_context_problem` mide el pedido con las herramientas incluidas y una reserva de 1.024 tokens para la respuesta.
+  - Si no entra, el aviso `MODELO-LOCAL-CONTEXTO-CORTO` lleva el arreglo. No se manda el pedido recortado y no se pausa el modelo.
+  - El chequeo se hace al empezar el turno (antes de intentar compactar) y en cada paso.
+- **Respuesta vacía:** una nota del sistema explica que el modelo terminó sin escribir nada, con la pista del contexto si es local.
+- **LSP:** se lanza como `python -m pylsp`. Al renombrar la carpeta a `C:\Proyectos\Ultron`, el `pylsp.exe` del entorno virtual
+  quedó apuntando a la ruta vieja y la batería mostró 6 fallos en `test_lsp_recovers`.
+
+**Pruebas:**
+- `tests/test_ia_local_sin_internet.py`: 14 tests contra un Ollama falso por HTTP, con un proveedor principal «en la nube» sin
+  conexión, como en la PC del usuario. Con el código anterior fallaban 11 de 12; el que pasaba es el de «con contexto suficiente
+  responde como siempre», que debe pasar en los dos casos.
+- Más un test del LSP como módulo.
+- Mutantes: 9 de 9 detectados. Dos sobrevivieron al principio y obligaron a dos tests más:
+  - el chequeo del principio del turno y el de cada paso se cubrían entre sí;
+  - el principal de los tests era Ollama, así que el cliente equivocado no se notaba.
+- **Contra el Ollama real del usuario** (configuración de fábrica, modelo sin cargar): ULTRON lo cargó en 11,9 s, leyó 4.096 y
+  dio el aviso con el arreglo.

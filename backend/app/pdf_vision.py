@@ -171,10 +171,11 @@ def make_transcriber(
 def complete_with_proveedor(model: str, messages: list[dict[str, Any]]) -> str:
     """Llamada real (sincrona, sin streaming) al modelo activo via el proveedor de IA. Corre
     en el hilo de la tool `read`. Devuelve el texto de la respuesta."""
-    from app.llm.client import call_with_token_retry  # import diferido: evita ciclo
+    from app.llm.client import call_model_with_token_retry  # import diferido: evita ciclo
 
     # transcripcion-reintenta-token REQ-006: un 401 pide token nuevo y reintenta una vez.
-    resp = call_with_token_retry(
-        lambda client: client.chat.completions.create(model=model, messages=messages, stream=False)
+    # Con el cliente del proveedor de `model` (bug real 2026-10-26, ver `call_model_with_token_retry`).
+    resp = call_model_with_token_retry(
+        model, lambda client, name: client.chat.completions.create(model=name, messages=messages, stream=False)
     )
     return (resp.choices[0].message.content or "") if resp.choices else ""

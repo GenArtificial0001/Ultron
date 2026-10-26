@@ -581,6 +581,42 @@ def describe_all_models_paused(model: str, back_at: str) -> FriendlyError:
     )
 
 
+def _thousands(n: int) -> str:
+    return f"{n:,}".replace(",", ".")
+
+
+def describe_local_context_too_short(engine_label: str, model: str, window: int, need: int, engine_id: str) -> FriendlyError:
+    """spec ia-local REQ-011: el modelo local esta cargado con menos contexto que el pedido. Mandarlo igual hace que el motor
+    recorte el principio SIN avisar (instrucciones y herramientas incluidas) y responda sin sentido, o nada (caso real
+    2026-10-26: 4.096 de ventana, 11.078 tokens de pedido, 3 minutos «pensando» y ninguna respuesta)."""
+    if engine_id == "ollama":
+        fix = (
+            "Subí el contexto de Ollama: abrí una terminal, escribí «setx OLLAMA_CONTEXT_LENGTH 16384», cerrá Ollama desde "
+            "la bandeja (al lado del reloj) y volvé a abrirlo. Está explicado en el README, «Conexión a LLMs», paso 4."
+        )
+    else:
+        fix = (
+            "En LM Studio, volvé a cargar el modelo con un «Context Length» de 16384 o más (en la ventana de carga del "
+            "modelo) y reenviá tu mensaje."
+        )
+    return FriendlyError(
+        "MODELO-LOCAL-CONTEXTO-CORTO",
+        f"{engine_label} tiene cargado {model} con {_thousands(window)} tokens de contexto, y este pedido necesita unos "
+        f"{_thousands(need)}. Si lo mando así, el motor corta el principio sin avisar y la respuesta no sirve. {fix}",
+    )
+
+
+def describe_empty_answer(model: str, local: bool) -> str:
+    """El modelo termino el turno sin escribir nada ni usar herramientas. Antes el chat quedaba en blanco, sin explicacion."""
+    text = f"{model} terminó sin escribir ninguna respuesta. Reenviá tu mensaje o probá con otro modelo."
+    if local:
+        text += (
+            " Con un modelo local suele ser falta de contexto: revisá el paso 4 de «Conexión a LLMs» en el README"
+            " (OLLAMA_CONTEXT_LENGTH)."
+        )
+    return text
+
+
 def describe_task_needs_new_message(model: str) -> FriendlyError:
     """REQ-009: el unico disponible es Gemini y la tarea en curso la empezo otro
     modelo (Gemini exige una firma de pensamiento que los demas no generan)."""

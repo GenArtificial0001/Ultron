@@ -82,16 +82,17 @@ Core Ultra 5 238V con gráfica integrada Arc, 32 GB de RAM, sin placa de video d
    ollama pull qwen3:4b
    ```
    Con menos RAM: `qwen3:1.7b`. Con placa de video de 8 GB o más: `qwen3:8b`.
-4. **Subí el contexto y, si tu PC tiene gráfica integrada, activala.** Son dos variables de entorno de Windows. Después hay que
-   cerrar Ollama desde la bandeja y volver a abrirlo:
+4. **Subí el contexto (obligatorio) y, si tu PC tiene gráfica integrada, activala.** Son dos variables de entorno de Windows.
+   **Sin este paso la IA local no funciona con ULTRON.** Después hay que cerrar Ollama desde la bandeja y volver a abrirlo:
    ```bash
    setx OLLAMA_CONTEXT_LENGTH 16384
    ```
    ```bash
    setx OLLAMA_IGPU_ENABLE 1
    ```
-   - **Contexto:** Ollama arranca con 4.096 tokens. El prompt de ULTRON con sus herramientas no entra, y Ollama **recorta el
-     principio sin avisar**.
+   - **Contexto:** Ollama arranca con 4.096 tokens. El pedido de ULTRON con sus herramientas mide unos 11.000, y Ollama
+     **recorta el principio sin avisar**. Medido el 26/10/2026 sin internet: `qwen3:4b` «pensó» 3 minutos y no escribió nada.
+     Ahora ULTRON lo detecta antes de mandar el pedido y te dice qué hacer, pero solo responde cuando subís el contexto.
    - **Gráfica integrada:** Ollama la detecta pero la descarta si no se lo pedís. En la PC de prueba, la respuesta en caliente
      bajó de 24,8 s a **9,4 s** y una llamada con herramienta de 150 s a **32 s**.
 5. **Comprobá que responde**: abrí http://127.0.0.1:11434/v1/models en el navegador. Tiene que listar el modelo.
@@ -126,6 +127,9 @@ Los motores locales se consultan siempre directo, sin pasar por el proxy.
 | «<modelo> no admite herramientas» | Ese modelo solo sirve para conversar: elegí otro (en Ollama, `qwen3` o `llama3.1` admiten herramientas). |
 | La IA local tarda mucho en la primera respuesta | El motor carga el modelo en memoria (en la PC de prueba, 37 a 53 s). Las siguientes son más rápidas. Activá la gráfica integrada (paso 4). |
 | La IA local «se olvida» de lo que le pediste | El contexto está en 4.096: subilo (paso 4). |
+| «Ollama (local) tiene cargado … con 4.096 tokens de contexto» | Hacé el paso 4 (`setx OLLAMA_CONTEXT_LENGTH 16384`), cerrá Ollama desde la bandeja, abrilo de nuevo y reenviá tu mensaje. |
+| «… terminó sin escribir ninguna respuesta» | Reenviá el mensaje. Si el modelo es local, revisá el paso 4. |
+| Sin internet | Funciona solo con la IA local (B). Poné el modelo de Ollama primero en el selector o en la lista del salto automático. Los avisos de los proveedores en la nube («Connection error») son normales sin red. |
 | «La cuenta del servicio de inteligencia artificial se quedó sin crédito» | Cargá crédito o armá el salto automático con un gratuito o con la IA local. |
 
 ## Dictado y voz

@@ -288,3 +288,12 @@ def test_a_slow_starting_pylsp_still_gives_the_first_diagnostics(tmp_path):
 
     diags = run(go())
     assert [d["message"] for d in diags] == ["diagnostico del pylsp lento"]
+
+
+def test_pylsp_runs_as_a_module_of_the_same_python_so_moving_the_folder_never_breaks_it(monkeypatch):
+    """Bug real 2026-10-26: al renombrar la carpeta del proyecto, `pylsp.exe` del entorno virtual seguia apuntando al Python
+    de la ruta vieja y los diagnosticos salian vacios. Se lanza como `python -m pylsp`, sin rutas guardadas."""
+    import sys
+
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    assert lsp._find_pylsp_command() == [sys.executable, "-m", "pylsp"]

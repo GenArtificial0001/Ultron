@@ -181,6 +181,35 @@ def context_length(engine_id: str, url: str, model: str, now: Callable[[], float
     return value
 
 
+LOAD_TIMEOUT = 180.0  # cargar un modelo en memoria: 5 s medidos en la PC de prueba; con disco lento o sin GPU, mucho mas
+
+
+def _post_json(url: str, body: dict, timeout: float) -> object:
+    data = json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+    with _direct_opener().open(request, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
+
+
+def loaded_context_length(engine_id: str, url: str, model: str) -> int | None:
+    """REQ-011: la ventana con la que el motor va a correr el modelo, ANTES de mandarle el pedido.
+
+    Si Ollama todavia no lo cargo, `/api/ps` no lo lista y no hay forma de saberla: se carga con `POST /api/generate` sin
+    `prompt` (la forma documentada de cargarlo sin generar nada) y se vuelve a preguntar. La espera no se pierde: el pedido
+    real la pagaria igual. LM Studio carga los modelos recien al recibir el pedido; sin cargar, queda desconocida. Nunca lanza."""
+    value = context_length(engine_id, url, model)
+    if value is not None or engine_id != "ollama":
+        return value
+    try:
+        _post_json(f"{_root(url)}/api/generate", {"model": model}, LOAD_TIMEOUT)
+    except Exception:  # noqa: BLE001 -- si no se pudo cargar, el pedido real dara el error con su explicacion
+        logger.warning("No se pudo cargar %s en Ollama para leer su ventana de contexto", model, exc_info=True)
+        return None
+    with _LOCK:
+        _CONTEXT.pop((url, model), None)  # el «desconocida» de antes de cargarlo ya no vale
+    return context_length(engine_id, url, model)
+
+
 def ensure_direct(url: str) -> None:
     """Si hay proxy en el entorno, agrega el host del motor a `NO_PROXY` (httpx, el transporte del cliente de OpenAI, lo respeta).
     localhost ya va siempre directo (`config._apply_proxy`); esto cubre un motor en otra PC de la red."""

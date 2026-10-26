@@ -3,6 +3,25 @@
 Formato: una entrada por versión, lo más nuevo arriba. Subir `__version__` en
 `backend/app/version.py` y registrar acá cada vez que se toca `backend/app/` o `frontend/`.
 
+## 2.1.1 (2026-10-26) — IA local sin internet
+
+**Arreglo de un caso real:** ULTRON abierto sin internet, con Ollama y `qwen3:4b` en la PC, no respondía nada. Eran dos causas
+encadenadas:
+- **Contexto corto:** Ollama corría con su ventana de fábrica (4.096 tokens) y recortó en silencio el pedido de ULTRON (11.078
+  tokens, casi todo instrucciones y herramientas). `qwen3:4b` «pensó» 3 minutos y terminó sin escribir nada.
+  - Ahora, antes de mandar el pedido, ULTRON carga el modelo si hace falta, lee su ventana real y, si no entra, lo dice en el chat
+    con el arreglo (`setx OLLAMA_CONTEXT_LENGTH 16384`). No lo manda recortado y no pausa el modelo, que no está caído.
+  - El chequeo se hace al empezar el turno (antes de intentar compactar, que no lo arreglaría) y en cada paso.
+- **Compactación y lectura de PDF:** mandaban su pedido al proveedor principal en la nube, no al del modelo elegido. Sin internet
+  fallaba, el salto automático le echaba la culpa a Ollama y lo pausaba 10 minutos. Ahora van al proveedor del modelo, con el
+  nombre que ese proveedor entiende.
+- **Respuesta vacía:** si un modelo termina sin escribir nada, el chat lo explica en lugar de quedar en blanco.
+- **Carpeta del proyecto:** ahora es `C:\Proyectos\Ultron`.
+  - Al moverla, el `pylsp.exe` del entorno virtual quedó apuntando a la ruta vieja y los diagnósticos salían vacíos sin avisar.
+  - El LSP ahora se lanza como `python -m pylsp`, que no depende de rutas guardadas.
+- **README:** el paso 4 de la IA local (subir el contexto) es obligatorio, y la tabla de problemas suma el aviso nuevo y qué
+  pasa sin internet.
+
 ## 2.1.0 (2026-10-25) — IA local
 
 **Ollama y LM Studio aparecen solos** (spec `ia-local`). Con el motor abierto y un modelo descargado no hay que configurar nada:

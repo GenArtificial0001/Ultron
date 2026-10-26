@@ -1,6 +1,6 @@
 ---
 feature: portar-desde-origen
-status: IN_DEVELOPMENT       # NEW | IN_PROGRESS | PENDING_APPROVAL | APPROVED | IN_DEVELOPMENT | DONE
+status: DONE                 # NEW | IN_PROGRESS | PENDING_APPROVAL | APPROVED | IN_DEVELOPMENT | DONE
 created: 2026-10-25
 last_updated: 2026-10-25
 approved_on: 2026-10-25   # «APPROVED ... con lo recomendado: M365/Office y conectores apagados de fábrica, primero la base 2.0 y después ia-local»

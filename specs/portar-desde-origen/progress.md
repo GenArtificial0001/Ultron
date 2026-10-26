@@ -105,3 +105,11 @@ fábrica, primero la base 2.0 y después `ia-local`.
 
 - QA estática (`qa_battery.py`) OK.
 - e2e: en curso al escribir esto.
+
+## 2026-10-26: REQ-011 hecho, spec en DONE
+- **Carpeta del proyecto** renombrada a `C:\Proyectos\Ultron`. El 2026-10-25 Windows no dejó renombrarla porque OpenCode del
+  usuario la tenía abierta; se hizo cuando él lo cerró. La tarea programada `status-vision` lee la carpeta nueva.
+- **Efecto del renombre:** los `.exe` de `backend\.venv\Scripts` guardan la ruta del Python viejo.
+  - `pylsp.exe` dejó de arrancar y la batería dio 6 fallos en `test_lsp_recovers`.
+  - El LSP ahora se lanza como `python -m pylsp` (con test).
+  - El arranque (`Iniciar-Ultron.bat` y `launch_vision.py`) ya usaba `python.exe -m`, así que no se afectó.

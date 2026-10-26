@@ -134,3 +134,19 @@ def call_with_token_retry(
     except openai.AuthenticationError as exc:
         logger.warning("El proveedor de IA devolvio 401, reintentando con el cliente recreado: %s", exc)
         return fn(getter(force_refresh=True))
+
+
+def call_model_with_token_retry(model: str, fn: Callable[[OpenAI, str], _T]) -> _T:
+    """`call_with_token_retry` para UN modelo "proveedor/modelo": `fn(cliente, nombre)` recibe el cliente del proveedor de ese
+    modelo y el nombre que ese proveedor entiende (sin el prefijo de ULTRON).
+
+    Bug real 2026-10-26: la compactacion y la lectura de PDF llamaban `call_with_token_retry` sin `client_getter`. Con un
+    modelo de Ollama elegido, el pedido iba al proveedor PRINCIPAL (en la nube) con el nombre `ollama/qwen3:4b`. Sin internet
+    fallaba, el salto automatico le echaba la culpa a Ollama, que andaba bien, y lo pausaba: ULTRON no respondia nada."""
+    from app.llm import providers  # import diferido: providers usa la config de aca
+
+    name = providers.api_model(model)
+    return call_with_token_retry(
+        lambda client: fn(client, name),
+        lambda force_refresh=False: get_client(force_refresh=force_refresh, model=model),
+    )

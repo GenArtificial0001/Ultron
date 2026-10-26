@@ -105,17 +105,19 @@ Conversacion a resumir:
 
 
 async def _summarize(transcript: str, model: str) -> str:
-    from app.llm.client import call_with_token_retry  # import diferido: evita ciclo
+    from app.llm.client import call_model_with_token_retry  # import diferido: evita ciclo
 
     def _request() -> Any:
         # transcripcion-reintenta-token REQ-008: un 401 pide token nuevo y reintenta una vez (antes el resumen del
         # contexto fallaba y la conversacion seguia sin compactar hasta que se renovara el token a mano).
-        return call_with_token_retry(
-            lambda client: client.chat.completions.create(
-                model=model,
+        # Con el cliente del proveedor de `model` (bug real 2026-10-26, ver `call_model_with_token_retry`).
+        return call_model_with_token_retry(
+            model,
+            lambda client, name: client.chat.completions.create(
+                model=name,
                 messages=[{"role": "user", "content": _SUMMARY_PROMPT.format(transcript=transcript)}],
                 stream=False,
-            )
+            ),
         )
 
     response = await asyncio.to_thread(_request)
