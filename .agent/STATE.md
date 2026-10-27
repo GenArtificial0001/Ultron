@@ -13,7 +13,14 @@ los `.exe` del entorno virtual (pip, pytest) quedaron apuntando a la ruta vieja.
 - **Caso real del usuario:** ULTRON sin internet con Ollama no respondía nada. Arreglado: el aviso de contexto corto
   (REQ-011 de ia-local), la compactación y el PDF al proveedor del modelo, la respuesta vacía explicada y el LSP como
   `python -m pylsp`. Detalle en `specs/ia-local/progress.md`.
-- **Pruebas:** `test_ia_local_sin_internet.py` 14/14 y 9 de 9 mutantes detectados. Batería completa: ver `u2_sin_internet.txt`.
+- **Pruebas:**
+  - `test_ia_local_sin_internet.py` 14/14 y 9 de 9 mutantes detectados.
+  - Batería sin e2e: 4.801 ok y 1 fallo, `test_tool_bash::test_timeout_closes_the_whole_process_tree`. Era del test: el python
+    nieto tardaba más de 3 s en arrancar con el antivirus. Arreglado subiendo el límite a 8 s; después, 5/5.
+  - Los 51 e2e en verde. `brain_space`, `confluence` y `microphone` fallaron una vez con la PC cargada por OneDrive y,
+    repetidos solos, dieron 33/33, 16/16 y 37/37.
+- **Publicada:** 2.1.1 en `ultron-2.0` y `dev`.
+- **Sin commitear y no es de esta sesión:** `specs/mascota-escritorio/`, la spec de la mascota Vicchi. No se toca.
 
 ## Objetivo planificado
 1. **ULTRON 2.0** (spec `portar-desde-origen`, IN_DEVELOPMENT): las mejoras de la versión de origen 0.36.2 sobre Personal 1.1.0,
